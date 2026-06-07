@@ -1,0 +1,390 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FollowCat Plugin DevRT</title>
+<style>
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;font-size:13px;color:#1a1a1a;background:#0f1115;height:100vh;overflow:hidden;display:grid;grid-template-rows:48px 1fr 220px;color:#e6e8eb}
+  header{background:#161922;border-bottom:1px solid #232733;display:flex;align-items:center;padding:0 16px;gap:14px}
+  header .title{font-weight:600;font-size:14px;color:#e6e8eb}
+  header .pill{font-size:11px;padding:3px 8px;border-radius:10px;background:#232733;color:#aab2c0}
+  header .pill.ok{background:#0f3a1f;color:#7ee08c}
+  header .pill.bad{background:#3b1117;color:#ff8b95}
+  header .grow{flex:1}
+  header button{background:#2a3142;border:1px solid #3a4357;color:#dde2ec;padding:5px 10px;border-radius:5px;font-size:12px;cursor:pointer}
+  header button:hover{background:#36405a}
+
+  main{display:grid;grid-template-columns:340px 1fr;min-height:0}
+  .sidebar{border-right:1px solid #232733;background:#13161e;overflow:auto}
+  .sidebar section{padding:12px 14px;border-bottom:1px solid #1f2330}
+  .sidebar h3{font-size:11px;text-transform:uppercase;letter-spacing:0.6px;color:#8a93a6;margin-bottom:8px;font-weight:600}
+  .sidebar .row{display:flex;gap:6px;align-items:center;margin-bottom:6px}
+  .sidebar .row input,.sidebar textarea,.sidebar select{flex:1;background:#0f1218;border:1px solid #2c3344;color:#e6e8eb;padding:5px 8px;border-radius:4px;font-size:12px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+  .sidebar textarea{width:100%;min-height:80px;resize:vertical;display:block}
+  .sidebar button{background:#3a4257;border:1px solid #4a546b;color:#dde2ec;padding:4px 10px;border-radius:4px;font-size:12px;cursor:pointer;white-space:nowrap}
+  .sidebar button:hover{background:#475070}
+  .sidebar button.primary{background:#3656d6;border-color:#3656d6;color:#fff}
+  .sidebar button.primary:hover{background:#2945c0}
+  .sidebar .hookbtn{display:flex;align-items:center;gap:6px;font-family:ui-monospace,monospace;font-size:11px}
+  .sidebar .small{color:#7c8497;font-size:11px;margin-bottom:6px}
+  .sidebar .config-pair{display:grid;grid-template-columns:120px 1fr auto;gap:6px;margin-bottom:6px;align-items:center}
+
+  .stage{position:relative;background:#0f1115;display:flex;align-items:center;justify-content:center;padding:18px;overflow:auto}
+  .frame-wrap{background:#1a1d27;border:1px solid #232733;border-radius:8px;width:min(720px,100%);height:100%;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 4px 20px rgba(0,0,0,.4)}
+  .frame-wrap .frame-bar{padding:6px 12px;font-size:11px;color:#8a93a6;border-bottom:1px solid #232733;display:flex;justify-content:space-between;align-items:center}
+  .frame-wrap iframe{flex:1;border:0;width:100%;background:#fff}
+  .no-ui{color:#8a93a6;text-align:center;padding:30px;font-size:13px}
+
+  footer{background:#13161e;border-top:1px solid #232733;display:flex;flex-direction:column}
+  .log-bar{padding:6px 14px;font-size:11px;color:#8a93a6;border-bottom:1px solid #1f2330;display:flex;justify-content:space-between;align-items:center}
+  .log-bar button{background:transparent;border:1px solid #2c3344;color:#aab2c0;padding:2px 8px;border-radius:3px;font-size:11px;cursor:pointer}
+  #logs{flex:1;overflow:auto;padding:6px 14px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;line-height:1.6}
+  #logs .log{display:grid;grid-template-columns:64px 50px 1fr;gap:8px;padding:1px 0}
+  #logs .log .ts{color:#5f6679}
+  #logs .log .lv{font-weight:600}
+  #logs .log .lv.info{color:#7ed3ff}
+  #logs .log .lv.warn{color:#ffd070}
+  #logs .log .lv.error{color:#ff8b95}
+  #logs .log .msg{color:#dde2ec;white-space:pre-wrap;word-break:break-all}
+
+  .toast{position:fixed;top:60px;right:16px;background:#1f2330;border:1px solid #2c3344;color:#e6e8eb;padding:8px 14px;border-radius:6px;font-size:12px;box-shadow:0 4px 12px rgba(0,0,0,.4);z-index:10}
+  .toast.success{border-color:#2d5a3a}
+  .toast.error{border-color:#5a2d34}
+  .toast.warning{border-color:#5a4d2d}
+</style>
+</head>
+<body>
+
+<header>
+  <span class="title">🐱 FollowCat Plugin DevRT</span>
+  <span class="pill" id="plugin-name">…</span>
+  <span class="pill" id="plugin-version">v—</span>
+  <span class="pill" id="http-mode">—</span>
+  <span class="pill" id="status">loading</span>
+  <span class="grow"></span>
+  <button onclick="reloadFrame()">Reload UI</button>
+</header>
+
+<main>
+  <aside class="sidebar">
+
+    <section>
+      <h3>Hooks</h3>
+      <div class="small" id="hooks-summary">—</div>
+      <div id="hooks-list"></div>
+      <details style="margin-top:8px">
+        <summary style="cursor:pointer;font-size:11px;color:#8a93a6">编辑 payload</summary>
+        <select id="hook-select" style="margin-top:6px"></select>
+        <textarea id="hook-payload" style="margin-top:6px;font-size:11px"></textarea>
+        <button class="primary" style="margin-top:6px;width:100%" onclick="triggerCustom()">触发选中 hook</button>
+      </details>
+    </section>
+
+    <section>
+      <h3>Plugin APIs</h3>
+      <div class="small" id="apis-summary">—</div>
+      <div id="apis-list"></div>
+    </section>
+
+    <section>
+      <h3>Config (mock)</h3>
+      <div class="small">在管理页对应的 config.get/set 数据</div>
+      <div id="config-list"></div>
+      <div class="config-pair">
+        <input type="text" id="cfg-new-key" placeholder="key">
+        <input type="text" id="cfg-new-value" placeholder="value">
+        <button onclick="addConfig()">+</button>
+      </div>
+      <button class="primary" style="margin-top:6px;width:100%" onclick="saveConfig()">保存配置</button>
+    </section>
+
+  </aside>
+
+  <div class="stage">
+    <div class="frame-wrap" id="frame-wrap">
+      <div class="frame-bar">
+        <span>plugin UI / iframe sandbox</span>
+        <span id="frame-url">…</span>
+      </div>
+      <iframe id="plugin-iframe" sandbox="allow-scripts allow-forms" src="about:blank"></iframe>
+    </div>
+  </div>
+</main>
+
+<footer>
+  <div class="log-bar">
+    <span>Logs (live)</span>
+    <span><button onclick="clearLogs()">clear</button></span>
+  </div>
+  <div id="logs"></div>
+</footer>
+
+<script>
+'use strict';
+
+var state = null;
+
+function $(id) { return document.getElementById(id); }
+function esc(s) { return String(s).replace(/[&<>"']/g, function (c) { return ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]; }); }
+
+function toast(level, msg) {
+  var t = document.createElement('div');
+  t.className = 'toast ' + (level || 'info');
+  t.textContent = msg;
+  document.body.appendChild(t);
+  setTimeout(function () { t.remove(); }, 2500);
+}
+
+// ─── load state, render sidebars ───
+
+async function loadState() {
+  var res = await fetch('/api/state');
+  state = await res.json();
+  $('plugin-name').textContent = state.plugin_id || '(unknown)';
+  $('plugin-version').textContent = 'v' + (state.manifest && state.manifest.version || '—');
+  $('http-mode').textContent = state.allow_http ? 'http: real' : 'http: mock';
+  if (state.load_error) {
+    $('status').className = 'pill bad';
+    $('status').textContent = 'load error';
+    toast('error', 'Plugin load error: ' + state.load_error);
+  } else {
+    $('status').className = 'pill ok';
+    $('status').textContent = 'ready';
+  }
+  renderHooks();
+  renderApis();
+  renderConfig();
+  initFrame();
+}
+
+function renderHooks() {
+  var listed = state.hooks_registered || [];
+  $('hooks-summary').textContent = listed.length ? listed.length + ' registered' : '插件未注册任何 hook';
+  var html = listed.map(function (h) {
+    return '<div class="row"><button class="hookbtn" onclick="triggerHook(' + JSON.stringify(h) + ')">▶ ' + esc(h) + '</button></div>';
+  }).join('');
+  $('hooks-list').innerHTML = html;
+
+  var select = $('hook-select');
+  select.innerHTML = '<option value="">—</option>' + listed.map(function (h) {
+    return '<option value="' + esc(h) + '">' + esc(h) + '</option>';
+  }).join('');
+  select.onchange = function () {
+    var key = select.value;
+    var sample = (state.hook_samples || {})[key] || {};
+    $('hook-payload').value = JSON.stringify(sample, null, 2);
+  };
+}
+
+function renderApis() {
+  var listed = state.apis_registered || [];
+  $('apis-summary').textContent = listed.length ? listed.length + ' registered' : '插件未注册自定义 API';
+  $('apis-list').innerHTML = listed.map(function (p) {
+    return '<div class="row"><button onclick="callApi(' + JSON.stringify(p) + ')">GET ' + esc(p) + '</button></div>';
+  }).join('');
+}
+
+function renderConfig() {
+  var cfg = state.config || {};
+  var keys = Object.keys(cfg).sort();
+  $('config-list').innerHTML = keys.map(function (k) {
+    return '<div class="config-pair">' +
+      '<input type="text" value="' + esc(k) + '" data-cfg-key="' + esc(k) + '" disabled>' +
+      '<input type="text" value="' + esc(cfg[k]) + '" data-cfg-value="' + esc(k) + '">' +
+      '<button onclick="removeConfig(' + JSON.stringify(k) + ')">×</button>' +
+      '</div>';
+  }).join('');
+}
+
+// ─── actions ───
+
+async function triggerHook(hook) {
+  var sample = (state.hook_samples || {})[hook] || {};
+  await sendTrigger(hook, sample);
+}
+
+async function triggerCustom() {
+  var hook = $('hook-select').value;
+  if (!hook) { toast('warning', '先选择一个 hook'); return; }
+  var raw = $('hook-payload').value;
+  var data = {};
+  if (raw.trim()) {
+    try { data = JSON.parse(raw); }
+    catch (e) { toast('error', 'payload 不是合法 JSON'); return; }
+  }
+  await sendTrigger(hook, data);
+}
+
+async function sendTrigger(hook, data) {
+  try {
+    var res = await fetch('/api/trigger', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({hook: hook, data: data})
+    });
+    if (!res.ok) {
+      var t = await res.text(); toast('error', 'trigger 失败: ' + t); return;
+    }
+    toast('success', 'fired ' + hook);
+  } catch (e) {
+    toast('error', String(e));
+  }
+}
+
+async function callApi(p) {
+  try {
+    var res = await fetch('/api/call-api', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({path: p, req: {method: 'GET', body: '', query: {}}})
+    });
+    var data = await res.json();
+    if (!res.ok) { toast('error', 'API ' + p + ' 失败: ' + (data.detail || res.status)); return; }
+    toast('success', 'API ' + p + ' → ' + JSON.stringify(data.result).slice(0, 80));
+    pushLog({ts: Date.now()/1000, level: 'info', args: ['[api ' + p + ']', JSON.stringify(data.result)]});
+  } catch (e) { toast('error', String(e)); }
+}
+
+async function saveConfig() {
+  var entries = {};
+  document.querySelectorAll('input[data-cfg-value]').forEach(function (inp) {
+    entries[inp.getAttribute('data-cfg-value')] = inp.value;
+  });
+  try {
+    await fetch('/api/config', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({entries: entries})
+    });
+    toast('success', '已保存 ' + Object.keys(entries).length + ' 项');
+    state.config = entries;
+  } catch (e) { toast('error', String(e)); }
+}
+
+function addConfig() {
+  var k = $('cfg-new-key').value.trim();
+  var v = $('cfg-new-value').value;
+  if (!k) return;
+  state.config = state.config || {};
+  state.config[k] = v;
+  $('cfg-new-key').value = ''; $('cfg-new-value').value = '';
+  renderConfig();
+}
+
+function removeConfig(k) {
+  if (state.config) delete state.config[k];
+  renderConfig();
+}
+
+// ─── plugin iframe + postMessage bridge ───
+
+function initFrame() {
+  if (!state.ui_available) {
+    $('frame-wrap').innerHTML = '<div class="no-ui">该插件没有 ui/ 目录，无前端 UI。</div>';
+    return;
+  }
+  var iframe = $('plugin-iframe');
+  iframe.src = '/plugin-ui/index.html';
+  $('frame-url').textContent = '/plugin-ui/index.html';
+  iframe.onload = function () {
+    iframe.contentWindow.postMessage({
+      protocol: 'followcat.plugin.v1',
+      type: 'host.init',
+      payload: {
+        plugin_id: state.plugin_id,
+        permissions: state.manifest && state.manifest.permissions || [],
+        theme: 'light',
+      }
+    }, '*');
+  };
+}
+
+function reloadFrame() { initFrame(); }
+
+window.addEventListener('message', async function (ev) {
+  var msg = ev.data;
+  if (!msg || msg.protocol !== 'followcat.plugin.v1') return;
+  var iframe = $('plugin-iframe');
+  function reply(result, error) {
+    iframe.contentWindow.postMessage({
+      protocol: 'followcat.plugin.v1', id: msg.id,
+      result: result, error: error
+    }, '*');
+  }
+  try {
+    switch (msg.type) {
+      case 'plugin.api': {
+        var path = (msg.payload && msg.payload.path) || '';
+        var body = (msg.payload && msg.payload.body) || null;
+        var res = await fetch('/api/call-api', {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ path: path, req: { method: 'POST', body: JSON.stringify(body || {}), query: {} } })
+        });
+        var data = await res.json();
+        if (!res.ok) reply(null, data.detail || ('HTTP ' + res.status));
+        else reply(data.result);
+        break;
+      }
+      case 'plugin.config.get': {
+        var key = msg.payload && msg.payload.key;
+        var cfg = state.config || {};
+        reply(cfg[key] === undefined ? null : cfg[key]);
+        break;
+      }
+      case 'plugin.config.put': {
+        var p = msg.payload || {};
+        state.config = state.config || {};
+        state.config[p.key] = p.value;
+        await fetch('/api/config', {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ entries: state.config })
+        });
+        renderConfig();
+        reply(null);
+        break;
+      }
+      case 'plugin.notify':
+        toast(msg.payload && msg.payload.level, msg.payload && msg.payload.message);
+        reply(null);
+        break;
+      case 'plugin.resize':
+        // dev shell: keep iframe size flexible; ignore actual height for simplicity
+        reply(null);
+        break;
+      default:
+        reply(null, 'unknown type: ' + msg.type);
+    }
+  } catch (e) {
+    reply(null, String(e));
+  }
+});
+
+// ─── log stream ───
+
+function pushLog(entry) {
+  var el = $('logs');
+  var div = document.createElement('div');
+  div.className = 'log';
+  var ts = new Date(entry.ts * 1000).toTimeString().slice(0,8);
+  div.innerHTML = '<span class="ts">' + ts + '</span><span class="lv ' + esc(entry.level) + '">' + esc(entry.level) + '</span><span class="msg"></span>';
+  div.querySelector('.msg').textContent = (entry.args || []).join(' ');
+  el.appendChild(div);
+  el.scrollTop = el.scrollHeight;
+}
+
+function clearLogs() { $('logs').innerHTML = ''; }
+
+function startLogStream() {
+  var es = new EventSource('/api/logs/stream');
+  es.onmessage = function (ev) {
+    if (!ev.data) return;
+    try { pushLog(JSON.parse(ev.data)); } catch (e) {}
+  };
+  es.onerror = function () { setTimeout(startLogStream, 2000); };
+}
+
+// ─── boot ───
+
+loadState().then(startLogStream);
+</script>
+</body>
+</html>

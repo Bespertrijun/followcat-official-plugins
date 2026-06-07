@@ -1,0 +1,31 @@
+# OMC / Claude Code runtime state
+.omc/
+.claude/
+CLAUDE.md
+
+# Build artifacts (生成于 scripts/build.py)
+dist/
+
+# Signing keys (Ed25519，发布私钥到仓库等于注销签名)
+keys/
+
+# Plugin Dev Runtime 持久化的 mock config / 沙箱数据
+devrt/data/
+
+# Python build script byproducts
+__pycache__/
+*.pyc
+
+# Plugin release zips (临时打包产物，正式发布走 dist/ 与 GitHub Release)
+*.zip
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*~

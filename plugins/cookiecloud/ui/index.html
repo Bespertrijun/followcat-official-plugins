@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CookieCloud 插件设置</title>
+<script src="/plugin-sdk.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    font-size: 14px;
+    color: #1a1a1a;
+    background: #f8f9fa;
+    padding: 20px;
+    line-height: 1.5;
+  }
+
+  h2 { font-size: 16px; font-weight: 600; margin-bottom: 16px; color: #111; }
+  h3 { font-size: 13px; font-weight: 600; margin-bottom: 12px; color: #444; text-transform: uppercase; letter-spacing: 0.4px; }
+
+  .card {
+    background: #fff;
+    border: 1px solid #e5e7eb;
+    border-radius: 8px;
+    padding: 16px;
+    margin-bottom: 16px;
+  }
+
+  .field { margin-bottom: 12px; }
+  .field label { display: block; font-weight: 500; margin-bottom: 4px; color: #333; }
+  .field input[type="text"],
+  .field input[type="password"],
+  .field textarea {
+    width: 100%;
+    padding: 7px 10px;
+    border: 1px solid #d1d5db;
+    border-radius: 6px;
+    font-size: 13px;
+    outline: none;
+    transition: border-color 0.15s;
+    font-family: inherit;
+  }
+  .field textarea {
+    resize: vertical;
+    min-height: 80px;
+    font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  }
+  .field input:focus,
+  .field textarea:focus { border-color: #6366f1; box-shadow: 0 0 0 2px rgba(99,102,241,0.15); }
+  .field .hint { font-size: 12px; color: #6b7280; margin-top: 3px; }
+
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 7px 14px;
+    border-radius: 6px;
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    border: none;
+    transition: opacity 0.15s, background 0.15s;
+  }
+  .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .btn-primary { background: #6366f1; color: #fff; }
+  .btn-primary:hover:not(:disabled) { background: #4f46e5; }
+  .btn-secondary { background: #f3f4f6; color: #374151; border: 1px solid #d1d5db; }
+  .btn-secondary:hover:not(:disabled) { background: #e5e7eb; }
+
+  .actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 4px; }
+
+  .status-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 14px;
+    border-radius: 6px;
+    font-size: 13px;
+    margin-bottom: 16px;
+    min-height: 40px;
+  }
+  .status-bar.idle { display: none; }
+  .status-bar.info { background: #eff6ff; color: #1d4ed8; border: 1px solid #bfdbfe; }
+  .status-bar.success { background: #f0fdf4; color: #15803d; border: 1px solid #bbf7d0; }
+  .status-bar.error { background: #fef2f2; color: #b91c1c; border: 1px solid #fecaca; }
+
+  .stats-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+    gap: 10px;
+  }
+  .stat-cell { background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 6px; padding: 10px 12px; }
+  .stat-cell .label { font-size: 11px; color: #6b7280; margin-bottom: 2px; }
+  .stat-cell .value { font-size: 15px; font-weight: 700; color: #111; word-break: break-all; }
+  .stat-cell.warn .value { color: #b45309; }
+
+  .last-error {
+    font-size: 12px;
+    color: #b91c1c;
+    background: #fef2f2;
+    border: 1px solid #fecaca;
+    border-radius: 6px;
+    padding: 8px 10px;
+    margin-top: 10px;
+    word-break: break-all;
+  }
+
+  .divider { border: none; border-top: 1px solid #e5e7eb; margin: 14px 0; }
+
+  .warning-box {
+    background: #fffbeb;
+    border: 1px solid #fde68a;
+    color: #92400e;
+    border-radius: 6px;
+    padding: 8px 12px;
+    font-size: 12px;
+    margin-bottom: 14px;
+  }
+
+  @media (max-width: 480px) {
+    body { padding: 12px; }
+    .stats-grid { grid-template-columns: repeat(2, 1fr); }
+  }
+</style>
+</head>
+<body>
+
+<div id="status-bar" class="status-bar idle"></div>
+
+<h2>CookieCloud 同步设置</h2>
+
+<!-- Server 配置 -->
+<div class="card">
+  <h3>服务器连接</h3>
+
+  <div class="field">
+    <label for="host">CookieCloud Server 地址</label>
+    <input type="text" id="host" placeholder="https://cc.example.com">
+    <div class="hint">自托管 CookieCloud server 的根 URL，末尾不加斜杠</div>
+  </div>
+
+  <div class="field">
+    <label for="cloud-uuid">UUID <small style="color:#6b7280;font-weight:400">（加密存储）</small></label>
+    <input type="password" id="cloud-uuid" autocomplete="off">
+    <div class="hint">浏览器扩展里显示的用户 UUID</div>
+  </div>
+
+  <div class="field">
+    <label for="cloud-pwd">端到端密码 <small style="color:#6b7280;font-weight:400">（加密存储）</small></label>
+    <input type="password" id="cloud-pwd" autocomplete="off">
+    <div class="hint">CookieCloud 浏览器扩展里设置的加密密码</div>
+  </div>
+</div>
+
+<!-- 域名映射 -->
+<div class="card">
+  <h3>域名 → Site ID 映射</h3>
+  <div class="warning-box">
+    格式为 JSON 对象，key 为域名，value 为 FollowCat site_id。保存后下次同步生效。
+  </div>
+  <div class="field">
+    <label for="site-map">site_map（JSON）</label>
+    <textarea id="site-map" placeholder='{
+  "hhan.example.com": "hhan",
+  "u2.example.com": "ubits"
+}'></textarea>
+    <div class="hint">domain 必须与 CookieCloud 里的 cookie 域名完全匹配</div>
+  </div>
+</div>
+
+<!-- 操作按钮 -->
+<div class="actions" style="margin-bottom:16px">
+  <button class="btn btn-primary" id="btn-save" onclick="saveConfig()">保存配置</button>
+  <button class="btn btn-secondary" id="btn-sync" onclick="syncNow()">立即同步</button>
+  <button class="btn btn-secondary" id="btn-refresh" onclick="loadStatus()">刷新状态</button>
+</div>
+
+<!-- 状态卡片 -->
+<div class="card" id="status-card" style="display:none">
+  <h3>同步状态</h3>
+  <div class="stats-grid" id="stats-grid"></div>
+  <div id="last-error-box"></div>
+</div>
+
+<script>
+(function() {
+  var statusBar = document.getElementById('status-bar');
+
+  function showStatus(type, msg) {
+    statusBar.className = 'status-bar ' + type;
+    statusBar.textContent = msg;
+  }
+  function clearStatus() { statusBar.className = 'status-bar idle'; }
+
+  // ── SDK bootstrap ──────────────────────────────────────────────────────────
+
+  FC.ready().then(function() {
+    loadConfig();
+    loadStatus();
+  }).catch(function(e) {
+    showStatus('error', '宿主初始化失败：' + e.message);
+  });
+
+  // ── Config load ────────────────────────────────────────────────────────────
+
+  function loadConfig() {
+    var keys = ['host', 'cloud_uuid', 'cloud_pwd', 'site_map'];
+    var promises = keys.map(function(k) {
+      return FC.config.get(k).then(function(v) { return { k: k, v: v }; });
+    });
+    Promise.all(promises).then(function(results) {
+      var cfg = {};
+      results.forEach(function(r) { cfg[r.k] = r.v; });
+
+      document.getElementById('host').value = cfg['host'] || '';
+
+      // Secret fields: show placeholder if already set
+      var uuidSet = cfg['cloud_uuid'] !== null && cfg['cloud_uuid'] !== '';
+      document.getElementById('cloud-uuid').placeholder = uuidSet ? '（已设置，留空不修改）' : '请输入 UUID';
+
+      var pwdSet = cfg['cloud_pwd'] !== null && cfg['cloud_pwd'] !== '';
+      document.getElementById('cloud-pwd').placeholder = pwdSet ? '（已设置，留空不修改）' : '请输入密码';
+
+      document.getElementById('site-map').value = cfg['site_map'] || '';
+
+      FC.resize(document.body.scrollHeight + 20);
+    }).catch(function(e) {
+      showStatus('error', '读取配置失败：' + e.message);
+    });
+  }
+
+  // ── Save config ────────────────────────────────────────────────────────────
+
+  window.saveConfig = function() {
+    var btn = document.getElementById('btn-save');
+
+    // Validate site_map JSON before saving
+    var siteMapVal = document.getElementById('site-map').value.trim();
+    if (siteMapVal) {
+      try { JSON.parse(siteMapVal); }
+      catch (e) {
+        showStatus('error', 'site_map JSON 格式无效：' + e.message);
+        return;
+      }
+    }
+
+    btn.disabled = true;
+    showStatus('info', '保存中…');
+
+    var saves = [];
+
+    var host = document.getElementById('host').value.trim();
+    saves.push(FC.config.put('host', host, false));
+
+    if (siteMapVal) {
+      saves.push(FC.config.put('site_map', siteMapVal, false));
+    }
+
+    var uuid = document.getElementById('cloud-uuid').value.trim();
+    if (uuid) saves.push(FC.config.put('cloud_uuid', uuid, true));
+
+    var pwd = document.getElementById('cloud-pwd').value.trim();
+    if (pwd) saves.push(FC.config.put('cloud_pwd', pwd, true));
+
+    Promise.all(saves).then(function() {
+      btn.disabled = false;
+      showStatus('success', '配置已保存');
+      // Clear secret inputs after save
+      document.getElementById('cloud-uuid').value = '';
+      document.getElementById('cloud-pwd').value = '';
+      loadConfig();
+    }).catch(function(e) {
+      btn.disabled = false;
+      showStatus('error', '保存失败：' + e.message);
+    });
+  };
+
+  // ── Sync now ───────────────────────────────────────────────────────────────
+
+  window.syncNow = function() {
+    var btn = document.getElementById('btn-sync');
+    btn.disabled = true;
+    showStatus('info', '同步中，请稍候…');
+
+    FC.api('/sync', {}).then(function(res) {
+      btn.disabled = false;
+      if (res && res.ok) {
+        showStatus('success', '同步完成，写入 ' + (res.written || 0) + ' 个站点');
+        loadStatus();
+      } else {
+        var errMsg = (res && res.error) ? res.error : '未知错误';
+        showStatus('error', '同步失败：' + errMsg);
+        loadStatus();
+      }
+    }).catch(function(e) {
+      btn.disabled = false;
+      showStatus('error', '请求出错：' + e.message);
+    });
+  };
+
+  // ── Load status ────────────────────────────────────────────────────────────
+
+  window.loadStatus = function() {
+    FC.api('/status', null).then(function(data) {
+      if (!data) return;
+      renderStatus(data);
+      FC.resize(document.body.scrollHeight + 20);
+    }).catch(function() { /* status optional */ });
+  };
+
+  function renderStatus(data) {
+    var card = document.getElementById('status-card');
+    var grid = document.getElementById('stats-grid');
+    var errBox = document.getElementById('last-error-box');
+
+    card.style.display = '';
+    grid.innerHTML = '';
+    errBox.innerHTML = '';
+
+    var lastSynced = data.last_synced_at ? formatTime(data.last_synced_at) : '从未';
+    var configured = data.configured ? '已配置' : '未配置';
+    var configuredWarn = !data.configured;
+
+    var cells = [
+      { label: '配置状态', value: configured, warn: configuredWarn },
+      { label: '上次同步', value: lastSynced, warn: false },
+      { label: '累计同步次数', value: String(data.synced_count || 0), warn: false }
+    ];
+
+    cells.forEach(function(c) {
+      var div = document.createElement('div');
+      div.className = 'stat-cell' + (c.warn ? ' warn' : '');
+      div.innerHTML = '<div class="label">' + c.label + '</div><div class="value">' + escHtml(c.value) + '</div>';
+      grid.appendChild(div);
+    });
+
+    if (data.last_error) {
+      var errEl = document.createElement('div');
+      errEl.className = 'last-error';
+      errEl.textContent = '最近错误：' + data.last_error;
+      errBox.appendChild(errEl);
+    }
+  }
+
+  function formatTime(iso) {
+    if (!iso) return '从未';
+    try {
+      var d = new Date(iso);
+      return d.toLocaleString('zh-CN', { hour12: false });
+    } catch (e) {
+      return iso;
+    }
+  }
+
+  function escHtml(s) {
+    return String(s)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+})();
+</script>
+</body>
+</html>

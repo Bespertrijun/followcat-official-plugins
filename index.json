@@ -1,0 +1,54 @@
+{
+  "version": 1,
+  "updated_at": "2026-05-12T00:00:00Z",
+  "entries": [
+    {
+      "name": "dashboard-stats",
+      "version": "1.0.0",
+      "author": "FollowCat",
+      "description": "聚合追番大盘的快捷统计端点（headless，无 UI）",
+      "source_url": "https://plugins.followcat.io/dashboard-stats",
+      "homepage_url": "https://github.com/followcat/plugin-registry/tree/main/plugins/dashboard-stats",
+      "icon": "📊",
+      "zip_url": "https://github.com/followcat/plugin-registry/releases/download/dashboard-stats-1.0.0/dashboard-stats-1.0.0.zip",
+      "zip_size": 0,
+      "zip_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "permissions": ["api.anime.read", "api.task.read"],
+      "hooks": [],
+      "published_at": "2026-05-05T00:00:00Z"
+    },
+    {
+      "name": "blob-cache-demo",
+      "version": "0.1.0",
+      "author": "FollowCat",
+      "description": "演示 v3.4 data.* 加密 blob 存储 API：把番剧封面缓存到本地",
+      "source_url": "https://plugins.followcat.io/blob-cache-demo",
+      "homepage_url": "https://github.com/followcat/plugin-registry/tree/main/plugins/blob-cache-demo",
+      "icon": "🖼️",
+      "zip_url": "https://github.com/followcat/plugin-registry/releases/download/blob-cache-demo-0.1.0/blob-cache-demo-0.1.0.zip",
+      "zip_size": 0,
+      "zip_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "permissions": ["hook.task", "api.http", "api.anime.read"],
+      "hooks": ["on_task_completed"],
+      "published_at": "2026-05-06T00:00:00Z"
+    },
+    {
+      "name": "media-library-filter",
+      "version": "0.1.0",
+      "author": "FollowCat",
+      "description": "在主仓发出通知前查询 Emby / Plex 媒体库；命中即静默自定义 fan-out 通道（Telegram / 通用 webhook），库里没有再推送 —— 只看新货，不重复打扰",
+      "source_url": "https://plugins.followcat.io/media-library-filter",
+      "homepage_url": "https://github.com/followcat/plugin-registry/tree/main/plugins/media-library-filter",
+      "icon": "🎬",
+      "zip_url": "https://github.com/followcat/plugin-registry/releases/download/media-library-filter-0.1.0/media-library-filter-0.1.0.zip",
+      "zip_size": 0,
+      "zip_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "permissions": ["hook.notify", "api.http", "api.anime.read"],
+      "hooks": [
+        "on_notification_before_send",
+        "on_notification_after_send"
+      ],
+      "published_at": "2026-05-12T00:00:00Z"
+    }
+  ]
+}

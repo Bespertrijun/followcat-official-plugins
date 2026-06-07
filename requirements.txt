@@ -1,0 +1,10 @@
+# followcat-official-plugins — 开发与构建依赖
+#
+# 构建（scripts/build.py）：
+#   仅在启用 Ed25519 签名时需要 cryptography；
+#   未提供私钥（SIGNING_KEY env / keys/private.pem）时构建会跳过签名而不报错。
+cryptography>=41.0
+
+# Plugin Dev Runtime（devrt/server.py）：本地仿真宿主 + iframe 调试 shell
+fastapi>=0.110
+uvicorn[standard]>=0.27

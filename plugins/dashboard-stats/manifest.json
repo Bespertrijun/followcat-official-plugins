@@ -1,0 +1,9 @@
+{
+  "name": "dashboard-stats",
+  "version": "1.0.0",
+  "author": "FollowCat",
+  "description": "聚合追番大盘的快捷统计端点（headless，无 UI）",
+  "source_url": "https://plugins.followcat.io/dashboard-stats",
+  "permissions": ["api.anime.read", "api.task.read"],
+  "hooks": []
+}

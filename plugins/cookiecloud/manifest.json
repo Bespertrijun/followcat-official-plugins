@@ -1,0 +1,10 @@
+{
+  "name": "cookiecloud",
+  "version": "1.0.0",
+  "author": "FollowCat",
+  "description": "从 CookieCloud server 同步浏览器 cookies 到 PT 站凭据 (site_cookie_<id>)",
+  "source_url": "https://plugins.followcat.io/cookiecloud",
+  "draft": true,
+  "permissions": ["api.http", "ui.embed"],
+  "hooks": []
+}
