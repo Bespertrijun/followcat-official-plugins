@@ -52,6 +52,67 @@ my-plugin/
 
 ---
 
+## 同步否决 hook：`should_download`（需 `hook.download`）
+
+> ⚠️ 与上面 8 个 **fire-and-forget 通知 hook 不同**，`should_download` 是**同步、可否决**的 hook——宿主在每次 ruleflow 推送种子到 qBittorrent **之前**同步调用它，并**读取返回值**决定是否真的下载。典型用途：查询外部媒体库（Emby / Jellyfin / Plex），若该集已存在则拦下、不重复下载。
+
+### 注册与返回值契约
+
+```js
+plugin.on("should_download", function(p) {
+  // 返回 false → 不下载；其余一切（true / undefined / 非布尔 / 抛错 / 超时）→ 照常下载
+  if (libraryAlreadyHas(p)) return false;
+  return true;
+});
+```
+
+| 返回值 | 行为 |
+|--------|------|
+| 显式 `false` | **跳过**下载（种子记 `excluded`，不推进入库进度） |
+| `true` / `undefined` / 非布尔 / 抛错 / 超时 | **照常下载**（fail-open） |
+
+- **硬超时 3 秒**：插件没在 3s 内返回 → fail-open 放行（外部库不可达也不拖垮下载管线）。
+- **多插件 veto-wins**：任一插件返回 `false` 即跳过。
+- 失败策略（外部库挂了算"有"还是"没有"）由插件自行决定——宿主只认显式 `false`。
+
+### payload（`PreDownloadCheck`）
+
+字段命名见主仓 `internal/domain/plugin_hooks.go`（snake_case）。季 / 集号均为 **TMDB 原生每季编号**（与 Emby/Jellyfin 一致）。
+
+```js
+{
+  flow_id,                 // 命中的 ruleflow id（== ruleflow.list() 的 id），用来挂 per-flow 配置
+  media: {
+    tmdb_id, tmdb_type,    // "tv" | "movie"；Mikan 来源常缺 tmdb_id
+    imdb_id,
+    season, episode, episode_end,   // TMDB 原生编号；电影 episode=0；合集 episode_end>0
+    title, original_title, aka, year
+  },
+  tags: {                  // 标题提取的质量标签（ruleflow 已算，原样透传）
+    resolution, video_encode, audio_encode, dv, hdr, code_bits, format,
+    language, source, group, special_content, part_alias
+  },
+  ctx: {                   // 关联 / 日志 / 自定义，可全忽略
+    raw_title, subtitle, anime_id, task_id, link_subdir, directory,
+    source_site, category, size, torrent_url, is_movie, is_show
+  }
+}
+```
+
+### per-flow 满足判断（推荐模式）
+
+"库里算不算有这集"应**按当前 ruleflow 的意图**判断、而非全局——否则你若用两条 ruleflow 各下 1080p / 4K 到同一库，第二份会被第一份误判成"已有"。做法：
+
+1. 用 [`ruleflow.list()`](#ruleflow--规则流只读需-apiruleflow) 在插件配置 UI 列出所有 ruleflow；
+2. 让用户给每个 `flow_id` 挂一套满足标准（如"库内有 1080p 才算有"）；
+3. hook 触发时按 `p.flow_id` 取对应配置 + 用 `p.tags` / 查库做 like-for-like 比对。
+
+> 局限：分辨率 / 编码 / HDR / DV / 位深等"实体属性"可从 Emby `MediaStreams` / Plex `Media` 直接可靠读取；字幕组（`group`）/ 来源类型（`source`）可经库内**文件名尽力解析**比对（按 `[组名]` 标签与 WEB-DL / BluRay 等关键字提取），**不保证准确**——解析不出时应按"不符合"处理（fail-open 方向，宁多推不误杀）；`format` / `language` / `special_content` / `part_alias` 等维度依赖文件名，库内文件常缺该信息，解析不出同样按"不符合"处理。
+>
+> [`media-library-filter`](https://github.com/followcat/plugin-registry/tree/main/plugins/media-library-filter) 是该模式的参考实现：挂 `should_download`，按 per-flow 规格（12 维可选）逐副本比对，可靠档维度直接读实体属性，尽力档（group / source）经文件名解析，解析不出即放行。
+
+---
+
 ## 宿主 API 参考
 
 > 未声明对应权限时，对应全局对象为 `undefined`，插件可用 `typeof xxx === "object"` 自检。
@@ -203,6 +264,17 @@ var all = task.list() // PluginTaskView[]
 
 > **安全说明**：`task` facade 严格返回 `PluginTaskView` 投影，不会泄漏 `Server.Password`、`Server.SSHKey`、`Download.Password` 等加密字段（受 `internal/plugin/host_facade_test.go` 静态保护）。
 
+### `ruleflow` —— 规则流只读（需 `api.ruleflow`）
+
+```js
+var flows = ruleflow.list()
+// → [{ id, name }, ...]
+```
+
+- `id` == `should_download` payload 的 `flow_id` == 后端 `SiteConfig.FlowID`；插件按 `id` 存 per-flow 配置，UI 上展示 `name`。
+- 只读白名单投影，**仅 `{id, name}`**，不暴露节点结构 / 链接规则 / 任何凭据。
+- 典型配合 `should_download` 用：在配置 UI 枚举所有 ruleflow，逐条挂"满足判断"标准。
+
 ---
 
 ## 能干什么 / 不能干什么
@@ -243,51 +315,58 @@ var all = task.list() // PluginTaskView[]
 
 ### 前端 SDK（`/plugin-sdk.js`）
 
-宿主在 iframe 的 `<head>` 自动注入 `/plugin-sdk.js`，也可自行引入。该 SDK 通过 `postMessage` 与宿主通信，不使用 `fetch`/`XHR`（CSP `connect-src 'none'` 阻止直接请求）。
+宿主在 **`/plugin-sdk.js`**（站点根路径）提供 SDK，**不会自动注入**——你必须在 HTML 里自己 `<script src>` 引入。该 SDK 通过 `postMessage` 与宿主通信，**不用 `fetch`/`XHR`**（iframe 的 CSP 是 `connect-src 'none'`，任何直接网络请求都会被浏览器拦截）。
 
 ```html
 <script src="/plugin-sdk.js"></script>
 <script>
-  FC.ready().then(function(ctx) {
-    // ctx: { theme, permissions, plugin_id }
+  FC.ready().then(function (ctx) {
+    // ctx 仅含 { pluginId, slot }：
+    //   pluginId —— 当前插件 id（驼峰，注意不是 plugin_id）
+    //   slot     —— 当前槽位，目前恒为 "plugin.settings"
     console.log('init', ctx);
   });
 </script>
 ```
 
+> `/plugin-sdk.js` 是唯一可用**绝对路径**引用的资源（宿主在站点根提供）。你**自己打包**的 JS / CSS / 图片必须用**相对路径**（`./app.js`）——UI 实际从 `/api/plugins/<id>/ui/<token>/index.html` 加载，相对子资源会自动继承带鉴权的 `<token>` 路径段；写成 `/app.js` 会丢掉 token 直接 404。
+
 | 方法 | 返回 | 说明 |
 |------|------|------|
-| `FC.ready()` | `Promise<ctx>` | 等待宿主初始化，获取上下文 |
-| `FC.api(path, body)` | `Promise<any>` | 调用插件自身注册的 API（`plugin.registerAPI`），宿主代理并附加鉴权 |
+| `FC.ready()` | `Promise<ctx>` | 等待宿主初始化；`ctx = { pluginId, slot }`（当前**不提供** theme / permissions） |
+| `FC.api(path, body)` | `Promise<any>` | 调用插件自身注册的 API（`plugin.registerAPI`），宿主用 pluginToken 代理鉴权 |
 | `FC.config.get(key)` | `Promise<string\|null>` | 读取插件配置，透明解密 |
 | `FC.config.put(key, value, isSecret)` | `Promise<void>` | 写入插件配置；`isSecret=true` 仅控制回读脱敏（加密一直开） |
+| `FC.notify(level, msg)` | `Promise<void>` | 在宿主界面显示 Toast，`level` ∈ `"info"\|"success"\|"warning"\|"error"`（宿主把 `info`/`success` 当成功提示、其余按错误） |
+| `FC.resize(height)` | `Promise<void>` | 请求宿主调整 iframe 高度（像素，宿主 clamp 到 200–1500） |
 
-> **v3.4 注意**：iframe SDK 当前仅桥接 `FC.config.get/put`，**未桥接 `data.*` 与 `config.list`**。如果 iframe 需要读写 blob，请用 sandbox REST：
+> **iframe 桥就这 6 类消息**（`fc.init` / `api.call` / `config.get` / `config.put` / `host.notify` / `host.resize`）。`data.*` 加密 blob、`config.list`、`http.*`、`anime`/`task`/`ruleflow` 等**都不在 iframe 桥里**——它们只活在 `index.js` 的 goja 运行时。
+>
+> 而且 iframe 的 CSP 是 `connect-src 'none'`，连 `fetch`/`XHR` 都被禁，UI **不能**直接打 sandbox REST（`/api/plugins/<id>/sandbox/*`）。要在 UI 里读写 blob 或调上述能力，正确做法是在 `index.js` 里用 `plugin.registerAPI` 包一个端点，内部用 `data.*` / `http.*` 完成，UI 再通过 `FC.api` 调它：
 >
 > ```js
-> const ctx = await FC.ready();
-> // 写 blob
-> await fetch(`/api/plugins/${ctx.plugin_id}/sandbox/data/cover.jpg`, {
->   method: 'PUT',
->   headers: { 'Content-Type': 'application/octet-stream' },
->   body: arrayBuffer,
+> // index.js（goja 侧，data.* 可用）
+> plugin.registerAPI("/save-cover", function (req) {
+>   data.put("cover.jpg", encodeUtf8(req.body).buffer); // req.body 是原始字节 string
+>   return { ok: true };
 > });
-> // 读 blob
-> const buf = await (await fetch(`/api/plugins/${ctx.plugin_id}/sandbox/data/cover.jpg`)).arrayBuffer();
-> // 列表
-> const list = await (await fetch(`/api/plugins/${ctx.plugin_id}/sandbox/data`)).json();
-> // 删除
-> await fetch(`/api/plugins/${ctx.plugin_id}/sandbox/data/cover.jpg`, { method: 'DELETE' });
 > ```
-| `FC.notify(level, msg)` | `Promise<void>` | 在宿主界面显示 Toast，`level` ∈ `"info"\|"success"\|"warning"\|"error"` |
-| `FC.resize(height)` | `Promise<void>` | 请求宿主调整 iframe 高度（像素） |
+> ```html
+> <!-- ui/index.html（iframe 侧，只有 FC.* 可用） -->
+> <script>
+>   await FC.api("/save-cover", "...");
+> </script>
+> ```
+>
+> `FC.api` 的 body 会被 JSON 序列化进请求体，传二进制需自己先 base64。
 
 ### 安全模型
 
-- iframe 以 `sandbox="allow-scripts allow-forms"` 加载，无 `allow-same-origin`，无法访问宿主 DOM / Cookie
-- 所有宿主通信经由 `postMessage`；宿主校验 `origin` 并只处理来自该 iframe 的消息
-- 插件通过插件专属 `pluginToken` 访问 API，只能操作 `/api/plugins/<自己的 id>/*`，接触不到用户 JWT
-- 管理页为 admin-only；`ui.embed` 插件 UI 同样仅对 admin 可见
+- iframe 以 `sandbox="allow-scripts"` 加载（**无** `allow-same-origin`、**无** `allow-forms`），并带 `referrerpolicy="no-referrer"`；无法访问宿主 DOM / Cookie / localStorage。
+- 沙箱 iframe 的 origin 是不透明的 `'null'`，所以宿主**不靠 origin 鉴别**，而是按 **source window 引用**（`event.source === iframe.contentWindow`）确认消息确实来自该 iframe。插件侧无需关心，照常用 SDK 即可。
+- iframe 资源带严格 CSP：`default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'none'; font-src 'self' data:; frame-ancestors 'self'`。实操含义：**外部 CDN 的脚本 / 样式 / 字体都加载不了**（要么打包进 zip，要么内联）；图片可用 `data:` 与 `https:`；**所有网络请求（fetch / XHR / WebSocket / EventSource）被禁**，只能走 `FC.*`。
+- UI 资源经短时效 `pluginToken` 鉴权（路径段形式 `/api/plugins/<id>/ui/<token>/...`，宿主自动签发 / 续期，token 在访问日志里已脱敏）。插件只能操作 `/api/plugins/<自己的 id>/*`，接触不到用户 JWT。
+- 管理页为 admin-only；`ui.embed` 插件 UI 同样仅对 admin 可见。
 
 ### 示例
 
@@ -304,7 +383,7 @@ var all = task.list() // PluginTaskView[]
 ## MVP 限制（请知悉）
 
 - **iframe 为 admin-only**：`ui.embed` 插件 UI 只在管理员视图下可见，普通用户看不到设置标签。
-- **无可变 hook**：所有 v1 hook 都是只读通知（`on_*_done` / `on_*_failed`），无 `on_before_*`。
+- **仅一个可否决 hook**：`should_download` 是当前唯一的同步可否决 hook（读返回值、可拦下载）；其余 `on_*` 都是只读通知（fire-and-forget），无其它 `on_before_*`。
 - **无热重载**：插件代码改动需重新上传/启用；配置改动是热生效。
 - **单 hook 仅最后注册有效**：同一 plugin 内重复 `plugin.on("x", ...)` 后者覆盖前者。
 - **manifest 大小** ≤ 64 KiB，单文件 ≤ 5 MiB，zip 总解压 ≤ 20 MiB / ≤ 200 条目。
@@ -318,13 +397,14 @@ var all = task.list() // PluginTaskView[]
 
 | 权限 | 注入对象 |
 |------|---------|
-| `hook.download` | 允许订阅 `on_episode_found` / `on_download_done` / `on_download_failed` |
+| `hook.download` | 允许订阅 `on_episode_found` / `on_download_done` / `on_download_failed`，以及同步否决 hook `should_download` |
 | `hook.link`     | 允许订阅 `on_link_done` / `on_link_failed` |
 | `hook.task`     | 允许订阅 `on_task_completed` |
 | `hook.notify`   | 允许订阅 `on_notification_before_send` / `on_notification_after_send` |
 | `api.http`      | 注入全局 `http` |
 | `api.anime.read` | 注入全局 `anime` |
 | `api.task.read`  | 注入全局 `task` |
+| `api.ruleflow`   | 注入全局 `ruleflow`（`ruleflow.list()`） |
 | `ui.embed`       | 允许声明 `manifest.ui.entry`（iframe 内嵌前端 UI） |
 
 > `hook.rss` / `hook.route` / `api.*.write` / `api.douban.*` / `api.site.*` 在 plugin_guide.md 中规划但**未在 MVP 实现**，声明会导致 manifest 解析报错。

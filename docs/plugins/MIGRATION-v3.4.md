@@ -115,34 +115,33 @@ try {
 
 ---
 
-## iframe UI 用 data.*（重要）
+## iframe UI 怎么碰 data.*（重要）
 
-**当前 iframe SDK（`/plugin-sdk.js`）暂未桥接 `data.*` postMessage RPC。** 如果你的插件有 iframe UI 需要读写 blob，**用 sandbox REST**：
+**iframe SDK（`/plugin-sdk.js`）没有桥接 `data.*`**，而且 iframe 的 CSP 是 `connect-src 'none'`，`fetch`/`XHR` 会被浏览器直接拦掉——iframe **不能**用 sandbox REST 读写 blob。正确做法：在 `index.js` 里用 `plugin.registerAPI` 暴露端点，blob 操作在 goja 侧完成，UI 通过 `FC.api` 调用：
 
 ```js
-// iframe 内（plugin token 自动注入）
-const pluginId = (await FC.ready()).plugin_id;
-
-// 写
-await fetch(`/api/plugins/${pluginId}/sandbox/data/cover.jpg`, {
-  method: 'PUT',
-  headers: { 'Content-Type': 'application/octet-stream' },
-  body: arrayBuffer,
+// index.js（goja 侧，data.* 可用）
+plugin.registerAPI("/save-cover", function (req) {
+  data.put("cover.jpg", encodeUtf8(req.body).buffer); // req.body 是原始字节 string
+  return { ok: true };
 });
-
-// 读（二进制）
-const getRes = await fetch(`/api/plugins/${pluginId}/sandbox/data/cover.jpg`);
-const buf = await getRes.arrayBuffer();
-
-// 列表（JSON）
-const list = await (await fetch(`/api/plugins/${pluginId}/sandbox/data`)).json();
-// → {"data": [{"name":"cover.jpg","size":12345,"updated_at":"..."}]}
-
-// 删除
-await fetch(`/api/plugins/${pluginId}/sandbox/data/cover.jpg`, { method: 'DELETE' });
+plugin.registerAPI("/list-blobs", function () {
+  return { names: data.list() };
+});
 ```
 
-主仓后续迭代会把 `FC.data.*` 接到 plugin-sdk.js，届时 iframe 可像调 `FC.config.*` 一样调 `FC.data.*`。
+```html
+<!-- ui/index.html（iframe 侧，只有 FC.* 可用） -->
+<script src="/plugin-sdk.js"></script>
+<script>
+FC.ready().then(async function () {
+  await FC.api("/save-cover", "...");            // 写 blob
+  const { names } = await FC.api("/list-blobs"); // 列 blob name
+});
+</script>
+```
+
+> `FC.ready()` 的 ctx 只含 `{ pluginId, slot }`（驼峰，不是 `plugin_id`）；`FC.api` 的 body 会被 JSON 序列化进请求体，传二进制要先 base64。若主仓后续把 `FC.data.*` 接进 SDK，会更新本文；在那之前一律走上面的 `registerAPI` + `FC.api` 模式。
 
 ---
 

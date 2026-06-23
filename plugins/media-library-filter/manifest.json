@@ -1,12 +1,16 @@
 {
   "name": "media-library-filter",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": "FollowCat",
-  "description": "在主仓发出通知前查询 Emby / Plex 媒体库；命中则静默自定义 fan-out 通道（Telegram / 通用 webhook），库里没有再推送，避免重复打扰",
+  "description": "下载否决器：在 ruleflow 推种前查询 Emby / Plex，按 per-flow 规格（12 维可选）逐副本比对，库内任意副本全维度符合则否决，否则放行（fail-open）",
   "source_url": "https://plugins.followcat.io/media-library-filter",
-  "permissions": ["hook.notify", "api.http", "api.anime.read"],
-  "hooks": [
-    "on_notification_before_send",
-    "on_notification_after_send"
-  ]
+  "homepage_url": "https://github.com/followcat/plugin-registry/tree/main/plugins/media-library-filter",
+  "icon": "🎬",
+  "permissions": ["hook.download", "api.http", "api.ruleflow", "ui.embed"],
+  "hooks": ["should_download"],
+  "ui": {
+    "entry": "ui/index.html",
+    "slots": ["plugin.settings"],
+    "icon": "🎬"
+  }
 }

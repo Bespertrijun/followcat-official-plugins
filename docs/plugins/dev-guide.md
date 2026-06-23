@@ -88,8 +88,8 @@ qBit / linker --->|  EventBus 同步分 |       |
 
 ### `permissions` 与 `hooks` 必须**双校验**
 
-权限白名单见 sdk.md，hook 白名单是这 6 个：
-`on_episode_found`, `on_download_done`, `on_download_failed`, `on_link_done`, `on_link_failed`, `on_task_completed`。
+权限白名单见 sdk.md，完整 hook 白名单见 sdk.md「Hook 列表」。其中 `should_download` 是**同步否决 hook**（读返回值可拦下载，需 `hook.download`，详见 sdk.md「同步否决 hook」），其余 `on_*` 都是只读通知 hook：
+`on_episode_found`, `on_download_done`, `on_download_failed`, `on_link_done`, `on_link_failed`, `on_task_completed`, `on_notification_before_send`, `on_notification_after_send`。
 
 **关键点**：`plugin.on("on_link_done", fn)` 只有当 manifest 同时声明
 `"hooks": [..., "on_link_done", ...]` **且** `"permissions": [..., "hook.link", ...]`
@@ -97,7 +97,7 @@ qBit / linker --->|  EventBus 同步分 |       |
 
 | Hook | 需要的 permission |
 |------|------------------|
-| `on_episode_found`, `on_download_done`, `on_download_failed` | `hook.download` |
+| `on_episode_found`, `on_download_done`, `on_download_failed`, `should_download` | `hook.download` |
 | `on_link_done`, `on_link_failed` | `hook.link` |
 | `on_task_completed` | `hook.task` |
 
@@ -315,29 +315,35 @@ try {
 }
 ```
 
-### iframe UI 用 data.*
+### iframe UI 怎么碰 data.* blob
 
-**iframe SDK 当前未桥接 `FC.data.*`**。如果 UI iframe 需要读写 blob，用 sandbox REST：
+**iframe 桥不暴露 `data.*`**，且 iframe 的 CSP 是 `connect-src 'none'`——`fetch`/`XHR` 全被浏览器拦掉，UI **不能**直接打 sandbox REST。正确姿势：`index.js` 里用 `plugin.registerAPI` 包一层，blob 操作在 goja 侧做，UI 只通过 `FC.api` 调用。
+
+```js
+// index.js（goja 侧——data.* 在这里可用）
+plugin.registerAPI("/save-cover", function (req) {
+  // req.body 是原始字节 string，按需自行解析
+  data.put("cover.jpg", encodeUtf8(req.body).buffer);
+  return { ok: true };
+});
+
+plugin.registerAPI("/list-blobs", function () {
+  return { names: data.list() };
+});
+```
 
 ```html
+<!-- ui/index.html（iframe 侧——只有 FC.* 可用） -->
 <script src="/plugin-sdk.js"></script>
 <script>
-FC.ready().then(async function (ctx) {
-  // 上传文件
-  const file = document.querySelector('#file').files[0];
-  const buf = await file.arrayBuffer();
-  await fetch(`/api/plugins/${ctx.plugin_id}/sandbox/data/${file.name}`, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/octet-stream' },
-    body: buf,
-  });
-
-  // 列出 blob
-  const list = await (await fetch(`/api/plugins/${ctx.plugin_id}/sandbox/data`)).json();
-  // → {"data": [{"name":"x.jpg","size":12345,"updated_at":"..."}]}
+FC.ready().then(async function () {
+  await FC.api("/save-cover", "...");            // 触发上面的 /save-cover
+  const { names } = await FC.api("/list-blobs"); // 列出 blob name
 });
 </script>
 ```
+
+> `FC.api` 的 body 会被 JSON 序列化进请求体，传二进制要先 base64，别把 `Uint8Array`/`ArrayBuffer` 直接塞进去。
 
 ---
 
@@ -422,9 +428,9 @@ GET /api/plugins/<your-plugin-id>/api/stats
 - 暴露插件自己的统计/调试端点（前端 UI 需要数据时）
 - 给外部系统做 webhook 接收（譬如 GitHub release → 触发某个动作）
 
-**MVP 不能干**：
-- 渲染自己的 iframe UI（Phase B 才有 `ui.embed` 权限）
-- 在 web 端用浏览器直接 fetch（要走宿主鉴权）
+**配合 iframe UI**：
+- `registerAPI` 端点正是 iframe UI 的数据入口——声明 `ui.embed` 权限嵌入 UI 后，前端用 `FC.api("/path", body)` 调它（详见 sdk.md「Plugin UI（iframe 嵌入）」）。
+- 这些端点**不能**在浏览器里被直接 fetch（iframe CSP `connect-src 'none'` + 需走宿主 pluginToken 鉴权），一律经 `FC.api` 代理。
 
 ---
 

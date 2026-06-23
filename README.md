@@ -116,8 +116,8 @@ python scripts/build.py
 |------|------|------|
 | `dashboard-stats` | 1.0.0 | 仅暴露统计 API 端点（headless） |
 | `blob-cache-demo` | 0.1.0 | 演示 v3.4 `data.*` 加密 blob 存储 API（教学示例，要求 FollowCat ≥ v3.4） |
-| `media-library-filter` | 0.1.0 | 通过 `on_notification_before_send` hook 查 Emby/Plex 媒体库，库里有就不重复推送（要求 FollowCat ≥ v3.5） |
-| `cookiecloud` | 1.0.0 | ⚠️ **草稿（未发布）** —— 从 CookieCloud server 同步浏览器 cookies 到 PT 站凭据；依赖宿主尚未实现的 `ui.embed`，manifest 标 `"draft": true`，不进 `index.json`、不打包。待宿主支持 `ui.embed` 后删掉 draft 字段即可发布 |
+| `media-library-filter` | 0.2.0 | 下载否决器：在 `should_download` hook 里按 tmdb_id+季+集 查 Emby/Plex，库里已按所选 ruleflow 标准存在该集就否决下载（fail-open / 3s 超时；要求 FollowCat ≥ v3.5 且支持 `should_download` / `ruleflow.list` / `ui.embed`） |
+| `cookiecloud` | 1.0.0 | ⚠️ **草稿（未发布）** —— 从 CookieCloud server 同步浏览器 cookies 到 PT 站凭据；manifest 标 `"draft": true`，暂不进 `index.json`、不打包。其依赖的 `ui.embed` 已由主仓实现，技术阻塞已解除；走完发布流程（删 `draft` → 打 tag → CI 回填 `index.json`）即可上架 |
 
 > Slack / Telegram 通知业务自 FollowCat v3.5 起在主仓 `internal/notify` 内置；早期的 `notify` / `notify-telegram` / `notify-extension` 示例插件已从本仓删除（参考 git 历史）。
 
@@ -132,7 +132,7 @@ python scripts/build.py
 
 - [`SCHEMA.md`](./SCHEMA.md) — index.json schema 完整定义
 - [`docs/plugins/marketplace.md`](./docs/plugins/marketplace.md) — 用户向使用文档
-- [`docs/plugins/sdk.md`](./docs/plugins/sdk.md) — 插件作者 SDK 参考（含 v3.4 `data.*` / `config.list`）
+- [`docs/plugins/sdk.md`](./docs/plugins/sdk.md) — 插件作者 SDK 参考（含 v3.4 `data.*` / `config.list`，以及同步否决 hook `should_download` + `ruleflow.list`）
 - [`docs/plugins/dev-guide.md`](./docs/plugins/dev-guide.md) — 插件开发实战教程
 - [`docs/plugins/registry-schema.md`](./docs/plugins/registry-schema.md) — Registry schema 维护者参考
 - [`docs/plugins/MIGRATION-v3.4.md`](./docs/plugins/MIGRATION-v3.4.md) — **v3.4 升级指南**（新 `data.*` API、配额可调、UninstallStatus）
