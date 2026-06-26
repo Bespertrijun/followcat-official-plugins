@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>媒体库下载否决器设置</title>
+<title>媒体库同类去重器设置</title>
 <script src="/plugin-sdk.js"></script>
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -68,15 +68,6 @@
   .btn-primary:hover:not(:disabled) { background: #4f46e5; }
   .btn-secondary { background: #f3f4f6; color: #374151; border: 1px solid #d1d5db; }
   .btn-secondary:hover:not(:disabled) { background: #e5e7eb; }
-  .btn-link {
-    background: none;
-    border: none;
-    color: #6366f1;
-    font-size: 12px;
-    cursor: pointer;
-    padding: 2px 4px;
-    text-decoration: underline;
-  }
 
   .actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 4px; }
 
@@ -121,15 +112,6 @@
     font-size: 12px;
     margin-bottom: 14px;
   }
-  .danger-box {
-    background: #fff1f2;
-    border: 1px solid #fda4af;
-    color: #9f1239;
-    border-radius: 6px;
-    padding: 8px 12px;
-    font-size: 12px;
-    margin-bottom: 10px;
-  }
   .info-box {
     background: #f0f9ff;
     border: 1px solid #bae6fd;
@@ -139,20 +121,11 @@
     font-size: 12px;
     margin-bottom: 10px;
   }
-  .corrupt-box {
-    background: #fef2f2;
-    border: 1px solid #fecaca;
-    color: #b91c1c;
-    border-radius: 6px;
-    padding: 8px 12px;
-    font-size: 12px;
-    margin-bottom: 10px;
-  }
   .empty-box { font-size: 13px; color: #6b7280; padding: 8px 0; }
 
-  /* 规格编辑器 */
-  .spec-section { margin-top: 12px; }
-  .spec-tier-label {
+  /* 维度编辑器 */
+  .dims-section { margin-top: 12px; }
+  .dims-section-label {
     font-size: 11px;
     font-weight: 600;
     color: #6b7280;
@@ -162,36 +135,36 @@
     padding-bottom: 4px;
     border-bottom: 1px solid #e5e7eb;
   }
-  .spec-dim-row {
+
+  .dim-row {
     display: flex;
-    align-items: flex-start;
+    align-items: center;
     gap: 8px;
     margin-bottom: 8px;
-    min-height: 28px;
+    min-height: 32px;
+    flex-wrap: wrap;
   }
-  .spec-dim-row .dim-check {
+  .dim-row .dim-check {
     width: 15px;
     height: 15px;
-    margin-top: 3px;
     flex-shrink: 0;
     cursor: pointer;
   }
-  .spec-dim-row .dim-check:disabled { cursor: not-allowed; opacity: 0.45; }
-  .spec-dim-row .dim-label {
+  .dim-row .dim-label {
     font-size: 13px;
     color: #374151;
-    min-width: 90px;
-    padding-top: 2px;
+    min-width: 80px;
     cursor: pointer;
     user-select: none;
   }
-  .spec-dim-row .dim-label.disabled { opacity: 0.45; cursor: not-allowed; }
-  .spec-dim-row .dim-value {
+  .dim-row .dim-label.dimmed { opacity: 0.45; }
+  .dim-row .dim-controls {
+    display: flex;
+    align-items: center;
+    gap: 8px;
     flex: 1;
   }
-  .spec-dim-row .dim-value input[type="text"],
-  .spec-dim-row .dim-value select {
-    width: 100%;
+  .dim-row .dim-controls select {
     padding: 4px 8px;
     border: 1px solid #d1d5db;
     border-radius: 5px;
@@ -199,81 +172,34 @@
     font-family: inherit;
     background: #fff;
     outline: none;
+    min-width: 90px;
   }
-  .spec-dim-row .dim-value input:focus,
-  .spec-dim-row .dim-value select:focus { border-color: #6366f1; }
-  .spec-dim-row .dim-value input:disabled,
-  .spec-dim-row .dim-value select:disabled {
-    background: #f3f4f6;
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-  .dim-bool-toggle {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding-top: 2px;
-  }
-  .dim-bool-toggle input[type="checkbox"] {
-    width: 14px;
-    height: 14px;
-    cursor: pointer;
-  }
-  .dim-bool-toggle input:disabled { cursor: not-allowed; opacity: 0.5; }
-  .dim-bool-toggle label { font-size: 12px; color: #374151; cursor: pointer; }
-  .dim-bool-toggle label.disabled { opacity: 0.5; cursor: not-allowed; }
-
-  .spec-dim-row.dim-disabled .dim-label { opacity: 0.45; }
-  .spec-dim-row.dim-disabled .dim-value input,
-  .spec-dim-row.dim-disabled .dim-value select { opacity: 0.45; }
-
-  .dim-tier-hint {
-    font-size: 11px;
-    color: #9ca3af;
-    margin-left: 4px;
-  }
-
-  .risky-unlock-row {
-    display: flex;
-    align-items: flex-start;
-    gap: 6px;
-    margin: 4px 0 8px 0;
-    padding: 6px 8px;
-    background: #fff7ed;
-    border: 1px solid #fed7aa;
+  .dim-row .dim-controls select:focus { border-color: #6366f1; }
+  .dim-row .dim-controls input[type="text"] {
+    flex: 1;
+    padding: 4px 8px;
+    border: 1px solid #d1d5db;
     border-radius: 5px;
     font-size: 12px;
-    color: #92400e;
+    font-family: "SFMono-Regular", Consolas, monospace;
+    background: #fff;
+    outline: none;
+    min-width: 120px;
   }
-  .risky-unlock-row input[type="checkbox"] {
-    width: 14px;
-    height: 14px;
-    margin-top: 2px;
-    flex-shrink: 0;
-    cursor: pointer;
-  }
-
-  .spec-collapsed { display: none; }
-  .spec-collapsed.open { display: block; }
-
-  .collapse-toggle {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    font-size: 12px;
-    color: #6366f1;
-    cursor: pointer;
-    background: none;
-    border: none;
-    padding: 2px 0;
-    margin-top: 4px;
-    text-decoration: underline;
+  .dim-row .dim-controls input[type="text"]:focus { border-color: #6366f1; }
+  .dim-regex-hint {
+    font-size: 11px;
+    color: #9ca3af;
+    margin: -4px 0 6px 23px;
+    padding-left: 80px;
   }
 
   @media (max-width: 480px) {
     body { padding: 12px; }
-    .spec-dim-row { flex-wrap: wrap; }
-    .spec-dim-row .dim-label { min-width: 70px; }
+    .dim-row { flex-wrap: wrap; }
+    .dim-row .dim-label { min-width: 70px; }
+    .dim-row .dim-controls { min-width: 100%; margin-left: 23px; }
+    .dim-regex-hint { margin-left: 0; padding-left: 23px; }
   }
 </style>
 </head>
@@ -281,11 +207,11 @@
 
 <div id="status-bar" class="status-bar idle"></div>
 
-<h2>媒体库下载否决器</h2>
+<h2>媒体库同类去重器</h2>
 
 <div class="warning-box">
-  在 ruleflow 把种子推给 qBittorrent <strong>之前</strong>查 Emby / Plex：若该集已按所选规格存在则跳过下载。
-  任何异常 / 超时 / 缺 tmdb_id 一律放行（fail-open），不会误杀。
+  在 ruleflow 把种子推给 qBittorrent <strong>之前</strong>查 Emby / Plex：拿种子标题解析出的 tag 与库内副本逐维比对，
+  若库内任意副本在<strong>所有已勾维度</strong>上都匹配则跳过下载。双端 fail-open：tag 端或库端任一端拿不到值，该维度不匹配，放行。
 </div>
 
 <!-- 全局连接配置 -->
@@ -339,9 +265,11 @@
 
 <!-- per-flow 配置 -->
 <div class="card">
-  <h3>按 RuleFlow 配置否决规格</h3>
-  <div class="warning-box">
-    每条 ruleflow 单独配置：<strong>启用开关</strong>控制是否参与否决；<strong>勾选要收的规格维度</strong>并填写期望值——库内副本须在所有已勾维度上等于配置值才算「已有」，未勾选的维度不参与判定；若库内副本解析不出已配维度，按「不符合」处理（宁多推不误杀）。启用但不勾任何维度 = 库里有该集任意副本即否决。
+  <h3>按 RuleFlow 配置比对维度</h3>
+  <div class="info-box">
+    每条 ruleflow 单独配置：<strong>启用开关</strong>控制是否参与去重；<strong>勾选要比对的维度</strong>并选择操作符——
+    种子 tag 与库内副本须在所有已勾维度上都匹配才算「库里已有」并跳过下载。
+    未勾选的维度不参与判定。启用但不勾任何维度 = 不做去重（放行）。
   </div>
   <div id="flows-container">
     <div class="empty-box">加载 ruleflow 列表中…</div>
@@ -357,7 +285,18 @@
 <script>
 (function() {
   var statusBar = document.getElementById('status-bar');
-  var flowsState = []; // [{id, name, enabled, spec, specState}]
+
+  // 7 个维度的元数据
+  var DIM_META = {
+    resolution:   { label: '分辨率',   ops: ['==', '>='], opLabels: { '==': '等于', '>=': '大于等于' }, type: 'normal' },
+    video_encode: { label: '视频编码', ops: ['==', 'regex'], opLabels: { '==': '等于', 'regex': '正则' }, type: 'normal' },
+    audio_encode: { label: '音频编码', ops: ['==', 'regex'], opLabels: { '==': '等于', 'regex': '正则' }, type: 'normal' },
+    code_bits:    { label: '位深',     ops: ['==', '>='], opLabels: { '==': '等于', '>=': '大于等于' }, type: 'normal' },
+    hdr:          { label: 'HDR',      ops: ['=='], opLabels: { '==': '等于' }, type: 'bool' },
+    dv:           { label: '杜比视界', ops: ['=='], opLabels: { '==': '等于' }, type: 'bool' },
+    format:       { label: '封装格式', ops: ['==', 'regex'], opLabels: { '==': '等于', 'regex': '正则' }, type: 'normal' }
+  };
+  var DIM_ORDER = ['resolution', 'video_encode', 'audio_encode', 'code_bits', 'hdr', 'dv', 'format'];
 
   function showStatus(type, msg) {
     statusBar.className = 'status-bar ' + type;
@@ -431,7 +370,6 @@
         return;
       }
       var flows = res.flows || [];
-      flowsState = flows;
       if (flows.length === 0) {
         container.innerHTML = '<div class="empty-box">当前没有任何 ruleflow，请先在 FollowCat 里创建。</div>';
         resize();
@@ -447,55 +385,27 @@
     });
   }
 
-  // ── renderFlow：规格编辑器 ────────────────────────────────────────────────
-
-  /*
-   * specState 从 /flows 返回，取值：
-   *   "unset"        - 从未配置过 spec（键缺失）
-   *   "explicit_any" - 用户存了显式 {}（启用但不限规格 = 有副本即否决）
-   *   "corrupt"      - config 里的 JSON 已损坏（加载时按未配置处理，不拦截）
-   *   "normal"       - 正常 spec 对象
-   *
-   * spec 为解析后的对象（仅 specState="normal" 或 "explicit_any" 时有意义）。
-   *
-   * 维度分三档：
-   *   可靠档：resolution / hdr / dv / video_encode / audio_encode / code_bits
-   *   尽力档：group / source
-   *   几乎不可档：format / language / special_content / part_alias
-   */
+  // ── renderFlow：维度比对编辑器 ──────────────────────────────────────────────
 
   function renderFlow(f) {
     var fid = String(f.id);
-    var specState = f.specState || 'unset';
-    var spec = (specState === 'normal' && f.spec && typeof f.spec === 'object') ? f.spec : {};
+    var dims = (f.dims && typeof f.dims === 'object') ? f.dims : {};
 
     var div = document.createElement('div');
     div.className = 'flow-item';
     div.setAttribute('data-flow-id', fid);
 
     // ── 头部：flow 名称 + id ──
-    var headHtml =
-      '<div class="flow-head">' +
-        '<span class="flow-name">' + escHtml(f.name || ('flow ' + fid)) + '</span>' +
-        '<span class="flow-id">id: ' + escHtml(fid) + '</span>' +
-      '</div>';
-
-    div.innerHTML = headHtml;
-
-    // ── 损坏警告 ──
-    if (specState === 'corrupt') {
-      var corruptDiv = document.createElement('div');
-      corruptDiv.className = 'corrupt-box';
-      corruptDiv.textContent = '该 flow 配置已损坏，当前按未配置处理（不拦截），重新保存可修复。';
-      div.appendChild(corruptDiv);
-    }
+    var head = document.createElement('div');
+    head.className = 'flow-head';
+    head.innerHTML =
+      '<span class="flow-name">' + escHtml(f.name || ('flow ' + fid)) + '</span>' +
+      '<span class="flow-id">id: ' + escHtml(fid) + '</span>';
+    div.appendChild(head);
 
     // ── 启用开关 ──
-    var enabledVal = (specState === 'corrupt' || specState === 'unset') ? false : !!f.enabled;
-    // 对齐 N2：新 flow / 缺失 enabled → 未启用
-    if (f.enabled === undefined || f.enabled === null) { enabledVal = false; }
-    if (typeof f.enabled === 'boolean') { enabledVal = f.enabled; }
-    if (f.enabled === true || f.enabled === 1 || f.enabled === '1') { enabledVal = true; }
+    var enabledVal = false;
+    if (f.enabled === true || f.enabled === 1 || f.enabled === '1') enabledVal = true;
 
     var enableRow = document.createElement('div');
     enableRow.className = 'toggle-row';
@@ -508,335 +418,135 @@
     enableCb.checked = enabledVal;
     var enableLabel = document.createElement('label');
     enableLabel.setAttribute('for', enableCbId);
-    enableLabel.textContent = '启用本 flow 否决';
+    enableLabel.textContent = '启用本 flow 去重';
     enableRow.appendChild(enableCb);
     enableRow.appendChild(enableLabel);
     div.appendChild(enableRow);
 
-    // ── 规格编辑器区域 ──
-    var specSection = document.createElement('div');
-    specSection.className = 'spec-section';
+    // ── 维度编辑器区域 ──
+    var dimsSection = document.createElement('div');
+    dimsSection.className = 'dims-section';
 
-    // ── 可靠档 ──
-    var tier1Label = document.createElement('div');
-    tier1Label.className = 'spec-tier-label';
-    tier1Label.textContent = '可靠档（从媒体库元数据读取，准确）';
-    specSection.appendChild(tier1Label);
+    var sectionLabel = document.createElement('div');
+    sectionLabel.className = 'dims-section-label';
+    sectionLabel.textContent = '比对维度（勾选纳入比对，选择操作符）';
+    dimsSection.appendChild(sectionLabel);
 
-    // resolution
-    specSection.appendChild(buildSelectDimRow(fid, 'resolution', '分辨率', ['720p', '1080p', '2160p'], spec, false));
-    // hdr
-    specSection.appendChild(buildBoolDimRow(fid, 'hdr', 'HDR', spec, false));
-    // dv
-    specSection.appendChild(buildBoolDimRow(fid, 'dv', 'Dolby Vision', spec, false));
-    // video_encode
-    specSection.appendChild(buildTextDimRow(fid, 'video_encode', '视频编码', 'h265', spec, false));
-    // audio_encode
-    specSection.appendChild(buildTextDimRow(fid, 'audio_encode', '音频编码', 'flac', spec, false));
-    // code_bits
-    specSection.appendChild(buildTextDimRow(fid, 'code_bits', '色深', '10bit', spec, false));
-
-    // ── 尽力档 ──
-    var tier2Label = document.createElement('div');
-    tier2Label.className = 'spec-tier-label';
-    tier2Label.style.marginTop = '14px';
-    var tier2Hint = document.createElement('span');
-    tier2Hint.className = 'dim-tier-hint';
-    tier2Hint.textContent = '（按库内文件名解析，不保证准）';
-    tier2Label.textContent = '尽力档';
-    tier2Label.appendChild(tier2Hint);
-    specSection.appendChild(tier2Label);
-
-    // group
-    specSection.appendChild(buildTextDimRow(fid, 'group', '字幕组', '桜都', spec, false));
-    // source
-    specSection.appendChild(buildSelectDimRow(fid, 'source', '来源', ['WEB-DL', 'BluRay', 'BDRip', 'Remux', 'HDTV', 'WEB'], spec, false, true));
-
-    // ── 几乎不可档（折叠 + 二次确认解灰） ──
-    var tier3Label = document.createElement('div');
-    tier3Label.className = 'spec-tier-label';
-    tier3Label.style.marginTop = '14px';
-    var tier3Hint = document.createElement('span');
-    tier3Hint.className = 'dim-tier-hint';
-    tier3Hint.textContent = '（文件名常缺此信息，解析不出按不符合=该 flow 可能一直放行）';
-    tier3Label.textContent = '几乎不可档';
-    tier3Label.appendChild(tier3Hint);
-    specSection.appendChild(tier3Label);
-
-    // 检查是否有几乎不可档维度已配过值（已配则自动展开并解灰）
-    var riskyDims = ['format', 'language', 'special_content', 'part_alias'];
-    var hasRiskyConfigured = false;
-    for (var ri = 0; ri < riskyDims.length; ri++) {
-      if (spec.hasOwnProperty(riskyDims[ri])) { hasRiskyConfigured = true; break; }
+    for (var di = 0; di < DIM_ORDER.length; di++) {
+      var dimKey = DIM_ORDER[di];
+      var meta = DIM_META[dimKey];
+      var dimCfg = dims[dimKey] || null; // {op, pattern?} or null
+      var rowResult = buildDimRow(fid, dimKey, meta, dimCfg);
+      dimsSection.appendChild(rowResult.row);
+      if (rowResult.hint) {
+        dimsSection.appendChild(rowResult.hint);
+      }
     }
 
-    // 解灰确认框
-    var unlockRow = document.createElement('div');
-    unlockRow.className = 'risky-unlock-row';
-    var unlockCbId = 'risky-unlock-' + escHtml(fid);
-    var unlockCb = document.createElement('input');
-    unlockCb.type = 'checkbox';
-    unlockCb.id = unlockCbId;
-    unlockCb.className = 'risky-unlock-cb';
-    if (hasRiskyConfigured) { unlockCb.checked = true; }
-    var unlockLbl = document.createElement('label');
-    unlockLbl.setAttribute('for', unlockCbId);
-    unlockLbl.textContent = '我已了解风险：文件名常缺此信息，解析不出按「不符合」处理——勾选后该 flow 可能永远放行（重复下载）。确认要纳入再启用。';
-    unlockRow.appendChild(unlockCb);
-    unlockRow.appendChild(unlockLbl);
-    specSection.appendChild(unlockRow);
-
-    // 折叠容器
-    var collapsedDiv = document.createElement('div');
-    collapsedDiv.className = 'spec-collapsed' + (hasRiskyConfigured ? ' open' : '');
-
-    var riskyLocked = !hasRiskyConfigured; // 初始状态：未配过则锁定
-
-    collapsedDiv.appendChild(buildTextDimRow(fid, 'format', '格式', 'mkv', spec, riskyLocked));
-    collapsedDiv.appendChild(buildTextDimRow(fid, 'language', '语言', 'zh', spec, riskyLocked));
-    collapsedDiv.appendChild(buildTextDimRow(fid, 'special_content', '特殊内容', '', spec, riskyLocked));
-    collapsedDiv.appendChild(buildTextDimRow(fid, 'part_alias', '分集别名', '', spec, riskyLocked));
-
-    specSection.appendChild(collapsedDiv);
-
-    // 展开/收起按钮（仅当未自动展开时显示）
-    if (!hasRiskyConfigured) {
-      var collapseBtn = document.createElement('button');
-      collapseBtn.type = 'button';
-      collapseBtn.className = 'collapse-toggle';
-      collapseBtn.textContent = '展开几乎不可档维度';
-      collapseBtn.setAttribute('data-open', '0');
-      collapseBtn.onclick = function() {
-        var isOpen = collapseBtn.getAttribute('data-open') === '1';
-        if (isOpen) {
-          collapsedDiv.classList.remove('open');
-          collapseBtn.textContent = '展开几乎不可档维度';
-          collapseBtn.setAttribute('data-open', '0');
-        } else {
-          collapsedDiv.classList.add('open');
-          collapseBtn.textContent = '收起几乎不可档维度';
-          collapseBtn.setAttribute('data-open', '1');
-        }
-        resize();
-      };
-      specSection.appendChild(collapseBtn);
-    }
-
-    // 解灰/加锁联动
-    unlockCb.addEventListener('change', function() {
-      var unlock = unlockCb.checked;
-      setRiskyDimsLocked(collapsedDiv, !unlock);
-      resize();
-    });
-
-    div.appendChild(specSection);
-
-    // 勾选维度时同步 resize
-    var allChecks = div.querySelectorAll('.dim-check');
-    for (var ci = 0; ci < allChecks.length; ci++) {
-      allChecks[ci].addEventListener('change', function() { resize(); });
-    }
-
+    div.appendChild(dimsSection);
     return div;
   }
 
-  // 设置几乎不可档区域所有输入的锁定状态
-  function setRiskyDimsLocked(container, locked) {
-    var rows = container.querySelectorAll('.spec-dim-row');
-    for (var i = 0; i < rows.length; i++) {
-      var row = rows[i];
-      var cb = row.querySelector('.dim-check');
-      var inputs = row.querySelectorAll('input, select');
-      if (locked) {
-        row.classList.add('dim-disabled');
-        if (cb) { cb.disabled = true; cb.checked = false; }
-        for (var j = 0; j < inputs.length; j++) {
-          if (inputs[j] !== cb) { inputs[j].disabled = true; }
-        }
-      } else {
-        row.classList.remove('dim-disabled');
-        if (cb) { cb.disabled = false; }
-        // 值控件的 disabled 由 dim-check 状态控制
-        syncDimValueDisabled(row);
-      }
-    }
-  }
+  // ── 构建单个维度行 ──────────────────────────────────────────────────────────
 
-  // 根据 dim-check 是否勾选来 enable/disable 值输入控件
-  function syncDimValueDisabled(row) {
-    var cb = row.querySelector('.dim-check');
-    if (!cb || cb.disabled) return;
-    var valueInputs = row.querySelectorAll('.dim-value input, .dim-value select');
-    var boolToggles = row.querySelectorAll('.dim-bool-toggle input');
-    var checked = cb.checked;
-    for (var i = 0; i < valueInputs.length; i++) { valueInputs[i].disabled = !checked; }
-    for (var j = 0; j < boolToggles.length; j++) { boolToggles[j].disabled = !checked; }
-    // label 视觉
-    var lbl = row.querySelector('.dim-label');
-    if (lbl) {
-      if (checked) { lbl.classList.remove('disabled'); }
-      else { lbl.classList.add('disabled'); }
-    }
-  }
+  function buildDimRow(fid, dimKey, meta, dimCfg) {
+    var isChecked = !!dimCfg;
+    var currentOp = (dimCfg && dimCfg.op) ? dimCfg.op : meta.ops[0];
+    var currentPattern = (dimCfg && dimCfg.pattern) ? dimCfg.pattern : '';
 
-  // ── 维度行构建辅助函数 ──────────────────────────────────────────────────────
-
-  // 文本输入维度行
-  function buildTextDimRow(fid, dim, labelText, placeholder, spec, locked) {
-    var checked = spec.hasOwnProperty(dim);
-    var val = checked ? (spec[dim] || '') : '';
     var row = document.createElement('div');
-    row.className = 'spec-dim-row' + (locked ? ' dim-disabled' : '');
-    row.setAttribute('data-dim', dim);
+    row.className = 'dim-row';
+    row.setAttribute('data-dim', dimKey);
 
-    var cbId = 'dim-' + escHtml(fid) + '-' + dim;
+    // checkbox
+    var cbId = 'dim-' + escHtml(fid) + '-' + dimKey;
     var cb = document.createElement('input');
     cb.type = 'checkbox';
     cb.className = 'dim-check';
     cb.id = cbId;
-    cb.checked = checked;
-    cb.disabled = locked;
+    cb.checked = isChecked;
 
+    // label
     var lbl = document.createElement('label');
-    lbl.className = 'dim-label' + (locked ? ' disabled' : '');
+    lbl.className = 'dim-label' + (isChecked ? '' : ' dimmed');
     lbl.setAttribute('for', cbId);
-    lbl.textContent = labelText;
-
-    var valueDiv = document.createElement('div');
-    valueDiv.className = 'dim-value';
-    var inp = document.createElement('input');
-    inp.type = 'text';
-    inp.className = 'dim-text-input';
-    inp.placeholder = placeholder;
-    inp.value = val;
-    inp.disabled = !checked || locked;
-    valueDiv.appendChild(inp);
+    lbl.textContent = meta.label;
 
     row.appendChild(cb);
     row.appendChild(lbl);
-    row.appendChild(valueDiv);
 
-    cb.addEventListener('change', function() {
-      syncDimValueDisabled(row);
-      resize();
-    });
+    // controls container (operator dropdown + pattern input)
+    var controls = document.createElement('div');
+    controls.className = 'dim-controls';
+    controls.style.display = isChecked ? 'flex' : 'none';
 
-    return row;
-  }
-
-  // 下拉选择维度行（allowCustom=true 时同时有文本输入）
-  function buildSelectDimRow(fid, dim, labelText, options, spec, locked, allowCustom) {
-    var checked = spec.hasOwnProperty(dim);
-    var val = checked ? (spec[dim] || '') : '';
-    var row = document.createElement('div');
-    row.className = 'spec-dim-row' + (locked ? ' dim-disabled' : '');
-    row.setAttribute('data-dim', dim);
-
-    var cbId = 'dim-' + escHtml(fid) + '-' + dim;
-    var cb = document.createElement('input');
-    cb.type = 'checkbox';
-    cb.className = 'dim-check';
-    cb.id = cbId;
-    cb.checked = checked;
-    cb.disabled = locked;
-
-    var lbl = document.createElement('label');
-    lbl.className = 'dim-label' + (locked ? ' disabled' : '');
-    lbl.setAttribute('for', cbId);
-    lbl.textContent = labelText;
-
-    var valueDiv = document.createElement('div');
-    valueDiv.className = 'dim-value';
-
-    if (allowCustom) {
-      // 文本输入（source 等允许自由输入）
-      var inp = document.createElement('input');
-      inp.type = 'text';
-      inp.className = 'dim-text-input';
-      inp.placeholder = options.join(' / ');
-      inp.value = val;
-      inp.disabled = !checked || locked;
-      valueDiv.appendChild(inp);
-    } else {
-      var sel = document.createElement('select');
-      sel.className = 'dim-select-input';
-      sel.disabled = !checked || locked;
-      for (var oi = 0; oi < options.length; oi++) {
+    // operator dropdown (only if more than 1 operator)
+    var opSelect = null;
+    if (meta.ops.length > 1) {
+      opSelect = document.createElement('select');
+      opSelect.className = 'dim-op-select';
+      for (var oi = 0; oi < meta.ops.length; oi++) {
         var opt = document.createElement('option');
-        opt.value = options[oi];
-        opt.textContent = options[oi];
-        sel.appendChild(opt);
+        opt.value = meta.ops[oi];
+        opt.textContent = meta.opLabels[meta.ops[oi]];
+        opSelect.appendChild(opt);
       }
-      if (val && val !== '') { sel.value = val; }
-      valueDiv.appendChild(sel);
+      opSelect.value = currentOp;
+      controls.appendChild(opSelect);
     }
 
-    row.appendChild(cb);
-    row.appendChild(lbl);
-    row.appendChild(valueDiv);
+    // pattern input (for regex op)
+    var patternInput = null;
+    if (meta.type !== 'bool') {
+      patternInput = document.createElement('input');
+      patternInput.type = 'text';
+      patternInput.className = 'dim-pattern-input';
+      patternInput.placeholder = dimKey === 'video_encode' ? 'hevc|h265|x265' :
+                                 dimKey === 'audio_encode' ? 'flac|truehd' :
+                                 dimKey === 'format' ? 'mkv|mp4' : '';
+      patternInput.value = currentPattern;
+      patternInput.style.display = (currentOp === 'regex') ? 'block' : 'none';
+      controls.appendChild(patternInput);
+    }
 
+    row.appendChild(controls);
+
+    // regex hint element (shown below the row when regex is active)
+    var hintEl = null;
+    if (meta.type !== 'bool' && meta.ops.indexOf('regex') >= 0) {
+      hintEl = document.createElement('div');
+      hintEl.className = 'dim-regex-hint';
+      hintEl.textContent = '填写正则表达式，tag 和库端都匹配即算同类（如 hevc|h265|x265）';
+      hintEl.style.display = (isChecked && currentOp === 'regex') ? 'block' : 'none';
+    }
+
+    // ── event: operator change ──
+    if (opSelect) {
+      opSelect.addEventListener('change', function() {
+        var isRegex = opSelect.value === 'regex';
+        if (patternInput) {
+          patternInput.style.display = isRegex ? 'block' : 'none';
+        }
+        if (hintEl) {
+          hintEl.style.display = isRegex ? 'block' : 'none';
+        }
+        resize();
+      });
+    }
+
+    // ── event: checkbox toggle ──
     cb.addEventListener('change', function() {
-      syncDimValueDisabled(row);
+      var checked = cb.checked;
+      lbl.className = 'dim-label' + (checked ? '' : ' dimmed');
+      controls.style.display = checked ? 'flex' : 'none';
+      if (hintEl) {
+        var showHint = checked && opSelect && opSelect.value === 'regex';
+        hintEl.style.display = showHint ? 'block' : 'none';
+      }
       resize();
     });
 
-    return row;
-  }
-
-  // 布尔开关维度行（hdr / dv）
-  function buildBoolDimRow(fid, dim, labelText, spec, locked) {
-    var checked = spec.hasOwnProperty(dim);
-    var val = checked ? !!spec[dim] : false;
-    var row = document.createElement('div');
-    row.className = 'spec-dim-row' + (locked ? ' dim-disabled' : '');
-    row.setAttribute('data-dim', dim);
-
-    var cbId = 'dim-' + escHtml(fid) + '-' + dim;
-    var cb = document.createElement('input');
-    cb.type = 'checkbox';
-    cb.className = 'dim-check';
-    cb.id = cbId;
-    cb.checked = checked;
-    cb.disabled = locked;
-
-    var lbl = document.createElement('label');
-    lbl.className = 'dim-label' + (locked ? ' disabled' : '');
-    lbl.setAttribute('for', cbId);
-    lbl.textContent = labelText;
-
-    var valueDiv = document.createElement('div');
-    valueDiv.className = 'dim-value';
-
-    var boolToggleDiv = document.createElement('div');
-    boolToggleDiv.className = 'dim-bool-toggle';
-    var boolCbId = 'dimval-' + escHtml(fid) + '-' + dim;
-    var boolCb = document.createElement('input');
-    boolCb.type = 'checkbox';
-    boolCb.className = 'dim-bool-val';
-    boolCb.id = boolCbId;
-    boolCb.checked = val;
-    boolCb.disabled = !checked || locked;
-    var boolLbl = document.createElement('label');
-    boolLbl.setAttribute('for', boolCbId);
-    boolLbl.className = (!checked || locked) ? 'disabled' : '';
-    boolLbl.textContent = '要求 ' + labelText;
-    boolToggleDiv.appendChild(boolCb);
-    boolToggleDiv.appendChild(boolLbl);
-    valueDiv.appendChild(boolToggleDiv);
-
-    row.appendChild(cb);
-    row.appendChild(lbl);
-    row.appendChild(valueDiv);
-
-    cb.addEventListener('change', function() {
-      syncDimValueDisabled(row);
-      // 同步 boolLbl
-      var nowChecked = cb.checked;
-      boolLbl.className = nowChecked ? '' : 'disabled';
-      resize();
-    });
-
-    return row;
+    return { row: row, hint: hintEl };
   }
 
   // ── 保存 ───────────────────────────────────────────────────────────────────
@@ -862,7 +572,7 @@
     var plexToken = document.getElementById('plex-token').value.trim();
     if (plexToken) { payload.plex_token = plexToken; }
 
-    // per-flow 配置：收集每条 flow 的 enabled + spec
+    // per-flow 配置：收集每条 flow 的 enabled + dims
     var items = document.querySelectorAll('.flow-item');
     for (var i = 0; i < items.length; i++) {
       var item = items[i];
@@ -870,39 +580,45 @@
       var enabledCb = item.querySelector('.flow-enabled-cb');
       payload['flow_' + fid + '_enabled'] = (enabledCb && enabledCb.checked) ? '1' : '0';
 
-      // 收集已勾选的维度值
-      var specObj = {};
-      var dimRows = item.querySelectorAll('.spec-dim-row');
+      // 收集已勾选的维度配置
+      var dimsObj = {};
+      var dimRows = item.querySelectorAll('.dim-row');
       for (var j = 0; j < dimRows.length; j++) {
         var row = dimRows[j];
-        var dim = row.getAttribute('data-dim');
+        var dimKey = row.getAttribute('data-dim');
         var dimCb = row.querySelector('.dim-check');
-        if (!dimCb || !dimCb.checked) { continue; } // 未勾选，不纳入 spec
+        if (!dimCb || !dimCb.checked) continue; // 未勾选，不纳入
 
-        // 布尔类型维度（hdr / dv）
-        var boolVal = row.querySelector('.dim-bool-val');
-        if (boolVal) {
-          specObj[dim] = boolVal.checked;
+        var meta = DIM_META[dimKey];
+        if (!meta) continue;
+
+        // 布尔维度（hdr / dv）：勾选即纳入比对，op 固定 ==
+        if (meta.type === 'bool') {
+          dimsObj[dimKey] = { op: '==' };
           continue;
         }
 
-        // 下拉或文本输入
-        var selInput = row.querySelector('.dim-select-input');
-        var txtInput = row.querySelector('.dim-text-input');
-        var rawVal = '';
-        if (selInput) {
-          rawVal = selInput.value.trim();
-        } else if (txtInput) {
-          rawVal = txtInput.value.trim();
+        // 普通维度：读取操作符
+        var opSelect = row.querySelector('.dim-op-select');
+        var op = opSelect ? opSelect.value : meta.ops[0];
+
+        var entry = { op: op };
+
+        // regex 操作符：读取 pattern
+        if (op === 'regex') {
+          var patternInput = row.querySelector('.dim-pattern-input');
+          var pattern = patternInput ? patternInput.value.trim() : '';
+          if (pattern === '') {
+            // regex 但没填 pattern → 跳过该维度（避免无效配置）
+            continue;
+          }
+          entry.pattern = pattern;
         }
-        if (rawVal !== '') {
-          specObj[dim] = rawVal;
-        }
-        // 勾了但没填值的维度，不写入（避免脏数据）
+
+        dimsObj[dimKey] = entry;
       }
 
-      // 序列化：未勾任何维度 → "{}"（显式 any）
-      payload['flow_' + fid + '_spec'] = JSON.stringify(specObj);
+      payload['flow_' + fid + '_dims'] = JSON.stringify(dimsObj);
     }
 
     FC.api('/save-config', payload).then(function(res) {
@@ -914,10 +630,8 @@
         document.getElementById('plex-token').value = '';
         reloadAll();
       } else {
-        // 6.3：返回 ok:false 时用中文提示，不静默装成功
         var errMsg = (res && res.error) ? res.error : '未知错误';
         showStatus('error', '保存失败：' + errMsg);
-        btn.disabled = false;
       }
     }).catch(function(e) {
       btn.disabled = false;

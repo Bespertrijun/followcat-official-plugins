@@ -93,7 +93,10 @@ plugin.on("should_download", function(p) {
     language, source, group, special_content, part_alias
   },
   ctx: {                   // 关联 / 日志 / 自定义，可全忽略
-    raw_title, subtitle, anime_id, task_id, link_subdir, directory,
+    raw_title, subtitle,
+    description,           // RSS 种子描述原文；可规则化的片段已进 tags，这里是未结构化正文，供插件自行解析
+    tag,                  // 站点标签（free / 官种 / 中字 / 促销 等），这条种子的属性标记
+    anime_id, task_id, link_subdir, directory,
     source_site, category, size, torrent_url, is_movie, is_show
   }
 }

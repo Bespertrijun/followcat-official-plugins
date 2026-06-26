@@ -1,8 +1,8 @@
 {
   "name": "media-library-filter",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "author": "FollowCat",
-  "description": "下载否决器：在 ruleflow 推种前查询 Emby / Plex，按 per-flow 规格（12 维可选）逐副本比对，库内任意副本全维度符合则否决，否则放行（fail-open）",
+  "description": "下载去重器：在 ruleflow 推种前拿种子 tags 与 Emby / Plex 库内副本按用户选定的维度+操作符逐副本比对，库内已有同规格副本则跳过下载（fail-open）",
   "source_url": "https://plugins.followcat.io/media-library-filter",
   "homepage_url": "https://github.com/followcat/plugin-registry/tree/main/plugins/media-library-filter",
   "icon": "🎬",

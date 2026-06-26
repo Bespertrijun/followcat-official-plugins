@@ -1,88 +1,51 @@
-// media-library-filter —— 下载否决器（should_download）
+// media-library-filter — like-for-like 下载去重器（should_download）
 //
-// 自 FollowCat 主仓新增同步否决 hook `should_download` 起，本插件在 ruleflow 把种子
-// 推给 qBittorrent **之前**同步查询 Emby / Plex 媒体库：若该集已按**用户为该 ruleflow
-// 配置的规格**存在（库内任意一份副本在所有已配维度上都符合规格），则 `return false`
-// 跳过下载（种子记 excluded），否则放行。
+// 在 ruleflow 把种子推给 qBittorrent 之前同步查询 Emby / Plex 媒体库：
+// 拿种子自身的 p.tags（分辨率/编码等）与库内副本属性逐维比对，
+// 若库内任意一份副本在**用户为该 flow 勾选的全部维度**上都匹配，
+// 则 return false 跳过下载（去重），否则放行。
 //
-// 关键语义（「等于配置规格才算有」，非「门槛 ≥」）：
-//   * 规格维度跟随 hook `p.tags` 全集（12 维，见下），每维可配可不配；未配维度不参与判定。
-//   * like-for-like 等值比对：副本在该维度的观测值 == 规格声明值；分辨率按**档位相等**比
-//     （1080p 档 = 1080p 档），不是 ≥。库里 4K 不挡收 1080p 的 flow（两条 flow 互不干扰）。
-//   * 逐副本评估：同一集库内可有多份副本，**任意一份全维度符合**即算「有」→ return false。
-//   * 已配维度在副本上观测/解析不出 → 该副本该维度判不符合 → 不算有 → 照常推（宁多推不误杀）。
-//   * 只有"确认库里已按该 flow 规格存在该集"才 return false；
-//     true / undefined / 非布尔 / 抛错 / 超时 一律 fail-open（照常下载）。
-//   * 硬超时 3s：库查询整体预算 ≤2500ms，逼近预算即放行；外部库宕机不拖垮下载管线。
-//   * tmdb_id 缺失（Mikan 源常见）→ 无法精确查库 → 放行（不做标题近似兜底，避免误杀）。
+// 核心语义（v3 like-for-like）：
+//   * 比对的值来自 p.tags（种子标题解析），不是用户手填的 spec。
+//   * 用户只配「比哪些维度」+「每个维度用什么操作符」（==、>=、regex）。
+//   * 双端 fail-open：tag 端或库端任一端拿不到值 → 该维度不匹配 → 放行。
+//   * 已配维度全部匹配才算「库里有」→ return false；其余一切 → return true。
+//   * 硬超时 3s；库查询整体预算 ≤2500ms；外部库宕机不拖垮下载管线。
+//   * tmdb_id 缺失 → 无法精确查库 → 放行。
 //
-// === spec 三态（fail-open 不可侵犯）===
-//   * 显式 any（flow_<id>_spec === "{}"）：用户故意不勾任何维度 → 库里有任意副本即否决。
-//   * 未配置（flow_<id>_spec 键缺失）/ 损坏（JSON 解析失败）→ 视为未配置 → 一律放行，绝不 veto。
-//   * 正常（含 ≥1 白名单维度的合法 JSON）→ 走逐副本逐维比对。
+// === 7 个比对维度 ===
+//   resolution(==/>=)  video_encode(==/regex)  audio_encode(==/regex)
+//   code_bits(==/>=)   hdr(==)  dv(==)  format(==/regex)
 //
-// === 维度观测方式分三档（解析不出一律按「不符合」处理）===
-//   * 可靠（实体属性，Emby MediaStreams / Plex Media）：resolution / hdr / dv /
-//     video_encode(Codec) / audio_encode / code_bits(BitDepth)。
-//   * 尽力（库内文件名 / Path 解析）：group（[组名] 标签）、source（WEB-DL/BluRay 等关键字）。
-//   * 几乎不可（文件名时有时无）：format / language / special_content / part_alias。
+// === 全局配置 key ===
+//   emby_enabled / emby_url / emby_api_key
+//   plex_enabled / plex_url / plex_token
+//   cache_ttl_sec / dry_run
 //
-// === 全局配置 key（管理页 → 插件 → 设置） ===
-//
-//   emby_enabled   "1" 启用 Emby 检查
-//   emby_url       Emby 根 URL（不带尾斜杠），例：http://192.168.1.10:8096
-//   emby_api_key   Emby API Key（建议 is_secret=true，需可读 Path 字段）
-//
-//   plex_enabled   "1" 启用 Plex 检查
-//   plex_url       Plex 根 URL，例：http://192.168.1.10:32400
-//   plex_token     X-Plex-Token（建议 is_secret=true）
-//
-//   cache_ttl_sec  库查询结果缓存 TTL，默认 3600 秒（1 小时）
-//   dry_run        "1" 仅日志记录决策、永远 return true（不真正否决）
-//
-// === per-flow 配置 key（flow_id 来自 ruleflow.list()） ===
-//
-//   flow_<id>_enabled   "1" 启用本 flow 否决（缺失/非 "1" → 永远推，不干预）
-//   flow_<id>_spec      规格 JSON，仅含已勾选的白名单维度键，例：
-//                       {"resolution":"1080p","group":"桜都"}
-//                       "{}" = 显式 any（库里有任意副本即否决）；键缺失/损坏 = 放行
-//
-// === 自定义 API ===
-//
-//   GET  /api/plugins/<id>/api/flows        ruleflow.list() + 每条 {enabled, spec, specState}
-//   GET  /api/plugins/<id>/api/stats        配置摘要 + 计数器 + last_error
-//   GET  /api/plugins/<id>/api/check        真实查库 trace（?tmdb_id=&season=&episode=[&tmdb_type=&flow_id=]）
-//   POST /api/plugins/<id>/api/check        mock 注入：body {mock_copies, spec} 或 {flow_id} → would_decision + 逐维 trace（绕过真实查库）
-//   POST /api/plugins/<id>/api/save-config  批量保存配置（全局键 + 动态 flow_* 键白名单 + spec 写入边界校验）
-//   POST /api/plugins/<id>/api/test-emby    探测 Emby 连通性
-//   POST /api/plugins/<id>/api/test-plex    探测 Plex 连通性
-//
-// === 设计要点 ===
-//
-//   1. should_download 全程 try/catch；任何异常/超时/不确定/spec 损坏或未配 → 不返回 false（fail-open）
-//   2. 每个 http.* 都 try/catch + 软预算检查；外部库不可达即放行
-//   3. 缓存 key 带集号（tmdb_id+季+集），缓存值只存「副本事实列表」不存结论，命中后现场比对
-//   4. 维度按三档观测：实体属性可靠比对，group/source 经文件名「尽力」解析，几乎不可档解析不出按不符合
+// === per-flow 配置 key ===
+//   flow_<id>_enabled   "1" 启用本 flow 否决
+//   flow_<id>_dims      维度+操作符 JSON，例：
+//                       {"resolution":{"op":">="},"video_encode":{"op":"regex","pattern":"hevc|h265|x265"}}
+//                       键缺失/损坏 → 放行；空 {} → 放行（无维度可比）
 
 // ====== 常量与工具 ======
 
 var CACHE_PREFIX = "lib_cache_";
 var DEFAULT_CACHE_TTL_SEC = 3600;
-
-// should_download 硬超时 3s；库查询整体预算 ≤2500ms，留 ~500ms 裕量
 var LIB_CHECK_SOFT_BUDGET_MS = 2500;
 
-// 规格维度全集（对齐 hook p.tags / sdk.md:91-94），用于 sanitizeSpec 白名单与写入边界校验
-var SPEC_DIMS = [
-    "resolution", "video_encode", "audio_encode", "code_bits", "hdr", "dv",
-    "format", "language", "source", "group", "special_content", "part_alias"
-];
+var MATCH_DIMS = ["resolution", "video_encode", "audio_encode", "code_bits", "hdr", "dv", "format"];
 
-// spec JSON 解析哨兵：用于区分「显式 {} = 故意 any」与「解析失败 = 损坏降级」。
-// 必须是唯一对象引用，绝不是 {}（否则两种语义又撞同一状态）。
-var SPEC_PARSE_SENTINEL = {};
+var MATCH_OPS = {
+    resolution: ["==", ">="],
+    video_encode: ["==", "regex"],
+    audio_encode: ["==", "regex"],
+    code_bits: ["==", ">="],
+    hdr: ["=="],
+    dv: ["=="],
+    format: ["==", "regex"]
+};
 
-// 缓存写失败计数（config 单值配额超限等）——并入 /stats，便于观测缓存静默失效。
 var cache_write_fail = 0;
 
 function nowMs() { return new Date().getTime(); }
@@ -123,7 +86,6 @@ function rememberError(scope, err) {
     } catch (e) { /* ignore */ }
 }
 
-// percent-encode：goja 没有 URLSearchParams；用 encodeURIComponent 即可
 function qs(params) {
     var parts = [];
     for (var k in params) {
@@ -142,9 +104,8 @@ function joinUrl(base, pathSeg) {
     return b + p;
 }
 
-// ====== 规格数据模型与比对工具（纯函数，无副作用） ======
+// ====== 比对工具（纯函数） ======
 
-// 由 Width/Height 推断分辨率高度（取较保守的"高度"语义：用 Height，缺则按 Width/16*9 近似）
 function pixelHeight(width, height) {
     var h = safeNum(String(height || ""), 0);
     if (h > 0) return h;
@@ -153,10 +114,6 @@ function pixelHeight(width, height) {
     return 0;
 }
 
-// 分辨率单向（只向下）归档：把像素高归到最近的不高于它的标准档，绝不向上归档。
-// >=1800 → "2160p"；>=900(且<1800) → "1080p"；>=600(且<900) → "720p"；否则 null（不属任何档）。
-// 关键性质：3840×1600 这类 4K 裁切片落 "1080p" 档——单向归档不可消除的边界代价，由 /check
-// trace 暴露 height_raw 让用户人工识别。null 与任何规格档位字符串都不相等 → resolution 维度判不符合。
 function resolutionBucket(height) {
     var h = safeNum(String(height == null ? "" : height), 0);
     if (h >= 1800) return "2160p";
@@ -165,7 +122,24 @@ function resolutionBucket(height) {
     return null;
 }
 
-// VideoRange 归一：Emby 用 "SDR" / "HDR10" / "HDR" / "Dolby Vision" / "DOVI" 等
+function resolutionBucketOrder(bucket) {
+    if (bucket === "2160p") return 3;
+    if (bucket === "1080p") return 2;
+    if (bucket === "720p") return 1;
+    return 0;
+}
+
+// tag 端分辨率归一：已知 bucket 直接用；纯数字走 resolutionBucket；其余 null
+function normalizeTagResolution(v) {
+    if (v === null || v === undefined) return null;
+    var s = trim(String(v)).toLowerCase();
+    if (s === "4k") return "2160p";
+    if (s === "2160p" || s === "1080p" || s === "720p") return s;
+    var n = safeNum(s.replace(/p$/i, ""), -1);
+    if (n > 0) return resolutionBucket(n);
+    return null;
+}
+
 function rangeFlags(videoRange) {
     var v = String(videoRange || "").toLowerCase();
     var isDV = v.indexOf("dolby") >= 0 || v.indexOf("dovi") >= 0 || v.indexOf("dv") >= 0;
@@ -173,39 +147,16 @@ function rangeFlags(videoRange) {
     return { hdr: isHDR, dv: isDV };
 }
 
-// 从文件名 basename 尽力解析 group（首个 [...] 标签）与 source（来源关键字归一）。
-// 解析不出对应字段返回 null（不是 undefined，便于纯标量缓存）。
-function parseFilenameTags(basename) {
-    var name = String(basename == null ? "" : basename);
-    var group = null;
-    var m = name.match(/\[([^\]]+)\]/);
-    if (m && m[1]) group = m[1];
-
-    var source = null;
-    var lower = name.toLowerCase();
-    // 顺序敏感：先判更具体的关键字（remux/web-dl/bdrip）再退到泛化的（web/bluray）。
-    if (lower.indexOf("remux") >= 0) source = "Remux";
-    else if (lower.indexOf("web-dl") >= 0 || lower.indexOf("webdl") >= 0) source = "WEB-DL";
-    else if (lower.indexOf("bdrip") >= 0) source = "BDRip";
-    else if (lower.indexOf("blu-ray") >= 0 || lower.indexOf("bluray") >= 0) source = "BluRay";
-    else if (lower.indexOf("hdtv") >= 0) source = "HDTV";
-    else if (lower.indexOf("web") >= 0) source = "WEB";
-
-    return { group: group, source: source };
-}
-
-// 取路径 basename（ES5）：去掉最后一个 / 或 \ 之前的部分。
 function pathBasename(p) {
     return String(p == null ? "" : p).replace(/^.*[\/\\]/, "") || "";
 }
 
-// 字符串维度归一比较（大小写/空白无关），用于编码等可靠档与尽力档的字符串值。
 function strEq(observed, want) {
     if (observed === null || observed === undefined) return false;
+    if (want === null || want === undefined) return false;
     return trim(String(observed)).toLowerCase() === trim(String(want)).toLowerCase();
 }
 
-// 把规格里的布尔取值统一成 true/false（接受 "1"/"0"/true/false/"true"/"false"）。
 function specBool(v) {
     if (v === true) return true;
     if (v === false) return false;
@@ -213,67 +164,101 @@ function specBool(v) {
     return s === "1" || s === "true" || s === "yes";
 }
 
-// 单副本逐已配维度比对规格。任一已配维度观测/解析不出或不等 → false（AC4 fail-open 方向）。
-// copy 是纯标量副本对象（embyItemCopies/plexItemCopies 产出）。
-function copyMatchesSpec(copy, spec) {
-    if (!copy || typeof copy !== "object") return false;
-    if (!spec || typeof spec !== "object") return false;
-    for (var dim in spec) {
-        if (!spec.hasOwnProperty(dim)) continue;
-        var want = spec[dim];
-        if (want === null || want === undefined || want === "") continue; // 空值视为未配该维度
-        if (dim === "resolution") {
-            if (resolutionBucket(copy.height) !== String(want)) return false;
-        } else if (dim === "hdr") {
-            if (!!copy.hdr !== specBool(want)) return false;
-        } else if (dim === "dv") {
-            if (!!copy.dv !== specBool(want)) return false;
-        } else if (dim === "video_encode") {
-            if (!strEq(copy.video_codec, want)) return false;
-        } else if (dim === "audio_encode") {
-            if (!strEq(copy.audio_codec, want)) return false;
-        } else if (dim === "code_bits") {
-            // bit_depth 是数字（8/10/12）；规格可写 "10" 或 "10bit" → 归一成数字比
-            var wantBits = safeNum(String(want).replace(/[^0-9]/g, ""), -1);
-            var obsBits = safeNum(String(copy.bit_depth == null ? "" : copy.bit_depth), -1);
-            if (wantBits < 0 || obsBits < 0 || obsBits !== wantBits) return false;
-        } else if (dim === "group") {
-            if (!strEq(copy.group, want)) return false;
-        } else if (dim === "source") {
-            if (!strEq(copy.source, want)) return false;
-        } else {
-            // format / language / special_content / part_alias：几乎不可档，副本无对应观测字段
-            // → 解析不出 → 不符合。
-            if (!strEq(copy[dim], want)) return false;
+// tag 值是否「有值」（null/undefined/"" 算空；boolean false 是有效值）
+function tagHasValue(v) {
+    return v !== null && v !== undefined && v !== "";
+}
+
+// 从 copy 对象取某维度对应的库端观测值
+function copyDimValue(copy, dim) {
+    if (dim === "resolution") return copy.height;
+    if (dim === "video_encode") return copy.video_codec;
+    if (dim === "audio_encode") return copy.audio_codec;
+    if (dim === "code_bits") return copy.bit_depth;
+    if (dim === "hdr") return copy.hdr;
+    if (dim === "dv") return copy.dv;
+    if (dim === "format") return copy.format;
+    return undefined;
+}
+
+// 单维度比对：tag 值 vs 库端观测值，按操作符判定
+function dimMatch(dim, op, tagValue, libValue, pattern) {
+    if (!tagHasValue(tagValue)) return false;
+    if (libValue === null || libValue === undefined) return false;
+
+    if (op === "regex") {
+        if (!pattern || typeof pattern !== "string") return false;
+        if (pattern.length > 200) return false;
+        try {
+            var re = new RegExp(pattern, "i");
+            return re.test(String(tagValue)) && re.test(String(libValue));
+        } catch (e) {
+            log.warn("media-library-filter: invalid regex: " + e);
+            return false;
         }
+    }
+
+    if (dim === "resolution") {
+        var tagBucket = normalizeTagResolution(tagValue);
+        var libBucket = resolutionBucket(libValue);
+        if (!tagBucket || !libBucket) return false;
+        if (op === ">=") return resolutionBucketOrder(libBucket) >= resolutionBucketOrder(tagBucket);
+        return libBucket === tagBucket;
+    }
+
+    if (dim === "hdr" || dim === "dv") {
+        return !!libValue === specBool(tagValue);
+    }
+
+    if (dim === "code_bits") {
+        var tagBits = safeNum(String(tagValue).replace(/[^0-9]/g, ""), -1);
+        var libBits = safeNum(String(libValue == null ? "" : libValue), -1);
+        if (tagBits < 0 || libBits < 0) return false;
+        if (op === ">=") return libBits >= tagBits;
+        return libBits === tagBits;
+    }
+
+    return strEq(libValue, tagValue);
+}
+
+// 单副本：全部已配维度都匹配 → true
+function copyMatchesTags(copy, tags, dims) {
+    if (!copy || typeof copy !== "object") return false;
+    if (!tags || typeof tags !== "object") return false;
+    if (!dims || typeof dims !== "object") return false;
+    for (var dim in dims) {
+        if (!dims.hasOwnProperty(dim)) continue;
+        var cfg = dims[dim];
+        if (!cfg || typeof cfg !== "object") continue;
+        var op = cfg.op || "==";
+        var tagValue = tags[dim];
+        var libValue = copyDimValue(copy, dim);
+        if (!dimMatch(dim, op, tagValue, libValue, cfg.pattern)) return false;
     }
     return true;
 }
 
-// 多副本判定。spec 为显式空对象 {} → "copies.length>0 即 true"（AC5 显式 any）；
-// 否则任一副本全维度符合即 true（AC8）。
-// 注意：本函数只看「传入的 spec 是不是 {}」，不负责区分「显式 any」与「损坏降级」——
-// 该区分由 decide 层在调用前完成（损坏/未配根本不会喂 {} 进来），故收到 {} 一定是显式 any。
-function specDimCount(spec) {
+// 多副本：任一副本全维度匹配 → true
+function anyCopyMatchesTags(copies, tags, dims) {
+    if (!isArray(copies) || copies.length === 0) return false;
+    for (var i = 0; i < copies.length; i++) {
+        if (copyMatchesTags(copies[i], tags, dims)) return true;
+    }
+    return false;
+}
+
+// dims 对象中有效维度数
+function dimCount(dims) {
     var n = 0;
-    if (spec && typeof spec === "object") {
-        for (var k in spec) {
-            if (spec.hasOwnProperty(k) && spec[k] !== null && spec[k] !== undefined && spec[k] !== "") n++;
+    if (dims && typeof dims === "object") {
+        for (var k in dims) {
+            if (dims.hasOwnProperty(k) && dims[k] && typeof dims[k] === "object") n++;
         }
     }
     return n;
 }
 
-function anyCopyMatches(copies, spec) {
-    if (!isArray(copies) || copies.length === 0) return false;
-    if (specDimCount(spec) === 0) return true; // 显式 any：有任意副本即算「有」
-    for (var i = 0; i < copies.length; i++) {
-        if (copyMatchesSpec(copies[i], spec)) return true;
-    }
-    return false;
-}
-
-// ====== 缓存（config.*；key 含 tmdb_id+季+集 → {copies, source, ts}，只存事实不存结论） ======
+// ====== 缓存 ======
 
 function cacheKey(tmdbType, tmdbID, season, episode) {
     return CACHE_PREFIX + String(tmdbType || "tv") + "_" + String(tmdbID) +
@@ -311,15 +296,6 @@ function cacheFresh(entry) {
 }
 
 // ====== Emby 查询 ======
-//
-// TV：先按 series 的 ProviderIds.Tmdb 定位剧集，再按 ParentIndexNumber(季)/IndexNumber(集) 过滤。
-// movie：直接按 tmdb_id 查 Movie。
-// 取副本：Fields=ProviderIds,MediaSources,Path → 每个 MediaSources[] 一条副本，从其 MediaStreams[]
-// 取 Video 流 Width/Height/VideoRange/Codec/BitDepth、Audio 流 Codec；filename 取 MediaSources[].Path
-// 或 item.Path 的 basename，提取期即用 parseFilenameTags 解析 group/source。
-//
-// 命中返回 { ok:true, hit:true, source:"emby", copies:[...] }，未命中 { ok:true, hit:false }，
-// 故障 { ok:false, hit:false, reason }。
 
 function embyGet(url) {
     try {
@@ -338,9 +314,6 @@ function embyGet(url) {
     }
 }
 
-// 从一个 Emby item 提取逐副本事实列表。
-// 【硬约束】每个副本对象只含 string/number/boolean/null 纯标量，绝不引用 MediaStreams/MediaSources
-// 原对象（防 JSON.stringify 循环引用抛 TypeError）。group/source 在提取期解析好存入。
 function embyItemCopies(item) {
     var copies = [];
     var sources = (item && item.MediaSources) || [];
@@ -372,8 +345,6 @@ function embyItemCopies(item) {
                 if (audioCodec === null && st.Codec) audioCodec = String(st.Codec);
             }
         }
-        var basename = pathBasename(src.Path || itemPath);
-        var tagged = parseFilenameTags(basename);
         copies.push({
             height: height,
             hdr: hdr,
@@ -381,9 +352,8 @@ function embyItemCopies(item) {
             video_codec: videoCodec,
             audio_codec: audioCodec,
             bit_depth: bitDepth,
-            filename: basename,
-            group: tagged.group,
-            source: tagged.source
+            format: src.Container ? String(src.Container) : null,
+            filename: pathBasename(src.Path || itemPath)
         });
     }
     return copies;
@@ -417,7 +387,6 @@ function checkEmbyEpisode(tmdbType, tmdbID, season, episode, deadlineMs) {
         return { ok: true, hit: false, reason: "movie_not_found" };
     }
 
-    // TV：先按 series tmdb 定位 Series
     var seriesUrl = joinUrl(url, "/emby/Items") + "?" + qs({
         api_key: key,
         Recursive: "true",
@@ -441,7 +410,6 @@ function checkEmbyEpisode(tmdbType, tmdbID, season, episode, deadlineMs) {
     if (!nonEmpty(String(seriesID))) return { ok: true, hit: false, reason: "series_not_found" };
     if (deadlineMs && nowMs() > deadlineMs) return { ok: false, hit: false, reason: "deadline" };
 
-    // 再查该剧集的 Episodes，按季/集过滤
     var epUrl = joinUrl(url, "/emby/Items") + "?" + qs({
         api_key: key,
         Recursive: "true",
@@ -470,10 +438,6 @@ function checkEmbyEpisode(tmdbType, tmdbID, season, episode, deadlineMs) {
 }
 
 // ====== Plex 查询 ======
-//
-// 用 /library/all 按 tmdb guid 过滤；TV 命中 show 后再取该季该集。
-// 取副本：每个 Media[] 一条副本，分辨率 videoResolution、HDR/DV 看 videoProfile/colorTrc 与
-// Part[].Stream[]，filename 取 Media[].Part[].file 的 basename，提取期即 parseFilenameTags。
 
 function plexGet(url) {
     try {
@@ -501,8 +465,6 @@ function plexResHeight(videoResolution) {
     return safeNum(v, 0);
 }
 
-// 从一个 Plex meta 提取逐副本事实列表。
-// 【硬约束】每个副本对象只含纯标量，绝不引用 Media/Part 原对象。
 function plexItemCopies(meta) {
     var copies = [];
     var medias = (meta && meta.Media) || [];
@@ -537,7 +499,6 @@ function plexItemCopies(meta) {
             }
         }
         if (flags.dv) flags.hdr = true;
-        var tagged = parseFilenameTags(filename);
         copies.push({
             height: height,
             hdr: flags.hdr,
@@ -545,9 +506,8 @@ function plexItemCopies(meta) {
             video_codec: videoCodec,
             audio_codec: audioCodec,
             bit_depth: bitDepth,
-            filename: filename,
-            group: tagged.group,
-            source: tagged.source
+            format: media.container ? String(media.container) : null,
+            filename: filename
         });
     }
     return copies;
@@ -591,7 +551,6 @@ function checkPlexEpisode(tmdbType, tmdbID, season, episode, deadlineMs) {
         return { ok: true, hit: false, reason: "movie_not_found" };
     }
 
-    // TV：type=2 找 show
     var showUrl = joinUrl(url, "/library/all") + "?" + qs({
         "X-Plex-Token": token,
         type: 2,
@@ -610,7 +569,6 @@ function checkPlexEpisode(tmdbType, tmdbID, season, episode, deadlineMs) {
     if (!nonEmpty(showKey)) return { ok: true, hit: false, reason: "series_not_found" };
     if (deadlineMs && nowMs() > deadlineMs) return { ok: false, hit: false, reason: "deadline" };
 
-    // 取该 show 全部 episodes（allLeaves）
     var epUrl = joinUrl(url, "/library/metadata/" + showKey + "/allLeaves") + "?" + qs({
         "X-Plex-Token": token
     });
@@ -633,7 +591,7 @@ function checkPlexEpisode(tmdbType, tmdbID, season, episode, deadlineMs) {
     return { ok: true, hit: false, reason: "episode_not_found" };
 }
 
-// ====== 主库检查：Emby 优先，Plex 兜底 ======
+// ====== 主库检查 ======
 
 function performLibraryCheck(tmdbType, tmdbID, season, episode, deadlineMs) {
     var sources = [];
@@ -657,14 +615,11 @@ function performLibraryCheck(tmdbType, tmdbID, season, episode, deadlineMs) {
     return { hit: false, reason: "no_match", copies: [], sources: sources };
 }
 
-// 综合：先查缓存（只存副本事实），未命中再调外部库；命中或未命中都写回缓存（外部故障除外）
 function resolveLibraryStatus(tmdbType, tmdbID, season, episode) {
     var key = cacheKey(tmdbType, tmdbID, season, episode);
     var cached = readCache(key);
     if (cached && cacheFresh(cached)) {
         var copies = cached.copies;
-        // C2 守卫：旧结构（{has,height,hdr,dv,ts}）无 copies / copies 非数组 → 视为 miss 重查，
-        // 绝不碰 undefined.length（CLAUDE.md：touching undefined.length will panic）。
         if (isArray(copies)) {
             return {
                 hit: copies.length > 0,
@@ -673,12 +628,10 @@ function resolveLibraryStatus(tmdbType, tmdbID, season, episode) {
                 from_cache: true
             };
         }
-        // 非数组（旧结构残留 / 损坏）→ 落空，走真实查库重写新结构缓存
     }
     var deadline = nowMs() + LIB_CHECK_SOFT_BUDGET_MS;
     var r = performLibraryCheck(tmdbType, tmdbID, season, episode, deadline);
 
-    // 仅当查询过程没有遇到外部故障（deadline / http 错误）时才写缓存，避免把"暂时查不到"固化
     var hadError = false;
     for (var i = 0; i < (r.sources || []).length; i++) {
         if (r.sources[i].ok === false) hadError = true;
@@ -694,59 +647,59 @@ function resolveLibraryStatus(tmdbType, tmdbID, season, episode) {
     return r;
 }
 
-// ====== per-flow 规格配置（决策 A1：flow_<id>_enabled + flow_<id>_spec 单键 JSON） ======
+// ====== per-flow 配置 ======
 
-// 只保留键 ∈ SPEC_DIMS 且值非空的项（白名单维度，防脏数据）。也用于写入边界校验。
-function sanitizeSpec(obj) {
+function sanitizeDims(obj) {
     var out = {};
     if (!obj || typeof obj !== "object") return out;
-    for (var i = 0; i < SPEC_DIMS.length; i++) {
-        var dim = SPEC_DIMS[i];
+    for (var i = 0; i < MATCH_DIMS.length; i++) {
+        var dim = MATCH_DIMS[i];
         if (!obj.hasOwnProperty(dim)) continue;
-        var v = obj[dim];
-        if (v === null || v === undefined) continue;
-        if (typeof v === "string" && trim(v) === "") continue;
-        out[dim] = v;
+        var entry = obj[dim];
+        if (!entry || typeof entry !== "object") continue;
+        var op = trim(String(entry.op || ""));
+        var allowed = MATCH_OPS[dim] || ["=="];
+        var valid = false;
+        for (var a = 0; a < allowed.length; a++) {
+            if (allowed[a] === op) { valid = true; break; }
+        }
+        if (!valid) op = "==";
+        var cleaned = { op: op };
+        if (op === "regex" && typeof entry.pattern === "string") {
+            cleaned.pattern = entry.pattern;
+        }
+        out[dim] = cleaned;
     }
     return out;
 }
 
-// 三态读取（C1）：返回 {enabled, spec, specState}。
-//   specState: "unset"（spec 键缺失）/ "explicit_any"（"{}" 显式 any）/
-//              "corrupt"（JSON 解析失败）/ "normal"（合法含维度）。
-// 关键：corrupt 与 unset 都不喂 {} 给比对层 → decide 层据 specState 走 allow 短路，杜绝误 veto。
 function flowConfig(flowID) {
     var id = String(flowID == null ? "" : flowID);
     var prefix = "flow_" + id + "_";
     var enabled = config.get(prefix + "enabled") === "1";
-    var raw = config.get(prefix + "spec");
+    var raw = config.get(prefix + "dims");
 
-    if (raw === null || raw === undefined) {
-        return { enabled: enabled, spec: null, specState: "unset" };
+    if (raw === null || raw === undefined || raw === "") {
+        return { enabled: enabled, dims: null };
     }
-    if (trim(raw) === "{}") {
-        return { enabled: enabled, spec: {}, specState: "explicit_any" };
+    var parsed = safeJsonParse(raw, null);
+    if (!parsed || typeof parsed !== "object" || isArray(parsed)) {
+        return { enabled: enabled, dims: null };
     }
-    var parsed = safeJsonParse(raw, SPEC_PARSE_SENTINEL);
-    if (parsed === SPEC_PARSE_SENTINEL || !parsed || typeof parsed !== "object") {
-        return { enabled: enabled, spec: null, specState: "corrupt" };
+    var clean = sanitizeDims(parsed);
+    if (dimCount(clean) === 0) {
+        return { enabled: enabled, dims: null };
     }
-    var clean = sanitizeSpec(parsed);
-    if (specDimCount(clean) === 0) {
-        // 解析成功但清洗后无任何有效维度 → 等价显式 any（避免 normal 但 spec={} 的二义）
-        return { enabled: enabled, spec: {}, specState: "explicit_any" };
-    }
-    return { enabled: enabled, spec: clean, specState: "normal" };
+    return { enabled: enabled, dims: clean };
 }
 
 // ====== should_download 主判定 ======
-//
-// 返回 {allow, reason, ...}。allow=true 放行 / allow=false 否决。任何不确定都 allow。
 
 function decideShouldDownload(p) {
     incCounter("should_download_seen");
 
     var media = (p && p.media) || {};
+    var tags = (p && p.tags) || {};
     var flowID = (p && p.flow_id != null) ? p.flow_id : "";
 
     var tmdbID = media.tmdb_id == null ? "" : String(media.tmdb_id);
@@ -756,26 +709,31 @@ function decideShouldDownload(p) {
 
     var fc = flowConfig(flowID);
 
-    // 本 flow 未启用否决 → 永远推（AC5）
     if (!fc.enabled) {
         return { allow: true, reason: "flow_disabled", fc: fc };
     }
 
-    // spec 三态短路（C1，在查库/比对之前）：未配置 / 损坏 → 一律放行，绝不 veto（fail-open 不可侵犯）
-    if (fc.specState === "unset" || fc.specState === "corrupt") {
-        incCounter("allowed_spec_unset");
-        return { allow: true, reason: "spec_unset", fc: fc };
+    if (!fc.dims || dimCount(fc.dims) === 0) {
+        incCounter("allowed_no_dims");
+        return { allow: true, reason: "no_dims", fc: fc };
     }
 
-    // 无后端启用 → 放行
     if (!isEnabled("emby_enabled") && !isEnabled("plex_enabled")) {
         return { allow: true, reason: "no_backend", fc: fc };
     }
 
-    // tmdb_id 缺失 → 无法精确查库 → 放行
     if (!nonEmpty(tmdbID)) {
         incCounter("allowed_no_tmdb");
         return { allow: true, reason: "no_tmdb", fc: fc };
+    }
+
+    // tag 端空值短路：任一已配维度 tag 为空 → dimMatch 必 false → 无需查库
+    for (var dim in fc.dims) {
+        if (!fc.dims.hasOwnProperty(dim)) continue;
+        if (!tagHasValue(tags[dim])) {
+            incCounter("allowed_tag_empty");
+            return { allow: true, reason: "tag_empty", empty_dim: dim, fc: fc };
+        }
     }
 
     var libStatus;
@@ -787,7 +745,6 @@ function decideShouldDownload(p) {
         return { allow: true, reason: "exception", fc: fc };
     }
 
-    // 查询遇到外部故障且未命中 → fail-open
     if (!libStatus.hit && libStatus.reason === "deadline") {
         incCounter("allowed_error");
         return { allow: true, reason: "deadline", fc: fc };
@@ -795,34 +752,25 @@ function decideShouldDownload(p) {
 
     var copies = isArray(libStatus.copies) ? libStatus.copies : [];
 
-    // 库里没有这一集任何副本 → 放行
     if (copies.length === 0) {
         incCounter("allowed_not_in_lib");
         return { allow: true, reason: "not_in_lib", fc: fc, lib: libStatus };
     }
 
-    // 命中：按当前 flow 规格逐副本现场比对
-    if (anyCopyMatches(copies, fc.spec)) {
+    if (anyCopyMatchesTags(copies, tags, fc.dims)) {
         incCounter("vetoed");
-        return {
-            allow: false,
-            reason: fc.specState === "explicit_any" ? "in_lib_any" : "in_lib_spec",
-            fc: fc,
-            lib: libStatus
-        };
+        return { allow: false, reason: "in_lib_match", fc: fc, lib: libStatus };
     }
-    // 库内副本无一全维度符合规格 → 放行（去下符合规格的）
-    incCounter("allowed_spec_mismatch");
-    return { allow: true, reason: "spec_mismatch", fc: fc, lib: libStatus };
+
+    incCounter("allowed_no_match");
+    return { allow: true, reason: "no_match", fc: fc, lib: libStatus };
 }
 
-// 概要库内命中信息（hook 日志用）：copies 数量 + 命中维度概要。
 function libSummary(d) {
     if (!d.lib) return "";
     var copies = isArray(d.lib.copies) ? d.lib.copies : [];
     var s = " lib=" + (d.lib.source || "") + " copies=" + copies.length;
-    var dims = (d.fc && d.fc.spec) ? specDimCount(d.fc.spec) : 0;
-    s += " spec_dims=" + dims;
+    s += " dims=" + dimCount(d.fc ? d.fc.dims : null);
     if (d.lib.from_cache) s += " cache";
     return s;
 }
@@ -836,16 +784,18 @@ plugin.on("should_download", function (p) {
         var dryRun = isEnabled("dry_run");
         log.info("media-library-filter: should_download flow=" + (p && p.flow_id) +
                  " tmdb=" + (media.tmdb_id || "") + " s" + (media.season || 0) + "e" + (media.episode || 0) +
-                 " specState=" + (d.fc ? d.fc.specState : "") + " reason=" + d.reason +
+                 " reason=" + d.reason +
+                 (d.empty_dim ? " empty_dim=" + d.empty_dim : "") +
                  " decision=" + (d.allow ? "allow" : "veto") + libSummary(d) +
-                 (dryRun && !d.allow ? " [dry_run→allow]" : ""));
+                 (dryRun && !d.allow ? " [dry_run->allow]" : ""));
 
-        // dry_run：只 log 决策、永远放行
-        if (dryRun) return true;
+        if (dryRun) {
+            if (!d.allow) incCounter("dry_run_would_veto");
+            return true;
+        }
         if (d.allow === false) return false;
         return true;
     } catch (e) {
-        // 任何异常 → fail-open
         log.error("media-library-filter: should_download handler error: " + e);
         incCounter("allowed_error");
         return true;
@@ -868,7 +818,6 @@ plugin.registerAPI("/flows", function (req) {
     } catch (e) {
         return { ok: false, error: String(e), flows: [] };
     }
-    // 附带每条 flow 当前配置，UI 一次拿全
     var out = [];
     for (var j = 0; j < flows.length; j++) {
         var fc = flowConfig(flows[j].id);
@@ -876,8 +825,7 @@ plugin.registerAPI("/flows", function (req) {
             id: flows[j].id,
             name: flows[j].name,
             enabled: fc.enabled,
-            spec: fc.spec,
-            specState: fc.specState
+            dims: fc.dims
         });
     }
     return { ok: true, flows: out };
@@ -898,9 +846,11 @@ plugin.registerAPI("/stats", function (req) {
             vetoed: safeNum(config.get("vetoed"), 0),
             allowed_not_in_lib: safeNum(config.get("allowed_not_in_lib"), 0),
             allowed_no_tmdb: safeNum(config.get("allowed_no_tmdb"), 0),
-            allowed_spec_mismatch: safeNum(config.get("allowed_spec_mismatch"), 0),
-            allowed_spec_unset: safeNum(config.get("allowed_spec_unset"), 0),
+            allowed_no_match: safeNum(config.get("allowed_no_match"), 0),
+            allowed_no_dims: safeNum(config.get("allowed_no_dims"), 0),
+            allowed_tag_empty: safeNum(config.get("allowed_tag_empty"), 0),
             allowed_error: safeNum(config.get("allowed_error"), 0),
+            dry_run_would_veto: safeNum(config.get("dry_run_would_veto"), 0),
             cache_write_fail: cache_write_fail
         },
         errors: {
@@ -912,32 +862,29 @@ plugin.registerAPI("/stats", function (req) {
     };
 });
 
-// 逐副本逐维 trace 生成（GET 真实查库 / POST mock 共用）。
-function buildCopyTrace(copies, spec) {
+function buildCopyTrace(copies, tags, dims) {
     var out = [];
     var arr = isArray(copies) ? copies : [];
     for (var i = 0; i < arr.length; i++) {
         var copy = arr[i] || {};
         var dimTrace = {};
         var matchAll = true;
-        if (spec && typeof spec === "object") {
-            for (var dim in spec) {
-                if (!spec.hasOwnProperty(dim)) continue;
-                var want = spec[dim];
-                if (want === null || want === undefined || want === "") continue;
-                var observed;
-                if (dim === "resolution") observed = resolutionBucket(copy.height);
-                else if (dim === "hdr") observed = !!copy.hdr;
-                else if (dim === "dv") observed = !!copy.dv;
-                else if (dim === "video_encode") observed = copy.video_codec;
-                else if (dim === "audio_encode") observed = copy.audio_codec;
-                else if (dim === "code_bits") observed = copy.bit_depth;
-                else if (dim === "group") observed = copy.group;
-                else if (dim === "source") observed = copy.source;
-                else observed = (copy[dim] === undefined ? null : copy[dim]);
-                var ok = copyMatchesSpec(copy, makeSingleDimSpec(dim, want));
+        if (dims && typeof dims === "object") {
+            for (var dim in dims) {
+                if (!dims.hasOwnProperty(dim)) continue;
+                var cfg = dims[dim] || {};
+                var op = cfg.op || "==";
+                var tagValue = tags ? tags[dim] : undefined;
+                var libValue = copyDimValue(copy, dim);
+                var ok = dimMatch(dim, op, tagValue, libValue, cfg.pattern);
                 if (!ok) matchAll = false;
-                dimTrace[dim] = { want: want, observed: (observed === undefined ? null : observed), match: ok };
+                dimTrace[dim] = {
+                    op: op,
+                    pattern: cfg.pattern || null,
+                    tag_value: tagValue === undefined ? null : tagValue,
+                    lib_value: libValue === undefined ? null : libValue,
+                    match: ok
+                };
             }
         }
         out.push({
@@ -945,12 +892,11 @@ function buildCopyTrace(copies, spec) {
             bucket: resolutionBucket(copy.height),
             hdr: !!copy.hdr,
             dv: !!copy.dv,
-            video_codec: (copy.video_codec === undefined ? null : copy.video_codec),
-            audio_codec: (copy.audio_codec === undefined ? null : copy.audio_codec),
-            bit_depth: (copy.bit_depth === undefined ? null : copy.bit_depth),
+            video_codec: copy.video_codec === undefined ? null : copy.video_codec,
+            audio_codec: copy.audio_codec === undefined ? null : copy.audio_codec,
+            bit_depth: copy.bit_depth === undefined ? null : copy.bit_depth,
+            format: copy.format === undefined ? null : copy.format,
             filename: copy.filename || "",
-            parsed_group: (copy.group === undefined ? null : copy.group),
-            parsed_source: (copy.source === undefined ? null : copy.source),
             dims: dimTrace,
             match_all: matchAll
         });
@@ -958,63 +904,54 @@ function buildCopyTrace(copies, spec) {
     return out;
 }
 
-function makeSingleDimSpec(dim, want) {
-    var o = {};
-    o[dim] = want;
-    return o;
-}
-
 plugin.registerAPI("/check", function (req) {
     var method = (req && req.method) || "GET";
 
-    // ---- POST /check：mock 注入（绕过真实查库，AC1-AC8/AC10 自动断言载体） ----
     if (method === "POST") {
         var body = safeJsonParse((req && req.body) || "", null);
         if (!body || typeof body !== "object") {
-            return { ok: false, error: "POST body must be JSON {mock_copies, spec} or {flow_id}" };
+            return { ok: false, error: "POST body must be JSON {mock_copies, tags, dims} or {flow_id, tags}" };
         }
 
-        var spec;
-        var specState;
+        var dims;
+        var mockTags = body.tags || {};
         if (body.flow_id != null) {
             var fc = flowConfig(body.flow_id);
-            // flow 未启用 / spec 未配 / 损坏 → 直接 allow（对齐 decide 层三态短路）
             if (!fc.enabled) {
-                return { ok: true, mode: "mock", flow_id: String(body.flow_id), specState: fc.specState,
+                return { ok: true, mode: "mock", flow_id: String(body.flow_id),
                          would_decision: "allow", would_reason: "flow_disabled", copies: [] };
             }
-            if (fc.specState === "unset" || fc.specState === "corrupt") {
-                return { ok: true, mode: "mock", flow_id: String(body.flow_id), specState: fc.specState,
-                         would_decision: "allow", would_reason: "spec_unset", copies: [] };
+            if (!fc.dims || dimCount(fc.dims) === 0) {
+                return { ok: true, mode: "mock", flow_id: String(body.flow_id),
+                         would_decision: "allow", would_reason: "no_dims", copies: [] };
             }
-            spec = fc.spec;
-            specState = fc.specState;
+            dims = fc.dims;
         } else {
-            // 直接喂 spec（可为 {} 表显式 any；缺失视为显式 any）
-            spec = sanitizeSpec(body.spec || {});
-            specState = specDimCount(spec) === 0 ? "explicit_any" : "normal";
+            dims = sanitizeDims(body.dims || {});
+            if (dimCount(dims) === 0) {
+                return { ok: true, mode: "mock", would_decision: "allow", would_reason: "no_dims", copies: [] };
+            }
         }
 
         var mockCopies = isArray(body.mock_copies) ? body.mock_copies : [];
         var allow, why;
         if (mockCopies.length === 0) { allow = true; why = "not_in_lib"; }
-        else if (anyCopyMatches(mockCopies, spec)) {
+        else if (anyCopyMatchesTags(mockCopies, mockTags, dims)) {
             allow = false;
-            why = specState === "explicit_any" ? "in_lib_any" : "in_lib_spec";
-        } else { allow = true; why = "spec_mismatch"; }
+            why = "in_lib_match";
+        } else { allow = true; why = "no_match"; }
 
         return {
             ok: true,
             mode: "mock",
-            specState: specState,
-            spec: spec,
+            dims: dims,
+            tags: mockTags,
             would_decision: allow ? "allow" : "veto",
             would_reason: why,
-            copies: buildCopyTrace(mockCopies, spec)
+            copies: buildCopyTrace(mockCopies, mockTags, dims)
         };
     }
 
-    // ---- GET /check：真实查库 smoke（需真 Emby/Plex，人工冒烟） ----
     var q = (req && req.query) || {};
     var tmdbID = trim(q.tmdb_id);
     var tmdbType = trim(q.tmdb_type) || "tv";
@@ -1023,7 +960,7 @@ plugin.registerAPI("/check", function (req) {
     var flowID = q.flow_id == null ? "" : String(q.flow_id);
 
     if (!nonEmpty(tmdbID)) {
-        return { ok: false, error: "missing ?tmdb_id= (with optional &season=&episode=&tmdb_type=&flow_id=); or POST {mock_copies, spec}" };
+        return { ok: false, error: "missing ?tmdb_id= (with optional &season=&episode=&tmdb_type=&flow_id=); or POST {mock_copies, tags, dims}" };
     }
 
     var deadline = nowMs() + LIB_CHECK_SOFT_BUDGET_MS;
@@ -1045,20 +982,20 @@ plugin.registerAPI("/check", function (req) {
 
     if (nonEmpty(flowID)) {
         var gfc = flowConfig(flowID);
-        resp.flow_config = { enabled: gfc.enabled, spec: gfc.spec, specState: gfc.specState };
+        resp.flow_config = { enabled: gfc.enabled, dims: gfc.dims };
         var gAllow, gWhy;
         if (!gfc.enabled) { gAllow = true; gWhy = "flow_disabled"; }
-        else if (gfc.specState === "unset" || gfc.specState === "corrupt") { gAllow = true; gWhy = "spec_unset"; }
+        else if (!gfc.dims || dimCount(gfc.dims) === 0) { gAllow = true; gWhy = "no_dims"; }
         else if (realCopies.length === 0) { gAllow = true; gWhy = "not_in_lib"; }
-        else if (anyCopyMatches(realCopies, gfc.spec)) {
+        else if (anyCopyMatchesTags(realCopies, q, gfc.dims)) {
             gAllow = false;
-            gWhy = gfc.specState === "explicit_any" ? "in_lib_any" : "in_lib_spec";
-        } else { gAllow = true; gWhy = "spec_mismatch"; }
+            gWhy = "in_lib_match";
+        } else { gAllow = true; gWhy = "no_match"; }
         resp.would_decision = gAllow ? "allow" : "veto";
         resp.would_reason = gWhy;
-        resp.copies = buildCopyTrace(realCopies, gfc.spec || {});
+        resp.copies = buildCopyTrace(realCopies, q, gfc.dims || {});
     } else {
-        resp.copies = buildCopyTrace(realCopies, {});
+        resp.copies = buildCopyTrace(realCopies, {}, {});
     }
     return resp;
 });
@@ -1096,7 +1033,6 @@ plugin.registerAPI("/test-plex", function (req) {
 });
 
 plugin.registerAPI("/save-config", function (req) {
-    // UI 批量保存：req.body 是 JSON string 或 object
     var body = req && req.body;
     var obj = null;
     if (body && typeof body === "object") obj = body;
@@ -1105,43 +1041,61 @@ plugin.registerAPI("/save-config", function (req) {
         return { ok: false, error: "body must be a JSON object" };
     }
 
-    // 全局键白名单
     var globalAllowed = {
         emby_enabled: 1, emby_url: 1, emby_api_key: 1,
         plex_enabled: 1, plex_url: 1, plex_token: 1,
         cache_ttl_sec: 1, dry_run: 1
     };
-    // 动态 flow_* 键白名单：flow_<id>_(enabled|spec)
-    var flowKeyRe = /^flow_.+_(enabled|spec)$/;
-    var flowSpecRe = /^flow_.+_spec$/;
+    var flowKeyRe = /^flow_.+_(enabled|dims)$/;
+    var flowDimsRe = /^flow_.+_dims$/;
 
     var written = [];
     for (var k in obj) {
         if (!Object.prototype.hasOwnProperty.call(obj, k)) continue;
-        if (!globalAllowed[k] && !flowKeyRe.test(k)) continue; // 非白名单忽略
+        if (!globalAllowed[k] && !flowKeyRe.test(k)) continue;
         var v = obj[k];
         if (v === null || v === undefined) v = "";
         if (typeof v !== "string") v = String(v);
 
-        // spec 写入边界校验（C1 第一道闸）：非法 JSON / 含非白名单维度键 → 拒写整体返回 error
-        if (flowSpecRe.test(k)) {
+        if (flowDimsRe.test(k)) {
             var parsed;
             try { parsed = JSON.parse(v); }
-            catch (e) { return { ok: false, error: "flow spec invalid json", key: k, written: written }; }
+            catch (e) { return { ok: false, error: "flow dims invalid json", key: k, written: written }; }
             if (!parsed || typeof parsed !== "object" || isArray(parsed)) {
-                return { ok: false, error: "flow spec must be a json object", key: k, written: written };
+                return { ok: false, error: "flow dims must be a json object", key: k, written: written };
             }
-            // 含任何非白名单维度键 → 拒写
             for (var pk in parsed) {
                 if (!parsed.hasOwnProperty(pk)) continue;
                 var known = false;
-                for (var di = 0; di < SPEC_DIMS.length; di++) {
-                    if (SPEC_DIMS[di] === pk) { known = true; break; }
+                for (var di = 0; di < MATCH_DIMS.length; di++) {
+                    if (MATCH_DIMS[di] === pk) { known = true; break; }
                 }
-                if (!known) return { ok: false, error: "flow spec has unknown dimension: " + pk, key: k, written: written };
+                if (!known) return { ok: false, error: "unknown dimension: " + pk, key: k, written: written };
+                var entry = parsed[pk];
+                if (!entry || typeof entry !== "object") {
+                    return { ok: false, error: "dimension entry must be object with op: " + pk, key: k, written: written };
+                }
+                var entryOp = trim(String(entry.op || ""));
+                var allowed = MATCH_OPS[pk] || ["=="];
+                var opValid = false;
+                for (var oi = 0; oi < allowed.length; oi++) {
+                    if (allowed[oi] === entryOp) { opValid = true; break; }
+                }
+                if (!opValid) {
+                    return { ok: false, error: "invalid op '" + entryOp + "' for " + pk + " (allowed: " + allowed.join(",") + ")", key: k, written: written };
+                }
+                if (entryOp === "regex") {
+                    if (!entry.pattern || typeof entry.pattern !== "string") {
+                        return { ok: false, error: "regex op requires pattern string for " + pk, key: k, written: written };
+                    }
+                    if (entry.pattern.length > 200) {
+                        return { ok: false, error: "regex pattern too long for " + pk + " (max 200 chars)", key: k, written: written };
+                    }
+                    try { new RegExp(entry.pattern); }
+                    catch (re) { return { ok: false, error: "invalid regex pattern for " + pk + ": " + re, key: k, written: written }; }
+                }
             }
-            // 规范化（剔空值）后写入；"{}" 合法保留为显式 any
-            v = JSON.stringify(sanitizeSpec(parsed));
+            v = JSON.stringify(sanitizeDims(parsed));
         }
 
         try { config.set(k, v); written.push(k); }
@@ -1150,6 +1104,6 @@ plugin.registerAPI("/save-config", function (req) {
     return { ok: true, written: written };
 });
 
-log.info("media-library-filter loaded (should_download veto; emby=" + isEnabled("emby_enabled") +
+log.info("media-library-filter loaded (like-for-like dedup; emby=" + isEnabled("emby_enabled") +
          " plex=" + isEnabled("plex_enabled") +
          " dry_run=" + isEnabled("dry_run") + ")");
