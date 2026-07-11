@@ -34,7 +34,7 @@
     },
     {
       "name": "media-library-filter",
-      "version": "0.3.0",
+      "version": "0.3.1",
       "author": "FollowCat",
       "description": "下载去重器：在 ruleflow 推种前拿种子 tags 与 Emby / Plex 库内副本按用户选定的维度+操作符逐副本比对，库内已有同规格副本则跳过下载（fail-open）",
       "source_url": "https://plugins.followcat.io/media-library-filter",

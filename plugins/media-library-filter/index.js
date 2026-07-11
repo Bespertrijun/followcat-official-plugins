@@ -1033,11 +1033,14 @@ plugin.registerAPI("/test-plex", function (req) {
 });
 
 plugin.registerAPI("/save-config", function (req) {
-    var body = req && req.body;
-    var obj = null;
-    if (body && typeof body === "object") obj = body;
-    else if (typeof body === "string" && body.length > 0) obj = safeJsonParse(body, null);
-    if (!obj || typeof obj !== "object") {
+    // req.body 依宿主实现而异：可能是已解析对象、JSON string（文档约定的
+    // "原始字节 string"），个别宿主还会再包一层 JSON（双重编码）。逐层解析到
+    // 对象为止，把这些情况都兜住，避免误报 "body must be a JSON object"。
+    var obj = req && req.body;
+    for (var _p = 0; typeof obj === "string" && _p < 3; _p++) {
+        obj = obj.length ? safeJsonParse(obj, null) : null;
+    }
+    if (!obj || typeof obj !== "object" || isArray(obj)) {
         return { ok: false, error: "body must be a JSON object" };
     }
 

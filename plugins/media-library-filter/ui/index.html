@@ -303,6 +303,15 @@
     statusBar.textContent = msg;
   }
 
+  // 宿主 Toast：状态条在页面最顶部、保存按钮在最底部，滚动后看不到结果，
+  // 借宿主的全局弹框把关键结果顶出来。宿主不支持 notify 时静默降级。
+  function hostToast(level, msg) {
+    try {
+      var p = FC.notify(level, msg);
+      if (p && p.catch) p.catch(function () {});
+    } catch (e) { /* 老宿主无 notify：忽略 */ }
+  }
+
   function resize() {
     try { FC.resize(document.body.scrollHeight + 20); } catch (e) {}
   }
@@ -621,10 +630,14 @@
       payload['flow_' + fid + '_dims'] = JSON.stringify(dimsObj);
     }
 
-    FC.api('/save-config', payload).then(function(res) {
+    // req.body 契约是「原始字符串」（宿主不自动 JSON.parse），必须自己序列化。
+    // 直接传对象在真实宿主会被强转成 "[object Object]"，导致 save-config 解析失败。
+    FC.api('/save-config', JSON.stringify(payload)).then(function(res) {
       btn.disabled = false;
       if (res && res.ok) {
-        showStatus('success', '配置已保存（写入 ' + (res.written ? res.written.length : 0) + ' 项）');
+        var okMsg = '配置已保存（写入 ' + (res.written ? res.written.length : 0) + ' 项）';
+        showStatus('success', okMsg);
+        hostToast('success', okMsg);
         // 清空 secret 输入框
         document.getElementById('emby-key').value = '';
         document.getElementById('plex-token').value = '';
@@ -632,10 +645,12 @@
       } else {
         var errMsg = (res && res.error) ? res.error : '未知错误';
         showStatus('error', '保存失败：' + errMsg);
+        hostToast('error', '保存失败：' + errMsg);
       }
     }).catch(function(e) {
       btn.disabled = false;
       showStatus('error', '请求出错：' + e.message);
+      hostToast('error', '请求出错：' + e.message);
     });
   };
 })();
