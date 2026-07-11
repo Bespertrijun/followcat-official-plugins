@@ -315,9 +315,12 @@ window.addEventListener('message', async function (ev) {
       case 'plugin.api': {
         var path = (msg.payload && msg.payload.path) || '';
         var body = (msg.payload && msg.payload.body) || null;
+        // 真实宿主把 FC.api 的 body 原样作为请求体字符串交给 req.body（string 直通，
+        // 不自动 JSON.stringify）。这里对 string 直通，与生产保持一致，避免二次编码。
+        var reqBody = (typeof body === 'string') ? body : JSON.stringify(body == null ? {} : body);
         var res = await fetch('/api/call-api', {
           method: 'POST', headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({ path: path, req: { method: 'POST', body: JSON.stringify(body || {}), query: {} } })
+          body: JSON.stringify({ path: path, req: { method: 'POST', body: reqBody, query: {} } })
         });
         var data = await res.json();
         if (!res.ok) reply(null, data.detail || ('HTTP ' + res.status));
