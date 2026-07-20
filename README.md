@@ -78,9 +78,13 @@ python devrt/server.py media-library-filter
 # 1. 修改 plugins/<plugin>/manifest.json + index.js + ui/，提交合并到 main
 git add plugins/media-library-filter/ && git commit -m "media-library-filter: ..." && git push
 
-# 2. 打 tag 并推送
+# 2. 打 tag 并推送（决定发布版本号——build.py 只认最新 git tag，不看工作树里的 version）
 git tag media-library-filter/v0.1.0
 git push origin media-library-filter/v0.1.0
+
+# 3. ⚠ 关键：打完 tag 后，再触发一次 main 构建，Pages 上的 index.json 才会更新到新版本
+#    （空提交即可；原因见下方「顺序陷阱」）
+git commit --allow-empty -m "chore(ci): 触发 main 构建发布 media-library-filter 0.1.0" && git push
 ```
 
 之后 `.github/workflows/deploy.yml` 自动：
@@ -88,6 +92,12 @@ git push origin media-library-filter/v0.1.0
 2. 计算 `zip_sha256` 与 `zip_size`，生成 `dist/index.json`
 3. 把 `dist/` 部署到 GitHub Pages（FollowCat 服务端按 Pages URL 拉 `index.json`）
 4. 创建 GitHub Release `media-library-filter/v0.1.0` 并附上 zip + sig（如配置签名）
+
+> **⚠️ 顺序陷阱：打完 tag 必须再触发一次 `main` 构建，否则 Pages 上的版本指针不会更新。**
+>
+> 本仓的 GitHub Pages **只把 `main` 分支的部署提升为线上生效版**；tag 触发的构建虽然会产出新版 zip 并建好 GitHub Release，但它那次的 **Pages 部署不会生效**（job 仍报绿，容易误判）。而 `build.py` 的版本号取「最新 git tag」——若最后一次生效的 `main` 构建跑在新 tag 推送**之前**，它就按旧 tag 发布，Pages 便停在旧版本。
+>
+> 正确做法：**先打 tag，再让一次 `main` 构建跑起来**（上面步骤 3 的空提交；等价：Actions 里对 `main` 手动 `workflow_dispatch`，或重跑最近一次 `main` run）。**重跑 tag 工作流没用**——tag 部署永远不被提升为线上。GitHub Release + zip 不受影响，缺的只是 Pages 上 `index.json` 的版本指针。
 
 ### 本地预演构建
 
