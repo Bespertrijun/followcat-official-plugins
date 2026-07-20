@@ -350,12 +350,14 @@
 
       document.getElementById('emby-enabled').checked = cfg['emby_enabled'] === '1';
       document.getElementById('emby-url').value = cfg['emby_url'] || '';
-      var embyKeySet = cfg['emby_api_key'] !== null && cfg['emby_api_key'] !== '';
+      // secret 以 is_secret=true 存：已设置的密钥回读被脱敏成 ""（非 null），未设置才是 null。
+      // 故判定「已设置」用 !== null，不能用 !== ''，否则设过也会误显示「请输入」。
+      var embyKeySet = cfg['emby_api_key'] !== null;
       document.getElementById('emby-key').placeholder = embyKeySet ? '（已设置，留空不修改）' : '请输入 API Key';
 
       document.getElementById('plex-enabled').checked = cfg['plex_enabled'] === '1';
       document.getElementById('plex-url').value = cfg['plex_url'] || '';
-      var plexTokenSet = cfg['plex_token'] !== null && cfg['plex_token'] !== '';
+      var plexTokenSet = cfg['plex_token'] !== null;
       document.getElementById('plex-token').placeholder = plexTokenSet ? '（已设置，留空不修改）' : '请输入 token';
 
       document.getElementById('cache-ttl').value = cfg['cache_ttl_sec'] || '';
@@ -562,24 +564,27 @@
 
   window.saveAll = function() {
     var btn = document.getElementById('btn-save');
-    btn.disabled = true;
-    showStatus('info', '保存中…');
 
-    var payload = {};
+    // 逐项收集要写入的配置：{ key, value, secret }。
+    // 用宿主一等公民的 config.put 桥逐项写（与 cookiecloud 一致、真实宿主已验证），
+    // 不再把 JSON blob 经 FC.api('/save-config', …) → req.body 往返——那条链路
+    // 在真实宿主上会把 body 变成非对象，正是「保存失败：body must be a JSON object」
+    // 的根因。config.put 是文档 6 条 iframe 桥之一，字符串键值直达，无编码歧义。
+    var writes = [];
 
-    // 全局配置
-    payload.emby_enabled = document.getElementById('emby-enabled').checked ? '1' : '0';
-    payload.emby_url = document.getElementById('emby-url').value.trim();
-    payload.plex_enabled = document.getElementById('plex-enabled').checked ? '1' : '0';
-    payload.plex_url = document.getElementById('plex-url').value.trim();
-    payload.cache_ttl_sec = document.getElementById('cache-ttl').value.trim();
-    payload.dry_run = document.getElementById('dry-run').checked ? '1' : '0';
+    // 全局配置（非 secret）
+    writes.push({ key: 'emby_enabled', value: document.getElementById('emby-enabled').checked ? '1' : '0' });
+    writes.push({ key: 'emby_url',     value: document.getElementById('emby-url').value.trim() });
+    writes.push({ key: 'plex_enabled', value: document.getElementById('plex-enabled').checked ? '1' : '0' });
+    writes.push({ key: 'plex_url',     value: document.getElementById('plex-url').value.trim() });
+    writes.push({ key: 'cache_ttl_sec', value: document.getElementById('cache-ttl').value.trim() });
+    writes.push({ key: 'dry_run',      value: document.getElementById('dry-run').checked ? '1' : '0' });
 
-    // secret 字段：留空 = 不修改，仅在用户输入了新值时才写
+    // secret 字段：留空 = 不修改，仅在用户输入了新值时才写（secret=true → 回读脱敏）
     var embyKey = document.getElementById('emby-key').value.trim();
-    if (embyKey) { payload.emby_api_key = embyKey; }
+    if (embyKey) { writes.push({ key: 'emby_api_key', value: embyKey, secret: true }); }
     var plexToken = document.getElementById('plex-token').value.trim();
-    if (plexToken) { payload.plex_token = plexToken; }
+    if (plexToken) { writes.push({ key: 'plex_token', value: plexToken, secret: true }); }
 
     // per-flow 配置：收集每条 flow 的 enabled + dims
     var items = document.querySelectorAll('.flow-item');
@@ -587,7 +592,7 @@
       var item = items[i];
       var fid = item.getAttribute('data-flow-id');
       var enabledCb = item.querySelector('.flow-enabled-cb');
-      payload['flow_' + fid + '_enabled'] = (enabledCb && enabledCb.checked) ? '1' : '0';
+      writes.push({ key: 'flow_' + fid + '_enabled', value: (enabledCb && enabledCb.checked) ? '1' : '0' });
 
       // 收集已勾选的维度配置
       var dimsObj = {};
@@ -613,7 +618,7 @@
 
         var entry = { op: op };
 
-        // regex 操作符：读取 pattern
+        // regex 操作符：读取并校验 pattern（客户端先校验，给用户即时反馈）
         if (op === 'regex') {
           var patternInput = row.querySelector('.dim-pattern-input');
           var pattern = patternInput ? patternInput.value.trim() : '';
@@ -621,36 +626,46 @@
             // regex 但没填 pattern → 跳过该维度（避免无效配置）
             continue;
           }
+          if (pattern.length > 200) {
+            showStatus('error', '保存失败：' + meta.label + ' 正则过长（上限 200 字符）');
+            return;
+          }
+          try { new RegExp(pattern); }
+          catch (re) {
+            showStatus('error', '保存失败：' + meta.label + ' 正则无效：' + re.message);
+            return;
+          }
           entry.pattern = pattern;
         }
 
         dimsObj[dimKey] = entry;
       }
 
-      payload['flow_' + fid + '_dims'] = JSON.stringify(dimsObj);
+      writes.push({ key: 'flow_' + fid + '_dims', value: JSON.stringify(dimsObj) });
     }
 
-    // req.body 契约是「原始字符串」（宿主不自动 JSON.parse），必须自己序列化。
-    // 直接传对象在真实宿主会被强转成 "[object Object]"，导致 save-config 解析失败。
-    FC.api('/save-config', JSON.stringify(payload)).then(function(res) {
+    btn.disabled = true;
+    showStatus('info', '保存中…');
+
+    // 逐项 FC.config.put；secret 项标记加密回读脱敏。任一项失败即整体报错。
+    var puts = writes.map(function (w) {
+      return FC.config.put(w.key, w.value, !!w.secret);
+    });
+
+    Promise.all(puts).then(function() {
       btn.disabled = false;
-      if (res && res.ok) {
-        var okMsg = '配置已保存（写入 ' + (res.written ? res.written.length : 0) + ' 项）';
-        showStatus('success', okMsg);
-        hostToast('success', okMsg);
-        // 清空 secret 输入框
-        document.getElementById('emby-key').value = '';
-        document.getElementById('plex-token').value = '';
-        reloadAll();
-      } else {
-        var errMsg = (res && res.error) ? res.error : '未知错误';
-        showStatus('error', '保存失败：' + errMsg);
-        hostToast('error', '保存失败：' + errMsg);
-      }
+      var okMsg = '配置已保存（写入 ' + writes.length + ' 项）';
+      showStatus('success', okMsg);
+      hostToast('success', okMsg);
+      // 清空 secret 输入框
+      document.getElementById('emby-key').value = '';
+      document.getElementById('plex-token').value = '';
+      reloadAll();
     }).catch(function(e) {
       btn.disabled = false;
-      showStatus('error', '请求出错：' + e.message);
-      hostToast('error', '请求出错：' + e.message);
+      var errMsg = (e && e.message) ? e.message : String(e);
+      showStatus('error', '保存失败：' + errMsg);
+      hostToast('error', '保存失败：' + errMsg);
     });
   };
 })();
