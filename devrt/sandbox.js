@@ -177,10 +177,16 @@ const plugin = {
 
 // ─── execution ──────────────────────────────────────────────────────────────
 
+const ruleflow = {
+  list: function () { return []; },
+};
+
 const sandbox = {
   plugin, log, config, anime, task,
   // Conditionally inject http only if api.http permission declared, mirror host
   http: declaredPerms.has('api.http') ? http : undefined,
+  // Conditionally inject ruleflow only if api.ruleflow permission declared, mirror host
+  ruleflow: declaredPerms.has('api.ruleflow') ? ruleflow : undefined,
   // utility: runtime needs Date / JSON / Math / etc — vm provides them by default
   setTimeout: undefined,        // goja: no timers
   setInterval: undefined,
@@ -240,8 +246,13 @@ rl.on('line', function (line) {
         const fn = hooks[params.hook];
         if (!fn) return fail('hook not registered: ' + params.hook);
         try {
-          fn(params.data || {});
-          reply({ ok: true });
+          const result = fn(params.data || {});
+          // should_download is a synchronous veto hook — capture its return value
+          if (params.hook === 'should_download') {
+            reply({ ok: true, result: result === undefined ? null : result });
+          } else {
+            reply({ ok: true });
+          }
         } catch (e) {
           // Real host swallows hook errors and increments panic_count; here we surface them
           fail(e);

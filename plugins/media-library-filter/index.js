@@ -775,13 +775,296 @@ function libSummary(d) {
     return s;
 }
 
+
+// ====== 合集逐集否决（bitmap 协议） ======
+
+// base64 编码（goja 无原生 btoa，手动实现）
+function bytesToBase64(bytes) {
+    var chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    var result = "";
+    var i = 0;
+    while (i < bytes.length) {
+        var b0 = bytes[i++] & 0xFF;
+        var b1 = i < bytes.length ? bytes[i++] & 0xFF : -1;
+        var b2 = i < bytes.length ? bytes[i++] & 0xFF : -1;
+        result += chars[b0 >> 2];
+        result += chars[((b0 & 3) << 4) | (b1 >= 0 ? b1 >> 4 : 0)];
+        result += b1 >= 0 ? chars[((b1 & 15) << 2) | (b2 >= 0 ? b2 >> 6 : 0)] : "=";
+        result += b2 >= 0 ? chars[b2 & 63] : "=";
+    }
+    return result;
+}
+
+// 设置 bitmap 第 ep 集位（与核心 setEpisodeBit 同构）
+function setBitmapBit(bytes, ep) {
+    if (ep <= 0) return;
+    var byteIdx = (ep - 1) >> 3;
+    var bitIdx = (ep - 1) & 7;
+    while (byteIdx >= bytes.length) {
+        bytes.push(0);
+    }
+    bytes[byteIdx] |= (1 << bitIdx);
+}
+
+// 检查 bitmap 第 ep 集是否已标记
+function getBitmapBit(bytes, ep) {
+    if (ep <= 0) return false;
+    var byteIdx = (ep - 1) >> 3;
+    var bitIdx = (ep - 1) & 7;
+    if (byteIdx >= bytes.length) return false;
+    return (bytes[byteIdx] & (1 << bitIdx)) !== 0;
+}
+
+// Emby 批量拉取：一次拉全季 episodes，返回 { epMap, source } 或 null
+function embyBatchFetch(tmdbID, season, epStart, epEnd, deadlineMs) {
+    var url = config.get("emby_url");
+    var key = config.get("emby_api_key");
+    if (!nonEmpty(url) || !nonEmpty(key)) return null;
+
+    // 找 series
+    var seriesUrl = joinUrl(url, "/emby/Items") + "?" + qs({
+        api_key: key,
+        Recursive: "true",
+        IncludeItemTypes: "Series",
+        AnyProviderIdEquals: "tmdb." + tmdbID,
+        Fields: "ProviderIds",
+        Limit: 5
+    });
+    var sr = embyGet(seriesUrl);
+    if (!sr.ok) return null;
+    var sItems = (sr.body && sr.body.Items) || [];
+    var seriesID = "";
+    for (var si = 0; si < sItems.length; si++) {
+        var sItem = sItems[si] || {};
+        var spid = sItem.ProviderIds || {};
+        if (String(spid.Tmdb || spid.tmdb || "") === String(tmdbID)) {
+            seriesID = sItem.Id || sItem.ID || "";
+            break;
+        }
+    }
+    if (!nonEmpty(String(seriesID))) return null;
+    if (deadlineMs && nowMs() > deadlineMs) return null;
+
+    // 一次拉全季
+    var epUrl = joinUrl(url, "/emby/Items") + "?" + qs({
+        api_key: key,
+        Recursive: "true",
+        ParentId: seriesID,
+        IncludeItemTypes: "Episode",
+        Fields: "MediaSources,ParentIndexNumber,IndexNumber,Path",
+        Limit: 2000
+    });
+    var er = embyGet(epUrl);
+    if (!er.ok) return null;
+    var eItems = (er.body && er.body.Items) || [];
+
+    // 按集号索引
+    var epMap = {};
+    for (var ei = 0; ei < eItems.length; ei++) {
+        var eItem = eItems[ei] || {};
+        var pSeason = safeNum(String(eItem.ParentIndexNumber), -1);
+        var pEpisode = safeNum(String(eItem.IndexNumber), -1);
+        if (pSeason === season && pEpisode >= epStart && pEpisode <= epEnd) {
+            if (!epMap[pEpisode]) epMap[pEpisode] = [];
+            var copies = embyItemCopies(eItem);
+            for (var ci = 0; ci < copies.length; ci++) {
+                epMap[pEpisode].push(copies[ci]);
+            }
+        }
+    }
+    return { epMap: epMap, source: "emby" };
+}
+
+// Plex 批量拉取：返回 { epMap, source } 或 null
+function plexBatchFetch(tmdbID, season, epStart, epEnd, deadlineMs) {
+    var url = config.get("plex_url");
+    var token = config.get("plex_token");
+    if (!nonEmpty(url) || !nonEmpty(token)) return null;
+
+    // 找 series（按 tmdb guid）
+    var searchUrl = joinUrl(url, "/library/all") + "?" + qs({
+        "X-Plex-Token": token,
+        type: 2,
+        includeGuids: 1
+    });
+    var sr = plexGet(searchUrl);
+    if (!sr.ok) return null;
+    var shows = (sr.body && sr.body.MediaContainer && sr.body.MediaContainer.Metadata) || [];
+    var showKey = "";
+    for (var si = 0; si < shows.length; si++) {
+        if (plexMetaTmdb(shows[si]) === String(tmdbID)) {
+            showKey = String((shows[si] || {}).ratingKey || "");
+            break;
+        }
+    }
+    if (!nonEmpty(String(showKey))) return null;
+    if (deadlineMs && nowMs() > deadlineMs) return null;
+
+    // 拉全季 episodes（与单集路径 checkPlexEpisode 同构）
+    var epUrl = joinUrl(url, "/library/metadata/" + showKey + "/allLeaves") + "?" + qs({
+        "X-Plex-Token": token,
+        includeGuids: 1
+    });
+    var er = plexGet(epUrl);
+    if (!er.ok) return null;
+    var eItems = (er.body && er.body.MediaContainer && er.body.MediaContainer.Metadata) || [];
+
+    var epMap = {};
+    for (var ei = 0; ei < eItems.length; ei++) {
+        var eItem = eItems[ei] || {};
+        var pSeason = safeNum(String(eItem.parentIndex), -1);
+        var pEpisode = safeNum(String(eItem.index), -1);
+        if (pSeason === season && pEpisode >= epStart && pEpisode <= epEnd) {
+            if (!epMap[pEpisode]) epMap[pEpisode] = [];
+            var copies = plexItemCopies(eItem);
+            for (var ci = 0; ci < copies.length; ci++) {
+                epMap[pEpisode].push(copies[ci]);
+            }
+        }
+    }
+    return { epMap: epMap, source: "plex" };
+}
+
+// 合集主判定：返回 { allow, have_bitmap_bytes, reason }
+function decideShouldDownloadBatch(p) {
+    incCounter("should_download_seen");
+
+    var media = (p && p.media) || {};
+    var tags = (p && p.tags) || {};
+    var flowID = (p && p.flow_id != null) ? p.flow_id : "";
+
+    var tmdbID = media.tmdb_id == null ? "" : String(media.tmdb_id);
+    var tmdbType = trim(media.tmdb_type) || "tv";
+    var season = safeNum(String(media.season == null ? "" : media.season), 0);
+    var epStart = safeNum(String(media.episode == null ? "" : media.episode), 0);
+    var epEnd = safeNum(String(media.episode_end == null ? "" : media.episode_end), 0);
+
+    var fc = flowConfig(flowID);
+
+    if (!fc.enabled) return { allow: true, reason: "flow_disabled" };
+    if (!fc.dims || dimCount(fc.dims) === 0) { incCounter("allowed_no_dims"); return { allow: true, reason: "no_dims" }; }
+    if (!isEnabled("emby_enabled") && !isEnabled("plex_enabled")) return { allow: true, reason: "no_backend" };
+    if (!nonEmpty(tmdbID)) { incCounter("allowed_no_tmdb"); return { allow: true, reason: "no_tmdb" }; }
+    if (epStart <= 0 || epEnd <= 0 || epEnd < epStart) return { allow: true, reason: "invalid_range" };
+
+    // tag 端空值短路
+    for (var dim in fc.dims) {
+        if (!fc.dims.hasOwnProperty(dim)) continue;
+        if (!tagHasValue(tags[dim])) {
+            incCounter("allowed_tag_empty");
+            return { allow: true, reason: "tag_empty", empty_dim: dim };
+        }
+    }
+
+    // ---- 缓存快路径：全部集命中缓存 → 跳过 HTTP ----
+    var allCached = true;
+    var epMap = {};
+    for (var cep = epStart; cep <= epEnd; cep++) {
+        var cKey = cacheKey(tmdbType, tmdbID, season, cep);
+        var cached = readCache(cKey);
+        if (cached && cacheFresh(cached) && isArray(cached.copies)) {
+            epMap[cep] = cached.copies;
+        } else {
+            allCached = false;
+            break;
+        }
+    }
+
+    var source = "cache";
+
+    if (!allCached) {
+        // ---- HTTP 批量拉取 ----
+        var deadline = nowMs() + LIB_CHECK_SOFT_BUDGET_MS;
+        var fetchResult = null;
+
+        if (isEnabled("emby_enabled")) {
+            fetchResult = embyBatchFetch(tmdbID, season, epStart, epEnd, deadline);
+        }
+        if (fetchResult === null && isEnabled("plex_enabled")) {
+            fetchResult = plexBatchFetch(tmdbID, season, epStart, epEnd, deadline);
+        }
+
+        if (fetchResult === null) {
+            incCounter("allowed_error");
+            return { allow: true, reason: "batch_check_failed" };
+        }
+
+        epMap = fetchResult.epMap;
+        source = fetchResult.source;
+
+        // 逐集写缓存（与单集路径 resolveLibraryStatus 格式一致）
+        for (var wep = epStart; wep <= epEnd; wep++) {
+            var wKey = cacheKey(tmdbType, tmdbID, season, wep);
+            writeCache(wKey, {
+                copies: epMap[wep] || [],
+                source: source,
+                ts: nowSec()
+            });
+        }
+    }
+
+    // ---- 构建 bitmap ----
+    var haveBytes = [];
+    for (var bep = epStart; bep <= epEnd; bep++) {
+        var copies = epMap[bep];
+        if (copies && copies.length > 0 && anyCopyMatchesTags(copies, tags, fc.dims)) {
+            setBitmapBit(haveBytes, bep);
+        }
+    }
+
+    // 统计 have 数量
+    var haveCount = 0;
+    var totalEps = epEnd - epStart + 1;
+    for (var sep = epStart; sep <= epEnd; sep++) {
+        if (getBitmapBit(haveBytes, sep)) haveCount++;
+    }
+
+    if (haveCount === totalEps) {
+        incCounter("vetoed");
+        return { allow: false, reason: "batch_all_in_lib" };
+    }
+    if (haveCount === 0) {
+        incCounter("allowed_not_in_lib");
+        return { allow: true, reason: "batch_none_in_lib" };
+    }
+
+    incCounter("batch_partial_filtered");
+    return { allow: true, reason: "batch_partial", have_bitmap_bytes: haveBytes, have_count: haveCount, total: totalEps };
+}
+
+
 // ====== Hook 注册 ======
 
 plugin.on("should_download", function (p) {
     try {
-        var d = decideShouldDownload(p || {});
         var media = (p && p.media) || {};
+        var episodeEnd = safeNum(String(media.episode_end == null ? "" : media.episode_end), 0);
         var dryRun = isEnabled("dry_run");
+
+        // ---- 合集路径：episode_end > 0 → bitmap 协议 ----
+        if (episodeEnd > 0) {
+            var db = decideShouldDownloadBatch(p || {});
+            log.info("media-library-filter: should_download [batch] flow=" + (p && p.flow_id) +
+                     " tmdb=" + (media.tmdb_id || "") + " s" + (media.season || 0) +
+                     " e" + (media.episode || 0) + "-" + episodeEnd +
+                     " reason=" + db.reason +
+                     (db.have_count != null ? " have=" + db.have_count + "/" + db.total : "") +
+                     " decision=" + (db.allow ? "allow" : "veto") +
+                     (dryRun && !db.allow ? " [dry_run->allow]" : ""));
+
+            if (dryRun) {
+                if (!db.allow) incCounter("dry_run_would_veto");
+                return true;
+            }
+            if (db.allow === false) return false;
+            if (db.have_bitmap_bytes && db.have_bitmap_bytes.length > 0) {
+                return { have_bitmap: bytesToBase64(db.have_bitmap_bytes) };
+            }
+            return true;
+        }
+
+        // ---- 单集/电影路径：保持原有 bool 逻辑 ----
+        var d = decideShouldDownload(p || {});
         log.info("media-library-filter: should_download flow=" + (p && p.flow_id) +
                  " tmdb=" + (media.tmdb_id || "") + " s" + (media.season || 0) + "e" + (media.episode || 0) +
                  " reason=" + d.reason +
@@ -851,6 +1134,7 @@ plugin.registerAPI("/stats", function (req) {
             allowed_tag_empty: safeNum(config.get("allowed_tag_empty"), 0),
             allowed_error: safeNum(config.get("allowed_error"), 0),
             dry_run_would_veto: safeNum(config.get("dry_run_would_veto"), 0),
+            batch_partial_filtered: safeNum(config.get("batch_partial_filtered"), 0),
             cache_write_fail: cache_write_fail
         },
         errors: {

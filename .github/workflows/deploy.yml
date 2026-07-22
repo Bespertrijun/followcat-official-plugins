@@ -1,11 +1,11 @@
 name: Build & Deploy plugin registry
 
+# 只从 tag 发布：followcat 之前同时从 main 和 tag 部署 Pages，GitHub 把默认分支(main)
+# 的部署当「主部署」服务、tag 部署只记录不生效，导致打完 tag 线上不翻、必须补一次 main
+# 构建。改成 tag-only（对齐 drivecat-official-plugins）后，tag 部署即唯一主部署，一步发布。
 on:
   push:
-    branches: [main]
     tags: ["*/v*"]
-  pull_request:
-    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -18,13 +18,20 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  build:
+  build-and-deploy:
     runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
         with:
           # build.py 需要按 tag 抽历史版本
           fetch-depth: 0
+
+      # 关键：强制拉全 tag，保证 build.py 一定看得到刚推的新 tag（否则可能按旧 tag 发布）
+      - name: Fetch all tags
+        run: git fetch --tags --force --prune
 
       - uses: actions/setup-python@v5
         with:
@@ -33,7 +40,7 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      # PR 与 push 都跑：校验 manifest 与 index.json 一致性
+      # 校验 manifest 与 index.json 一致性（permissions / hooks / source_url 必须匹配，blocking）
       - name: Validate manifest ↔ index.json consistency
         run: python scripts/build.py --check
 
@@ -46,24 +53,16 @@ jobs:
         run: python scripts/build.py
 
       - name: Upload Pages artifact
-        if: github.event_name != 'pull_request'
         uses: actions/upload-pages-artifact@v3
         with:
           path: dist/
 
-  deploy:
-    needs: build
-    if: github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - id: deployment
+      - name: Deploy to GitHub Pages
+        id: deployment
         uses: actions/deploy-pages@v4
 
   release:
-    needs: build
+    needs: build-and-deploy
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     permissions:
@@ -72,6 +71,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: Fetch all tags
+        run: git fetch --tags --force --prune
 
       - uses: actions/setup-python@v5
         with:

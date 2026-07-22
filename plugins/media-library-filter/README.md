@@ -110,6 +110,11 @@ FollowCat 主仓提供同步可否决 hook `should_download`：宿主在每次 r
 should_download(p)
   │  （全程 try/catch，任何异常 → return true）
   ▼
+media.episode_end > 0 ?
+  ├── 是 → 合集路径（见下方）
+  └── 否 → 单集/电影路径
+  ▼
+【单集/电影路径】
 flow_<p.flow_id>_enabled ≠ "1"（未启用 / 未配）     → return true   (flow_disabled)
   │  emby_enabled=0 且 plex_enabled=0               → return true   (no_backend)
   │  !p.media.tmdb_id                               → return true   (allowed_no_tmdb++)
@@ -128,6 +133,24 @@ tag 端短路：任一已配维度 p.tags[dim] 为空             → return tru
   │  所有副本均不匹配                                  → return true   (allowed_no_match++)
   ▼
 dry_run=1：以上 false 路径一律改成 return true（仅 log）
+
+【合集路径（episode_end > 0）】
+前置守卫同单集（flow / dims / backend / tmdb_id / tag 空值）
+  │  epStart ≤ 0 / epEnd ≤ 0 / epEnd < epStart     → return true   (invalid_range)
+  ▼
+缓存快路径：逐集读 lib_cache_*，全部命中且未过期      → 跳过 HTTP，直接用缓存 copies
+  │  任一集缓存缺失/过期                              → 走 HTTP 批量拉取（一次拉全季）
+  ▼
+HTTP 批量拉取：Emby 优先 → Plex 兜底
+  │  两端均失败 / 超时                                → return true   (allowed_error++)
+  │  拉取成功 → 逐集写缓存（与单集路径共享 key 格式）
+  ▼
+逐集构建 bitmap（任一副本全维度匹配 → 标记 have）：
+  │  全部集都在库中                                    → return false  (vetoed++)
+  │  无集在库中                                        → return true   (allowed_not_in_lib++)
+  │  部分集在库中                                      → return { have_bitmap }  (batch_partial_filtered++)
+  ▼
+dry_run=1：以上 false / bitmap 路径一律改成 return true（仅 log）
 ```
 
 ### 返回值契约（fail-open）
@@ -136,10 +159,12 @@ dry_run=1：以上 false 路径一律改成 return true（仅 log）
 |------|------|
 | 显式 `false` | **跳过**下载（仅在「确认库内任意副本在全部已配维度上按操作符匹配种子 tags」时返回） |
 | `true` / `undefined` / 抛错 / 超时 | **照常下载**（fail-open） |
+| `{ have_bitmap: "<base64>" }` | **合集逐集过滤**（`episode_end > 0` 时）：bitmap 标记库内已有的集，核心从缺失集中剔掉已有集，selective 模式只下剩余文件。单集路径忽略此返回值。 |
 
 - **硬超时 3 秒**：库查询整体预算 ≤2500ms（留裕量）；逼近预算即放行。Emby / Plex 不可达不会拖垮下载管线。
 - **tmdb_id 缺失**（Mikan 源常见）→ 无法精确查库 → 放行（不做标题近似兜底，避免误杀）。
-- **多插件 veto-wins**：任一插件返回 `false` 即跳过。
+- **多插件 veto-wins**：任一插件返回 `false` 即跳过；多插件 bitmap 取**并集**（OR）。
+- **Bitmap 布局**：第 N 集 → `byte[(N-1)/8]` 的 bit `((N-1)%8)`（LSB 优先），与核心 `EpBitmap` 同构。
 
 ## 自定义 API
 
@@ -191,12 +216,13 @@ dry_run=1：以上 false 路径一律改成 return true（仅 log）
 | `allowed_tag_empty` | 已配维度在种子 tags 中为空 → 放行 |
 | `allowed_error` | 异常 / 超时 / 外部故障 → fail-open 放行 |
 | `dry_run_would_veto` | dry_run 模式下本应否决的次数 |
+| `batch_partial_filtered` | 合集部分集在库中 → 返回 bitmap 逐集过滤的次数 |
 | `cache_write_fail` | 缓存写入失败次数（config 配额超限等，可观测） |
 
 ## 注意事项
 
 - **3s 硬超时**：Emby（series 定位 + episode 列表）+ Plex 串行；逼近 2500ms 软预算即放行。库很大时建议优先只启用一个后端。
-- **缓存存副本事实列表，不存结论**：缓存 key 为 `lib_cache_<type>_<tmdb_id>_s<季>_e<集>`，value 为该集所有副本的属性列表。命中后按**当前 flow 维度+操作符与种子 tags 现场比对**，同一集可被不同 flow 判出不同结果。外部故障路径**不写缓存**，避免把「暂时查不到」固化。
+- **缓存存副本事实列表，不存结论**：缓存 key 为 `lib_cache_<type>_<tmdb_id>_s<季>_e<集>`，value 为该集所有副本的属性列表。命中后按**当前 flow 维度+操作符与种子 tags 现场比对**，同一集可被不同 flow 判出不同结果。外部故障路径**不写缓存**，避免把「暂时查不到」固化。**合集批量路径与单集路径共享同一份 per-episode 缓存**——单集查过的集在合集里直接命中，反过来也一样。
 - **HTTP rate limit 60/min**：缓存 + per-flow 默认未启用基本可控；高频入库可放大 `cache_ttl_sec`。
 - **fail-open 哲学**：宁可多下一份，也不因 Emby 宕机永久漏下。查 `emby_last_error` / `plex_last_error` 跟踪连续故障。
 - **双端 fail-open**：tag 端（种子标题未解析出某维度）或库端（副本缺某属性）任一端为空 → 该维度不匹配 → 放行方向。绝不会因为某一端缺数据而误否决。

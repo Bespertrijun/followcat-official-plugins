@@ -70,10 +70,56 @@ plugin.on("should_download", function(p) {
 |--------|------|
 | 显式 `false` | **跳过**下载（种子记 `excluded`，不推进入库进度） |
 | `true` / `undefined` / 非布尔 / 抛错 / 超时 | **照常下载**（fail-open） |
+| `{ have_bitmap: "<base64>" }` | **合集逐集过滤**（v0.4+）：仅对 `episode_end > 0` 的合集种子生效。bitmap 标记媒体库已有的集，核心从缺失集中剔掉已有集，selective 模式只下剩余文件。单集路径忽略此返回值。 |
 
 - **硬超时 3 秒**：插件没在 3s 内返回 → fail-open 放行（外部库不可达也不拖垮下载管线）。
-- **多插件 veto-wins**：任一插件返回 `false` 即跳过。
+- **多插件 veto-wins**：任一插件返回 `false` 即跳过；多插件 bitmap 取**并集**（OR）。
 - 失败策略（外部库挂了算"有"还是"没有"）由插件自行决定——宿主只认显式 `false`。
+
+#### 合集 bitmap 协议（v0.4+）
+
+当 `payload.media.episode_end > 0`（合集种子）时，插件可返回 `{ have_bitmap: "<base64>" }` 实现逐集过滤：
+
+**Bitmap 布局**（与核心 `EpBitmap` 同构）：
+
+```
+第 N 集 → byte[(N-1) / 8] 的 bit ((N-1) % 8)（LSB 优先）
+
+例：ep9 有、ep10 没有
+  byte[0] = 00000000  (ep1-8)
+  byte[1] = 00000001  (bit0=ep9 有, bit1=ep10 无)
+  base64("AAE=") → { have_bitmap: "AAE=" }
+```
+
+**构建示例**：
+
+```js
+plugin.on("should_download", function(p) {
+  var epStart = p.media.episode;
+  var epEnd = p.media.episode_end;
+  if (!epEnd) return !libraryHas(p);  // 单集：原有 bool
+
+  // 合集：查 Emby，构建 bitmap
+  var bytes = [];
+  for (var ep = epStart; ep <= epEnd; ep++) {
+    if (embyHasEpisode(p.media.tmdb_id, p.media.season, ep)) {
+      var byteIdx = (ep - 1) >> 3;
+      var bitIdx = (ep - 1) & 7;
+      while (byteIdx >= bytes.length) bytes.push(0);
+      bytes[byteIdx] |= (1 << bitIdx);
+    }
+  }
+
+  var haveCount = countBits(bytes, epStart, epEnd);
+  if (haveCount === epEnd - epStart + 1) return false;  // 全有 → 整包不下
+  if (haveCount === 0) return true;                      // 全无 → 全下
+  return { have_bitmap: bytesToBase64(bytes) };          // 部分有 → 逐集过滤
+});
+```
+
+**核心侧行为**：收到 `have_bitmap` 后，从 `missingEps`（bitmap 未标记的集）中剔掉插件报告已有的集，selective 模式的 `SetFilePriority` 只下载真正缺失的文件。若剔完后 `missingEps` 为空，整包记 `excluded`。
+
+**注意**：bitmap 长度无需与核心 `EpBitmap` 对齐——核心逐集点查，越界自动视为"没有"。只需覆盖到 `episode_end` 即可。
 
 ### payload（`PreDownloadCheck`）
 
