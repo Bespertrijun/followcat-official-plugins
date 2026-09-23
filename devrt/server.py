@@ -97,6 +97,15 @@ HOOK_SAMPLES: Dict[str, Dict[str, Any]] = {
         "anime_title": "DevRT Sample Anime",
         "total_ep": 12,
     },
+    "on_task_reopened": {
+        "source": "mikan",
+        "task_id": "task-001",
+        "media_id": "anime-001",
+        "media_title": "DevRT Sample Anime",
+        "old_total_ep": 12,
+        "new_total_ep": 13,
+        "acquired_units": 12,
+    },
     "on_notification_before_send": {
         "event_type": "on_download_done",
         "channel": "slack",

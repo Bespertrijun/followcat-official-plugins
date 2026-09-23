@@ -89,7 +89,7 @@ qBit / linker --->|  EventBus 同步分 |       |
 ### `permissions` 与 `hooks` 必须**双校验**
 
 权限白名单见 sdk.md，完整 hook 白名单见 sdk.md「Hook 列表」。其中 `should_download` 是**同步否决 hook**（读返回值可拦下载，需 `hook.download`，详见 sdk.md「同步否决 hook」），其余 `on_*` 都是只读通知 hook：
-`on_episode_found`, `on_download_done`, `on_download_failed`, `on_link_done`, `on_link_failed`, `on_task_completed`, `on_notification_before_send`, `on_notification_after_send`。
+`on_episode_found`, `on_download_done`, `on_download_failed`, `on_link_done`, `on_link_failed`, `on_task_completed`, `on_task_reopened`, `on_notification_before_send`, `on_notification_after_send`。
 
 **关键点**：`plugin.on("on_link_done", fn)` 只有当 manifest 同时声明
 `"hooks": [..., "on_link_done", ...]` **且** `"permissions": [..., "hook.link", ...]`
@@ -99,7 +99,8 @@ qBit / linker --->|  EventBus 同步分 |       |
 |------|------------------|
 | `on_episode_found`, `on_download_done`, `on_download_failed`, `should_download` | `hook.download` |
 | `on_link_done`, `on_link_failed` | `hook.link` |
-| `on_task_completed` | `hook.task` |
+| `on_task_completed`, `on_task_reopened` | `hook.task` |
+| `on_notification_before_send`, `on_notification_after_send` | `hook.notify` |
 
 ---
 

@@ -152,8 +152,10 @@ const HOOK_PERM_REQ = {
   on_link_done: 'hook.link',
   on_link_failed: 'hook.link',
   on_task_completed: 'hook.task',
+  on_task_reopened: 'hook.task',
   on_notification_before_send: 'hook.notify',
   on_notification_after_send: 'hook.notify',
+  should_download: 'hook.download',
 };
 
 const plugin = {
@@ -182,10 +184,12 @@ const ruleflow = {
 };
 
 const sandbox = {
-  plugin, log, config, anime, task,
-  // Conditionally inject http only if api.http permission declared, mirror host
+  plugin, log, config,
+  // Conditionally inject anime/task/http/ruleflow only when the matching
+  // permission is declared, mirror host (internal/plugin/runtime.go)
+  anime: declaredPerms.has('api.anime.read') ? anime : undefined,
+  task: declaredPerms.has('api.task.read') ? task : undefined,
   http: declaredPerms.has('api.http') ? http : undefined,
-  // Conditionally inject ruleflow only if api.ruleflow permission declared, mirror host
   ruleflow: declaredPerms.has('api.ruleflow') ? ruleflow : undefined,
   // utility: runtime needs Date / JSON / Math / etc — vm provides them by default
   setTimeout: undefined,        // goja: no timers

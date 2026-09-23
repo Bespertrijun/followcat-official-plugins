@@ -31,7 +31,7 @@ my-plugin/
 
 ---
 
-## Hook 列表（MVP 8 个）
+## Hook 列表（MVP 9 个）
 
 > JS 侧通过 `plugin.on("<hook_name>", function(data) { ... })` 订阅。同名 hook 多次注册以最后一次为准。所有 hook payload 字段命名见 `internal/domain/event.go`，并由 `internal/domain/event_payload_test.go` 锁定。
 
@@ -43,6 +43,7 @@ my-plugin/
 | `on_link_done` | 链接整理完成 | `anime_id`, `anime_title`, `episode`, `dest?`, `tmdb_episode?` |
 | `on_link_failed` | 链接执行失败 | `anime_id`, `anime_title`, `episode`, `reason`, `hash?` |
 | `on_task_completed` | 番剧全集追完 | `task_id`, `anime_title`, `total_ep` |
+| `on_task_reopened` | 已完成任务因总集数上调/新集出现被打回继续追更（done→tracking） | `source`（`"mikan"`/`"douban"`）, `task_id`, `media_id`, `media_title`, `old_total_ep`, `new_total_ep`, `acquired_units` |
 | `on_notification_before_send` | 主仓 `internal/notify` 即将通过某通道发送通知前 | `event_type`, `channel` ("slack"/"telegram"), `text`, `anime_id?`, `anime_title?`, `episode?` |
 | `on_notification_after_send` | 单条通知发送结束（成功或失败） | `event_type`, `channel`, `success`, `error_message?`, `anime_id?`, `anime_title?`, `episode?` |
 
@@ -54,7 +55,7 @@ my-plugin/
 
 ## 同步否决 hook：`should_download`（需 `hook.download`）
 
-> ⚠️ 与上面 8 个 **fire-and-forget 通知 hook 不同**，`should_download` 是**同步、可否决**的 hook——宿主在每次 ruleflow 推送种子到 qBittorrent **之前**同步调用它，并**读取返回值**决定是否真的下载。典型用途：查询外部媒体库（Emby / Jellyfin / Plex），若该集已存在则拦下、不重复下载。
+> ⚠️ 与上面 9 个 **fire-and-forget 通知 hook 不同**，`should_download` 是**同步、可否决**的 hook——宿主在每次 ruleflow 推送种子到 qBittorrent **之前**同步调用它，并**读取返回值**决定是否真的下载。典型用途：查询外部媒体库（Emby / Jellyfin / Plex），若该集已存在则拦下、不重复下载。
 
 ### 注册与返回值契约
 
@@ -448,7 +449,7 @@ var flows = ruleflow.list()
 |------|---------|
 | `hook.download` | 允许订阅 `on_episode_found` / `on_download_done` / `on_download_failed`，以及同步否决 hook `should_download` |
 | `hook.link`     | 允许订阅 `on_link_done` / `on_link_failed` |
-| `hook.task`     | 允许订阅 `on_task_completed` |
+| `hook.task`     | 允许订阅 `on_task_completed` / `on_task_reopened` |
 | `hook.notify`   | 允许订阅 `on_notification_before_send` / `on_notification_after_send` |
 | `api.http`      | 注入全局 `http` |
 | `api.anime.read` | 注入全局 `anime` |
