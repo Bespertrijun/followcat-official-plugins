@@ -49,7 +49,7 @@ my-plugin/
 
 > `?` 表示后端可能省略（omitempty）；插件代码须自行做空值兜底。
 >
-> **`on_notification_*` 语义**：主仓自 v3.5 起把 Slack / Telegram 发送、节流、重试等业务逻辑收回到 `internal/notify`，提供这两个 hook 给插件**观察**（fire-and-forget，无 veto / payload 改写）。常见用法：把通知 fan-out 到主仓未内置的通道（钉钉 / 飞书 / 企业微信），或上报到可观测系统（Sentry / Slack 旁路）。**不要**在 `before_send` 里调 `http.*` 阻塞太久——10s hook 超时会被强制中断且影响主仓后续 channel 发送。
+> **`on_notification_*` 语义**：主仓自 v3.5 起把 Slack / Telegram 发送、节流、重试等业务逻辑收回到 `internal/notify`，提供这两个 hook 给插件**观察**（fire-and-forget，无 veto / payload 改写）。常见用法：把通知 fan-out 到主仓未内置的通道（钉钉 / 飞书 / 企业微信），或上报到可观测系统（Sentry / Slack 旁路）。**不要**在 `before_send` 里做耗时太久的 `http.*`——hook 整次调用墙钟 10s（含 `await`），超时后结果被丢弃；hook 是 fire-and-forget 投递，本来就不会拖住主仓的 channel 发送。
 
 ---
 
@@ -73,7 +73,8 @@ plugin.on("should_download", function(p) {
 | `true` / `undefined` / 非布尔 / 抛错 / 超时 | **照常下载**（fail-open） |
 | `{ have_bitmap: "<base64>" }` | **合集逐集过滤**（v0.4+）：仅对 `episode_end > 0` 的合集种子生效。bitmap 标记媒体库已有的集，核心从缺失集中剔掉已有集，selective 模式只下剩余文件。单集路径忽略此返回值。 |
 
-- **硬超时 3 秒**：插件没在 3s 内返回 → fail-open 放行（外部库不可达也不拖垮下载管线）。
+- **硬超时 3 秒**（墙钟，**含 `await` 期间**）：插件没在 3s 内返回 / Promise 没在 3s 内 settle → fail-open 放行（外部库不可达也不拖垮下载管线）；超时后 Promise 才到的结果被丢弃。
+- **回调可以 `async`**：查外部库要 `await http.get(...)`（见下文「同步 / 异步 facade 一览」），宿主等返回的 Promise settle 后再读值；resolve `false` 与同步 `return false` 等价，reject 与抛错等价（fail-open）。
 - **多插件 veto-wins**：任一插件返回 `false` 即跳过；多插件 bitmap 取**并集**（OR）。
 - 失败策略（外部库挂了算"有"还是"没有"）由插件自行决定——宿主只认显式 `false`。
 
@@ -167,12 +168,62 @@ plugin.on("should_download", function(p) {
 
 > 未声明对应权限时，对应全局对象为 `undefined`，插件可用 `typeof xxx === "object"` 自检。
 
+### 同步 / 异步 facade 一览
+
+一句话规则：**碰网络 / 外部进程的返回 Promise，纯本地的保持同步。**
+
+| 类别 | facade | 调用方式 |
+|------|--------|---------|
+| 同步（本地存储 / 纯计算，毫秒级） | `plugin.*`、`log.*`、`config.*`、`data.*`、`anime.get`、`task.get/list`、`ruleflow.list` | 直接取返回值：`var v = config.get("k")` |
+| **异步（返回 Promise）** | `http.get/post/put/delete` | 必须 `await`（或 `.then`）：`var resp = await http.get(url)` |
+
+> ⚠️ **破坏性变更：`http.*` 现在返回 Promise，没有同步别名。** 旧写法 `var resp = http.get(url); resp.status` 拿到的是 Promise 对象，`resp.status` 为 `undefined`。所在函数改成 `async function`，调用处加 `await`，并把 `async` 一路传到回调（hook / registerAPI / should_download 都支持 async，见下）。失败（网络错误、超时、限流、SSRF 拦截）以 **reject** 形式交付——`await` 处抛出的仍是原来那个错误对象（`e.message` 形如 `http GET <url>: ...`），`try { await http.get(...) } catch (e) {}` 照常能接住。
+
+#### 回调可以是 `async`
+
+`plugin.on` / `plugin.registerAPI` / `should_download` 的回调都可以返回 Promise（写成 `async function` 即可），宿主等它 settle：resolve 的值等同同步 `return`，reject 等同抛错。非 async 回调行为不变。
+
+```js
+// hook：await 期间同一插件的其它任务可以先跑
+plugin.on("on_download_done", async function (p) {
+  try {
+    var resp = await http.post(webhookUrl, JSON.stringify({ ep: p.episode }), { "Content-Type": "application/json" });
+    if (resp.status >= 400) log.warn("webhook " + resp.status);
+  } catch (e) {
+    log.error("webhook 失败: " + e);
+  }
+});
+
+// registerAPI：返回值（resolve 的值）照常 JSON 序列化给前端
+plugin.registerAPI("/ping-emby", async function (req) {
+  var resp = await http.get(config.get("emby_url") + "/emby/System/Info/Public", { "Accept": "application/json" });
+  return { ok: resp.status === 200 };
+});
+
+// should_download：resolve false → 跳过下载；reject / 超时 → fail-open 放行
+plugin.on("should_download", async function (p) {
+  try {
+    var resp = await http.get(libraryQueryUrl(p), { "Accept": "application/json" });
+    return !alreadyInLibrary(resp);
+  } catch (e) {
+    return true; // 外部库挂了：放行
+  }
+});
+```
+
+#### 超时语义
+
+- 每次调用一个**墙钟**，**含 `await` 期间**：hook **10s** / `should_download` **3s** / registerAPI **10s**。超时即丢弃该次调用的结果（之后 Promise 才 settle 也被忽略），插件继续运行。
+- `http.*` 每个请求固定 **10s** 超时（与所属调用的墙钟无关）。
+- 纯 JS 死循环（同步段里、没 `await` 的 `while(true){}`）仍会被宿主打断；**`await` 之后的续体里写出的死循环宿主不看管**（插件作者负责），它会让整个插件卡住。停用 / 重装 / 自动停用会打断一切（含续体死循环）、取消在途 `http` 请求，插件完全退出。
+- 沙箱**没有** `setTimeout` / `setInterval`，也没有 `require`；需要"稍后再做"请用标志位 + 下一次 hook 消费。
+
 ### `plugin` —— 注册中心（始终可用）
 
 | 方法 | 签名 | 说明 |
 |------|------|------|
-| `plugin.on(name, fn)` | `(string, function(data))` | 注册 hook 处理函数 |
-| `plugin.registerAPI(path, fn)` | `(string, function(req) → any)` | 注册自定义 API；前端通过 `/api/plugins/<id>/api<path>` 调用，返回值 JSON 序列化 |
+| `plugin.on(name, fn)` | `(string, function(data))` | 注册 hook 处理函数；可为 `async function`（宿主等 Promise settle） |
+| `plugin.registerAPI(path, fn)` | `(string, function(req) → any \| Promise<any>)` | 注册自定义 API；前端通过 `/api/plugins/<id>/api<path>` 调用，返回值（或 Promise resolve 的值）JSON 序列化 |
 
 ### `log` —— 日志（始终可用）
 
@@ -277,20 +328,27 @@ PUT /api/admin/settings
 
 越界返 `412 Precondition Failed`。改后调 `POST /api/admin/settings/refresh` 立即生效（默认 5 分钟 TTL 自动刷新）。
 
-### `http` —— HTTP 客户端（需 `api.http`）
+### `http` —— HTTP 客户端（需 `api.http`，**异步**）
+
+> ⚠️ **破坏性变更**：全部方法返回 **Promise**，无同步别名，调用处必须 `await`（详见上文「同步 / 异步 facade 一览」）。
 
 | 方法 | 签名 |
 |------|------|
-| `http.get(url, headers)` | `(string, map<string,string>) → {status, headers, body, truncated}` |
-| `http.post(url, body, headers)` | `(string, string, map<string,string>) → ...` |
-| `http.put(url, body, headers)` | `(string, string, map<string,string>) → ...` |
-| `http.delete(url, headers)` | `(string, map<string,string>) → ...` |
+| `http.get(url, headers)` | `(string, map<string,string>) → Promise<{status, headers, body, truncated}>` |
+| `http.post(url, body, headers)` | `(string, string, map<string,string>) → Promise<...>` |
+| `http.put(url, body, headers)` | `(string, string, map<string,string>) → Promise<...>` |
+| `http.delete(url, headers)` | `(string, map<string,string>) → Promise<...>` |
+
+```js
+var resp = await http.get(url, { "Accept": "application/json" }); // 所在函数须为 async function
+```
 
 约束：
 
 - 单次响应体上限 **5 MiB**，超出截断并设 `truncated=true`
-- 单插件令牌桶 **60 req/min**，超限抛错
+- 单插件令牌桶 **60 req/min**，超限 **reject**（`plugin http rate limit exceeded (60 req/min)`）
 - 单次请求 **10 秒**超时；最多 3 次重定向
+- 网络错误 / 超时 / 限流 / SSRF 拦截一律 reject（`e.message` 形如 `http GET <url>: ...`）；4xx/5xx **不** reject，看 `resp.status`
 - `body` 是 string；JSON 请求自行 `JSON.stringify` + 设 `Content-Type: application/json`
 
 ### `anime` —— 番剧只读（需 `api.anime.read`）
@@ -437,7 +495,7 @@ var flows = ruleflow.list()
 - **无热重载**：插件代码改动需重新上传/启用；配置改动是热生效。
 - **单 hook 仅最后注册有效**：同一 plugin 内重复 `plugin.on("x", ...)` 后者覆盖前者。
 - **manifest 大小** ≤ 64 KiB，单文件 ≤ 5 MiB，zip 总解压 ≤ 20 MiB / ≤ 200 条目。
-- **执行模型**：每个插件单 goroutine 串行执行 hook，队列容量 64，满则 drop-oldest 并 WARN；超时 10s 强制中断；1 分钟内 5 次 panic 自动熔断（disable）。
+- **执行模型**：每个插件一个 JS 引擎 + 一个事件循环（仍是单线程，插件间隔离）。任务按队列顺序逐个执行同步段，队列容量 64，满则 drop-oldest 并 WARN；async 回调 `await` 期间，同一插件的其它任务可以先跑（完成顺序不保证）。墙钟超时 hook 10s / registerAPI 10s / `should_download` 3s（含 `await`）；1 分钟内 5 次 panic 自动熔断（disable）。
 
 ---
 

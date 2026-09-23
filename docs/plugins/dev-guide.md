@@ -49,13 +49,14 @@ plugin.on("on_task_completed", function (data) {
                   +------------------+        plugin.on("hook", fn)
 RSS / 调度器 ---> |                  | ---> 你写的 JS（goja 沙箱）
 qBit / linker --->|  EventBus 同步分 |       |
-                  |  发到每个插件     |       +--> http.post("...")
+                  |  发到每个插件     |       +--> await http.post("...")
                   |                  |       +--> log.info(...)
                   +------------------+       +--> config.set(...)
 ```
 
 - **Hook 是只读通知**：你看到的 `data` 是宿主推过来的副本，改它不会影响主流程。
-- **每个插件一个 goroutine**：你的代码是单线程串行执行，hook 之间不会并发；但**别在 hook 里阻塞超过 10 秒**，会被强制中断。
+- **每个插件一个事件循环**：你的代码仍是单线程执行（不用加锁），同步代码段之间不会并发；但 `async` 回调在 `await`（比如 `await http.get(...)`）期间，同一插件的其它 hook / API 可以先跑。每次调用有墙钟上限（hook 10s / API 10s / `should_download` 3s，**含 `await`**），超时结果被丢弃。
+- **出网是异步的**：`http.*` 返回 Promise，所在函数写成 `async function` 并 `await`（见 §5）；其余 facade（`config` / `data` / `anime` / `task` / `ruleflow` / `log`）是同步的。
 - **凭证不会泄漏**：`anime.get` 返回的是脱敏 view，拿不到 `Server.Password` 之类。
 - **没有文件系统、没有 require**：能用的就是 `log` / `config` / `http` / `anime` / `task` / `plugin` 这 6 个全局对象。
 
@@ -119,14 +120,14 @@ plugin.on("on_download_done", function (data) {
   var files = data.files || [];
   var path = data.save_path || "未知";
 
-  // ❌ 错误：files 可能 undefined → undefined.length 抛错 → 触发 panic 计数
+  // ❌ 错误：files 可能 undefined → undefined.length 抛错 → 本次 hook 作废、记 last_error
   for (var i = 0; i < data.files.length; i++) { ... }
 });
 ```
 
 ### 黄金规则：异常被隔离，但**别浪费**
 
-插件抛错不会影响主流程，会被 worker recover 后写到 `last_error_msg`。但 1 分钟内 5 次 panic 会**自动 disable**插件。所以：
+插件抛错（含 async 回调 reject）不会影响主流程，宿主记 WARN 并写到 `last_error_msg`，**不计 panic**；`panic_count` 只统计宿主侧 Go panic，1 分钟内 5 次会**自动 disable**插件。但抛错会让这次 hook 的后续逻辑全部作废，所以：
 
 ```js
 plugin.on("on_download_done", function (data) {
@@ -141,17 +142,19 @@ plugin.on("on_download_done", function (data) {
 
 ### 黄金规则：HTTP 失败也要 try/catch
 
-`http.post` 在 4xx/5xx/超时/网络错误时 **throw**。永远包：
+`http.post` 返回 Promise，在超时 / 网络错误 / 限流时 **reject**——`await` 处会抛出；4xx/5xx 不 reject，要看 `resp.status`。永远包（try/catch 必须包住 `await` 那一行才接得住）：
 
 ```js
-try {
-  var resp = http.post(url, body, headers);
-  if (resp.status >= 400) {
-    log.warn("upstream " + resp.status + ": " + resp.body);
+plugin.on("on_download_done", async function (data) {
+  try {
+    var resp = await http.post(url, body, headers);
+    if (resp.status >= 400) {
+      log.warn("upstream " + resp.status + ": " + resp.body);
+    }
+  } catch (e) {
+    log.error("http.post 失败: " + e);
   }
-} catch (e) {
-  log.error("http.post 失败: " + e);
-}
+});
 ```
 
 ---
@@ -350,34 +353,41 @@ FC.ready().then(async function () {
 
 ## 5. HTTP 调用：`http`
 
+> ⚠️ **破坏性变更**：`http.*` 全部返回 **Promise**，没有同步别名。调用处必须 `await`，所在函数写成 `async function`，并一路 `async` 到回调（hook / registerAPI / `should_download` 都支持 async 回调）。忘了 `await` 拿到的是 Promise 对象，`resp.status` 为 `undefined`。
+
 ```js
+// 以下代码都在某个 async function 里（例如 plugin.on("...", async function (data) { ... })）
+
 // GET
-var resp = http.get("https://api.example.com/users", {
+var resp = await http.get("https://api.example.com/users", {
   "Authorization": "Bearer xxx"
 });
 // resp = { status: 200, headers: {...}, body: "...", truncated: false }
 
 // POST JSON（必须自己 stringify + 设 Content-Type）
-var resp = http.post(
+var resp = await http.post(
   "https://hooks.slack.com/services/T00/B00/xyz",
   JSON.stringify({ text: "hello" }),
   { "Content-Type": "application/json" }
 );
 
 // POST form
-var resp = http.post(
+var resp = await http.post(
   "https://api.example.com/form",
   "field1=value1&field2=value2",
   { "Content-Type": "application/x-www-form-urlencoded" }
 );
 ```
 
+多个请求**按顺序** `await` 即串行执行；`await` 期间插件的其它任务可以先跑，但同一次调用的墙钟（hook 10s / API 10s / `should_download` 3s）照算 `await` 时间。
+
 ### 限制（来自宿主）
 
-- 单次 **10 秒** 超时
+- 单次 **10 秒** 超时（每个请求固定，与所属调用的墙钟无关）
 - 响应体 **5 MiB** 上限，超出截断（`truncated=true`）
-- 单插件 **60 req/min** 令牌桶，超限 throw `"http rate limit exceeded"`
+- 单插件 **60 req/min** 令牌桶，超限 **reject** `"plugin http rate limit exceeded (60 req/min)"`
 - 最多 **3 次重定向**
+- 网络错误 / 超时 / 限流 / SSRF 拦截一律 reject，错误对象与旧同步版抛出的相同（`e.message` 形如 `http GET <url>: ...`）
 
 ### 防 rate-limit 的两种姿势
 
@@ -420,6 +430,19 @@ GET /api/plugins/<your-plugin-id>/api/stats
 
 **返回值会被 JSON 序列化**——返回 string/number/object/array 都行，但要能 marshal。
 
+回调可以是 `async function`：返回的 Promise resolve 的值照常序列化，reject 等同抛错（前端收到错误）；整次调用 **10 秒**墙钟（含 `await`）：
+
+```js
+plugin.registerAPI("/test-webhook", async function (req) {
+  try {
+    var resp = await http.get(config.get("webhook_url"), {});
+    return { ok: resp.status < 400, status: resp.status };
+  } catch (e) {
+    return { ok: false, error: String(e) };
+  }
+});
+```
+
 **`req` 对象**目前提供：
 - `req.method` —— `"GET"` / `"POST"` / 等
 - `req.body` —— 原始字节 string（不自动 JSON parse）
@@ -460,8 +483,8 @@ GET /api/plugins/<your-plugin-id>/api/stats
 | `plugin.on: hook "x" not in manifest.hooks` | manifest hooks 数组缺 `"x"` | 加进去 |
 | `plugin.on: hook "x" requires permission "hook.y"` | manifest permissions 缺 `"hook.y"` | 加进去 |
 | `http rate limit exceeded` | 60 req/min 超限 | 节流或合并 |
-| `dropped_count` 持续增长 | hook 处理太慢 | 优化逻辑、用 setTimeout 异步、降级到 batch |
-| `panic_count = 5` 然后插件被禁用 | 你抛了未捕获的异常 | try/catch 包好，**特别是 http 调用** |
+| `dropped_count` 持续增长 | hook 的同步段太慢（队列按同步段逐个消费，满 64 丢最旧） | 出网一律 `await`（等待期间不占队列）、减少同步计算、合并事件 / 降级到 batch（沙箱没有 `setTimeout`） |
+| `panic_count = 5` 然后插件被禁用 | 宿主侧 Go panic（插件 JS 的 throw / reject 不计入 panic，只写 `last_error_msg`） | 看日志里的 panic 堆栈，多为宿主问题，附日志反馈 |
 | 日志看不到任何输出 | hook 名拼错 / manifest 没声明该 hook | 对照 sdk.md hook 列表 |
 
 ### 本地迭代流程
@@ -491,7 +514,7 @@ GET /api/plugins/<your-plugin-id>/api/stats
 - **跨通道去重**：主仓启用多 channel 时同事件会触发 N 次 hook，用内存 map 在 5 s 窗口内只放行第一次
 - **自家 fan-out**：库里没有时 POST 一份到 Telegram bot 或通用 webhook（用户可选）
 - **fail-open**：Emby / Plex 不可达时按"库里没有"处理，宁可多推不漏推
-- **soft budget**：库查询 4 s 软超时，给后续 fan-out 留出 host 10 s 硬预算的余量
+- **soft budget**：库查询 2.5 s 软超时，给 host `should_download` 3 s 硬超时（墙钟，含 `await`）留出余量
 - **dry-run + suppress_event_types**：调试 / 强制静默某些事件的开关
 - **统计 API**：`GET /api/plugins/<id>/api/stats` 返回过滤命中、fan-out 成功失败、各通道 last_error
 - **trace API**：`GET /api/plugins/<id>/api/check?anime_id=N` 单次库查询透传（不写缓存）
@@ -505,12 +528,12 @@ GET /api/plugins/<your-plugin-id>/api/stats
 ```js
 // ❌ 1. 在 hook 里跑死循环
 plugin.on("on_download_done", function (data) {
-  while (true) { /* 10 秒后 runtime.Interrupt 杀掉，panic_count++ */ }
+  while (true) { /* 10 秒后宿主打断，本次 hook 以超时错误结束（记 last_error，不计 panic）；这 10 秒里本插件其它任务全部排队 */ }
 });
 
 // ❌ 2. 同步等数秒
 plugin.on("on_download_done", function (data) {
-  for (var i = 0; i < 1000000000; i++) {} // 烧 CPU 几秒，会被中断
+  for (var i = 0; i < 1000000000; i++) {} // 烧 CPU 几秒：同步段占住事件循环，本插件其它任务（含 await 回来的续体）全得等；超过 10 秒墙钟才被打断
 });
 
 // ❌ 3. 信任 data 字段全有
@@ -522,16 +545,28 @@ plugin.on("on_link_done", function (data) {
 var TOKEN = "xoxb-1234-actual-secret"; // 上传 zip 后明文落地，请用 config + is_secret
 
 // ❌ 5. 一个事件发 N 个 http
-plugin.on("on_download_done", function (data) {
+plugin.on("on_download_done", async function (data) {
   for (var i = 0; i < data.files.length; i++) {
-    http.post(...); // files 多了直接打爆 60/min 限速
+    await http.post(...); // files 多了直接打爆 60/min 限速
   }
 });
 
-// ❌ 6. registerAPI 里同步发邮件然后返回
-plugin.registerAPI("/notify-all", function (req) {
-  for (var i = 0; i < users.length; i++) http.post(...); // 累计 >10s 会超时
+// ❌ 6. registerAPI 里逐个发邮件然后返回
+plugin.registerAPI("/notify-all", async function (req) {
+  for (var i = 0; i < users.length; i++) await http.post(...); // 累计 >10s（含 await）会超时
   return { sent: users.length };
+});
+
+// ❌ 7. 忘了 await
+plugin.on("on_download_done", async function (data) {
+  var resp = http.get(url, {}); // resp 是 Promise，不是响应
+  if (resp.status !== 200) { ... } // 永远成立：resp.status === undefined
+});
+
+// ❌ 8. await 之后写死循环
+plugin.on("on_download_done", async function (data) {
+  await http.get(url, {});
+  while (true) {} // 续体里的死循环宿主不打断：整个插件卡住，只能停用
 });
 
 // ✅ 反模式 6 的修法：异步触发，立即返回

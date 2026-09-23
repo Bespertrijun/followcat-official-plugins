@@ -82,16 +82,16 @@ python devrt/server.py cookiecloud --persist
 | 维度 | DevRT | FollowCat 主服务 |
 |------|-------|------------------|
 | JS 引擎 | Node `vm` 模块 | goja（Go） |
-| `http.*` | 默认 mock；`--allow-http` 后用 Node fetch（同步通过 spawnSync） | 60 req/min 令牌桶 + 5 MiB 上限 |
+| `http.*` | 返回 Promise（同生产）；默认 mock；`--allow-http` 后用 Node fetch，每请求 10s、5 MiB 截断、60 req/min 令牌桶、失败 reject `GoError`（`http <METHOD> <url>: ...`）；无 SSRF 守卫、重定向不限 3 次 | 返回 Promise；60 req/min 令牌桶 + 5 MiB 上限 + 每请求 10s + 最多 3 次重定向 + SSRF 守卫 |
 | `config.set` | 内存 / 持久化 JSON | SQLite + AES-256-GCM 加密（is_secret） |
 | iframe 安全 | `sandbox="allow-scripts allow-forms"`（同生产） | 同 + CSP `connect-src 'none'` |
 | panic 计数 / 自动 disable | 不做 | 1 分钟 5 次 panic 自动 disable |
-| 队列 / 节流 / 超时 | 直跑，无队列 | 64 队列、10s 超时、单 goroutine |
+| 队列 / 节流 / 超时 | 无队列；墙钟超时同生产（hook 10s / API 10s / `should_download` 3s fail-open，含 `await`），同步段死循环按超时打断，async 回调 reject 等同抛错 | 64 队列、墙钟超时（含 `await`）、每插件一个事件循环 |
 
 DevRT 用来打通整体流程（hook → log → 调 API → UI 联动），上线前请在真实 FollowCat 做一次集成验证。
 
 ## 已知限制
 
-- `http.*` 在 ALLOW_HTTP 模式下每次请求都会 spawn 一个 Node 子进程做同步 fetch，单次约 50–200ms。仅适合开发，不要拿来做压测。
-- 当前 DevRT 不模拟单 plugin 单 goroutine 的串行约束。多事件并发触发时行为与生产可能不一致；请避免高并发触发。
+- 当前 DevRT 不模拟生产的任务队列（64 容量 / drop-oldest）。async 回调 `await` 期间其它触发可以并发进来（与生产一致），但高并发触发时的排队 / 丢弃行为与生产不同。
+- hook 抛错 / reject 在 DevRT 里直接作为错误返回给触发方（便于调试）；生产宿主只记 WARN + `last_error`。
 - `config.put(..., is_secret=true)` 在 DevRT 里**不做加密**，只把值存 JSON。生产环境的加密由宿主完成。

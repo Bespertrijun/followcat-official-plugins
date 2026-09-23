@@ -441,7 +441,9 @@ def build_app(sandbox: NodeSandbox, persist_path: Optional[Path]) -> FastAPI:
         if hook not in sandbox.state.hooks_registered:
             raise HTTPException(400, f"hook not registered: {hook}")
         try:
-            sandbox.trigger(hook, data)
+            # 放到线程里等：插件回调可 async（sandbox 侧 await 其 Promise），阻塞等待不能卡住
+            # 事件循环，否则一个在 await 的慢 hook 会让其它请求（UI 调 API 等）全部排队
+            await asyncio.to_thread(sandbox.trigger, hook, data)
             return {"ok": True}
         except Exception as e:
             raise HTTPException(500, str(e))
@@ -453,7 +455,8 @@ def build_app(sandbox: NodeSandbox, persist_path: Optional[Path]) -> FastAPI:
         if path not in sandbox.state.apis_registered:
             raise HTTPException(404, f"api not registered: {path}")
         try:
-            return {"ok": True, "result": sandbox.call_api(path, req).get("result")}
+            result = await asyncio.to_thread(sandbox.call_api, path, req)
+            return {"ok": True, "result": result.get("result")}
         except Exception as e:
             raise HTTPException(500, str(e))
 

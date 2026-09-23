@@ -72,6 +72,8 @@ var keys = config.list();  // ["cover_index"]
 
 需要 **FollowCat ≥ v3.4**（包含 phase1 + phase2 合并后的 release）。
 
+**0.2.0 起**另需 **FollowCat 事件循环插件运行时**：`http.*` 现返回 Promise，封面下载改为 `await http.get(...)`（hook 回调为 `async`）。
+
 | 用到的 API | v3.4 之前 | v3.4 之后 |
 |---|---|---|
 | `data.*` | ❌ 不存在 | ✅ |

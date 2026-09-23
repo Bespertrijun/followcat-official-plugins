@@ -33,6 +33,9 @@
 var CACHE_PREFIX = "lib_cache_";
 var DEFAULT_CACHE_TTL_SEC = 3600;
 var LIB_CHECK_SOFT_BUDGET_MS = 2500;
+// 镜像宿主 should_download 超时（3s 墙钟，含 await）：过了这个点宿主已 fail-open 放行、
+// 结果被丢弃，迟到的续体只写缓存，不记决策日志、不动 /stats 计数
+var HOST_FILTER_TIMEOUT_MS = 3000;
 
 var MATCH_DIMS = ["resolution", "video_encode", "audio_encode", "code_bits", "hdr", "dv", "format"];
 
@@ -297,9 +300,9 @@ function cacheFresh(entry) {
 
 // ====== Emby 查询 ======
 
-function embyGet(url) {
+async function embyGet(url) {
     try {
-        var resp = http.get(url, { "Accept": "application/json" });
+        var resp = await http.get(url, { "Accept": "application/json" });
         if (!resp || typeof resp.status !== "number") {
             return { ok: false, reason: "malformed_response" };
         }
@@ -359,7 +362,7 @@ function embyItemCopies(item) {
     return copies;
 }
 
-function checkEmbyEpisode(tmdbType, tmdbID, season, episode, deadlineMs) {
+async function checkEmbyEpisode(tmdbType, tmdbID, season, episode, deadlineMs) {
     var url = config.get("emby_url");
     var key = config.get("emby_api_key");
     if (!nonEmpty(url) || !nonEmpty(key)) return { ok: false, hit: false, reason: "not_configured" };
@@ -374,7 +377,7 @@ function checkEmbyEpisode(tmdbType, tmdbID, season, episode, deadlineMs) {
             Fields: "ProviderIds,MediaSources,Path",
             Limit: 5
         });
-        var mr = embyGet(movieUrl);
+        var mr = await embyGet(movieUrl);
         if (!mr.ok) return { ok: false, hit: false, reason: mr.reason };
         var mItems = (mr.body && mr.body.Items) || [];
         for (var mi = 0; mi < mItems.length; mi++) {
@@ -395,7 +398,7 @@ function checkEmbyEpisode(tmdbType, tmdbID, season, episode, deadlineMs) {
         Fields: "ProviderIds",
         Limit: 5
     });
-    var sr = embyGet(seriesUrl);
+    var sr = await embyGet(seriesUrl);
     if (!sr.ok) return { ok: false, hit: false, reason: sr.reason };
     var sItems = (sr.body && sr.body.Items) || [];
     var seriesID = "";
@@ -418,7 +421,7 @@ function checkEmbyEpisode(tmdbType, tmdbID, season, episode, deadlineMs) {
         Fields: "MediaSources,ParentIndexNumber,IndexNumber,Path",
         Limit: 2000
     });
-    var er = embyGet(epUrl);
+    var er = await embyGet(epUrl);
     if (!er.ok) return { ok: false, hit: false, reason: er.reason };
     var eItems = (er.body && er.body.Items) || [];
     var matched = [];
@@ -439,9 +442,9 @@ function checkEmbyEpisode(tmdbType, tmdbID, season, episode, deadlineMs) {
 
 // ====== Plex 查询 ======
 
-function plexGet(url) {
+async function plexGet(url) {
     try {
-        var resp = http.get(url, { "Accept": "application/json" });
+        var resp = await http.get(url, { "Accept": "application/json" });
         if (!resp || typeof resp.status !== "number") {
             return { ok: false, reason: "malformed_response" };
         }
@@ -528,7 +531,7 @@ function plexMetaTmdb(meta) {
     return "";
 }
 
-function checkPlexEpisode(tmdbType, tmdbID, season, episode, deadlineMs) {
+async function checkPlexEpisode(tmdbType, tmdbID, season, episode, deadlineMs) {
     var url = config.get("plex_url");
     var token = config.get("plex_token");
     if (!nonEmpty(url) || !nonEmpty(token)) return { ok: false, hit: false, reason: "not_configured" };
@@ -540,7 +543,7 @@ function checkPlexEpisode(tmdbType, tmdbID, season, episode, deadlineMs) {
             type: 1,
             includeGuids: 1
         });
-        var mr = plexGet(movieUrl);
+        var mr = await plexGet(movieUrl);
         if (!mr.ok) return { ok: false, hit: false, reason: mr.reason };
         var mMetas = (mr.body && mr.body.MediaContainer && mr.body.MediaContainer.Metadata) || [];
         for (var mi = 0; mi < mMetas.length; mi++) {
@@ -556,7 +559,7 @@ function checkPlexEpisode(tmdbType, tmdbID, season, episode, deadlineMs) {
         type: 2,
         includeGuids: 1
     });
-    var shr = plexGet(showUrl);
+    var shr = await plexGet(showUrl);
     if (!shr.ok) return { ok: false, hit: false, reason: shr.reason };
     var shMetas = (shr.body && shr.body.MediaContainer && shr.body.MediaContainer.Metadata) || [];
     var showKey = "";
@@ -572,7 +575,7 @@ function checkPlexEpisode(tmdbType, tmdbID, season, episode, deadlineMs) {
     var epUrl = joinUrl(url, "/library/metadata/" + showKey + "/allLeaves") + "?" + qs({
         "X-Plex-Token": token
     });
-    var er = plexGet(epUrl);
+    var er = await plexGet(epUrl);
     if (!er.ok) return { ok: false, hit: false, reason: er.reason };
     var eMetas = (er.body && er.body.MediaContainer && er.body.MediaContainer.Metadata) || [];
     var matched = [];
@@ -593,10 +596,10 @@ function checkPlexEpisode(tmdbType, tmdbID, season, episode, deadlineMs) {
 
 // ====== 主库检查 ======
 
-function performLibraryCheck(tmdbType, tmdbID, season, episode, deadlineMs) {
+async function performLibraryCheck(tmdbType, tmdbID, season, episode, deadlineMs) {
     var sources = [];
     if (isEnabled("emby_enabled")) {
-        var er = checkEmbyEpisode(tmdbType, tmdbID, season, episode, deadlineMs);
+        var er = await checkEmbyEpisode(tmdbType, tmdbID, season, episode, deadlineMs);
         sources.push({ name: "emby", ok: er.ok, hit: er.hit, reason: er.reason || "" });
         if (er.ok && er.hit) {
             return { hit: true, source: "emby", copies: er.copies || [], sources: sources };
@@ -606,7 +609,7 @@ function performLibraryCheck(tmdbType, tmdbID, season, episode, deadlineMs) {
         if (deadlineMs && nowMs() > deadlineMs) {
             return { hit: false, reason: "deadline", copies: [], sources: sources };
         }
-        var pr = checkPlexEpisode(tmdbType, tmdbID, season, episode, deadlineMs);
+        var pr = await checkPlexEpisode(tmdbType, tmdbID, season, episode, deadlineMs);
         sources.push({ name: "plex", ok: pr.ok, hit: pr.hit, reason: pr.reason || "" });
         if (pr.ok && pr.hit) {
             return { hit: true, source: "plex", copies: pr.copies || [], sources: sources };
@@ -615,7 +618,7 @@ function performLibraryCheck(tmdbType, tmdbID, season, episode, deadlineMs) {
     return { hit: false, reason: "no_match", copies: [], sources: sources };
 }
 
-function resolveLibraryStatus(tmdbType, tmdbID, season, episode) {
+async function resolveLibraryStatus(tmdbType, tmdbID, season, episode) {
     var key = cacheKey(tmdbType, tmdbID, season, episode);
     var cached = readCache(key);
     if (cached && cacheFresh(cached)) {
@@ -630,7 +633,7 @@ function resolveLibraryStatus(tmdbType, tmdbID, season, episode) {
         }
     }
     var deadline = nowMs() + LIB_CHECK_SOFT_BUDGET_MS;
-    var r = performLibraryCheck(tmdbType, tmdbID, season, episode, deadline);
+    var r = await performLibraryCheck(tmdbType, tmdbID, season, episode, deadline);
 
     var hadError = false;
     for (var i = 0; i < (r.sources || []).length; i++) {
@@ -695,7 +698,7 @@ function flowConfig(flowID) {
 
 // ====== should_download 主判定 ======
 
-function decideShouldDownload(p) {
+async function decideShouldDownload(p, callDeadline) {
     incCounter("should_download_seen");
 
     var media = (p && p.media) || {};
@@ -738,12 +741,14 @@ function decideShouldDownload(p) {
 
     var libStatus;
     try {
-        libStatus = resolveLibraryStatus(tmdbType, tmdbID, season, episode);
+        libStatus = await resolveLibraryStatus(tmdbType, tmdbID, season, episode);
     } catch (e) {
+        if (callDeadline && nowMs() > callDeadline) return { allow: true, reason: "late", late: true };
         log.error("media-library-filter: lib check exception: " + e);
         incCounter("allowed_error");
         return { allow: true, reason: "exception", fc: fc };
     }
+    if (callDeadline && nowMs() > callDeadline) return { allow: true, reason: "late", late: true };
 
     if (!libStatus.hit && libStatus.reason === "deadline") {
         incCounter("allowed_error");
@@ -816,7 +821,7 @@ function getBitmapBit(bytes, ep) {
 }
 
 // Emby 批量拉取：一次拉全季 episodes，返回 { epMap, source } 或 null
-function embyBatchFetch(tmdbID, season, epStart, epEnd, deadlineMs) {
+async function embyBatchFetch(tmdbID, season, epStart, epEnd, deadlineMs) {
     var url = config.get("emby_url");
     var key = config.get("emby_api_key");
     if (!nonEmpty(url) || !nonEmpty(key)) return null;
@@ -830,7 +835,7 @@ function embyBatchFetch(tmdbID, season, epStart, epEnd, deadlineMs) {
         Fields: "ProviderIds",
         Limit: 5
     });
-    var sr = embyGet(seriesUrl);
+    var sr = await embyGet(seriesUrl);
     if (!sr.ok) return null;
     var sItems = (sr.body && sr.body.Items) || [];
     var seriesID = "";
@@ -854,7 +859,7 @@ function embyBatchFetch(tmdbID, season, epStart, epEnd, deadlineMs) {
         Fields: "MediaSources,ParentIndexNumber,IndexNumber,Path",
         Limit: 2000
     });
-    var er = embyGet(epUrl);
+    var er = await embyGet(epUrl);
     if (!er.ok) return null;
     var eItems = (er.body && er.body.Items) || [];
 
@@ -876,7 +881,7 @@ function embyBatchFetch(tmdbID, season, epStart, epEnd, deadlineMs) {
 }
 
 // Plex 批量拉取：返回 { epMap, source } 或 null
-function plexBatchFetch(tmdbID, season, epStart, epEnd, deadlineMs) {
+async function plexBatchFetch(tmdbID, season, epStart, epEnd, deadlineMs) {
     var url = config.get("plex_url");
     var token = config.get("plex_token");
     if (!nonEmpty(url) || !nonEmpty(token)) return null;
@@ -887,7 +892,7 @@ function plexBatchFetch(tmdbID, season, epStart, epEnd, deadlineMs) {
         type: 2,
         includeGuids: 1
     });
-    var sr = plexGet(searchUrl);
+    var sr = await plexGet(searchUrl);
     if (!sr.ok) return null;
     var shows = (sr.body && sr.body.MediaContainer && sr.body.MediaContainer.Metadata) || [];
     var showKey = "";
@@ -905,7 +910,7 @@ function plexBatchFetch(tmdbID, season, epStart, epEnd, deadlineMs) {
         "X-Plex-Token": token,
         includeGuids: 1
     });
-    var er = plexGet(epUrl);
+    var er = await plexGet(epUrl);
     if (!er.ok) return null;
     var eItems = (er.body && er.body.MediaContainer && er.body.MediaContainer.Metadata) || [];
 
@@ -926,7 +931,7 @@ function plexBatchFetch(tmdbID, season, epStart, epEnd, deadlineMs) {
 }
 
 // 合集主判定：返回 { allow, have_bitmap_bytes, reason }
-function decideShouldDownloadBatch(p) {
+async function decideShouldDownloadBatch(p, callDeadline) {
     incCounter("should_download_seen");
 
     var media = (p && p.media) || {};
@@ -978,13 +983,14 @@ function decideShouldDownloadBatch(p) {
         var fetchResult = null;
 
         if (isEnabled("emby_enabled")) {
-            fetchResult = embyBatchFetch(tmdbID, season, epStart, epEnd, deadline);
+            fetchResult = await embyBatchFetch(tmdbID, season, epStart, epEnd, deadline);
         }
         if (fetchResult === null && isEnabled("plex_enabled")) {
-            fetchResult = plexBatchFetch(tmdbID, season, epStart, epEnd, deadline);
+            fetchResult = await plexBatchFetch(tmdbID, season, epStart, epEnd, deadline);
         }
 
         if (fetchResult === null) {
+            if (callDeadline && nowMs() > callDeadline) return { allow: true, reason: "late", late: true };
             incCounter("allowed_error");
             return { allow: true, reason: "batch_check_failed" };
         }
@@ -1001,6 +1007,7 @@ function decideShouldDownloadBatch(p) {
                 ts: nowSec()
             });
         }
+        if (callDeadline && nowMs() > callDeadline) return { allow: true, reason: "late", late: true };
     }
 
     // ---- 构建 bitmap ----
@@ -1035,7 +1042,8 @@ function decideShouldDownloadBatch(p) {
 
 // ====== Hook 注册 ======
 
-plugin.on("should_download", function (p) {
+plugin.on("should_download", async function (p) {
+    var callDeadline = nowMs() + HOST_FILTER_TIMEOUT_MS;
     try {
         var media = (p && p.media) || {};
         var episodeEnd = safeNum(String(media.episode_end == null ? "" : media.episode_end), 0);
@@ -1043,7 +1051,8 @@ plugin.on("should_download", function (p) {
 
         // ---- 合集路径：episode_end > 0 → bitmap 协议 ----
         if (episodeEnd > 0) {
-            var db = decideShouldDownloadBatch(p || {});
+            var db = await decideShouldDownloadBatch(p || {}, callDeadline);
+            if (db.late) return true;
             log.info("media-library-filter: should_download [batch] flow=" + (p && p.flow_id) +
                      " tmdb=" + (media.tmdb_id || "") + " s" + (media.season || 0) +
                      " e" + (media.episode || 0) + "-" + episodeEnd +
@@ -1064,7 +1073,8 @@ plugin.on("should_download", function (p) {
         }
 
         // ---- 单集/电影路径：保持原有 bool 逻辑 ----
-        var d = decideShouldDownload(p || {});
+        var d = await decideShouldDownload(p || {}, callDeadline);
+        if (d.late) return true;
         log.info("media-library-filter: should_download flow=" + (p && p.flow_id) +
                  " tmdb=" + (media.tmdb_id || "") + " s" + (media.season || 0) + "e" + (media.episode || 0) +
                  " reason=" + d.reason +
@@ -1079,6 +1089,7 @@ plugin.on("should_download", function (p) {
         if (d.allow === false) return false;
         return true;
     } catch (e) {
+        if (nowMs() > callDeadline) return true;
         log.error("media-library-filter: should_download handler error: " + e);
         incCounter("allowed_error");
         return true;
@@ -1188,7 +1199,7 @@ function buildCopyTrace(copies, tags, dims) {
     return out;
 }
 
-plugin.registerAPI("/check", function (req) {
+plugin.registerAPI("/check", async function (req) {
     var method = (req && req.method) || "GET";
 
     if (method === "POST") {
@@ -1248,7 +1259,7 @@ plugin.registerAPI("/check", function (req) {
     }
 
     var deadline = nowMs() + LIB_CHECK_SOFT_BUDGET_MS;
-    var r = performLibraryCheck(tmdbType, tmdbID, season, episode, deadline);
+    var r = await performLibraryCheck(tmdbType, tmdbID, season, episode, deadline);
     var realCopies = isArray(r.copies) ? r.copies : [];
 
     var resp = {
@@ -1284,12 +1295,12 @@ plugin.registerAPI("/check", function (req) {
     return resp;
 });
 
-plugin.registerAPI("/test-emby", function (req) {
+plugin.registerAPI("/test-emby", async function (req) {
     var url = config.get("emby_url");
     var key = config.get("emby_api_key");
     if (!nonEmpty(url) || !nonEmpty(key)) return { ok: false, error: "url/api_key missing" };
     try {
-        var resp = http.get(joinUrl(url, "/emby/System/Info/Public"), { "Accept": "application/json" });
+        var resp = await http.get(joinUrl(url, "/emby/System/Info/Public"), { "Accept": "application/json" });
         return {
             ok: !!(resp && resp.status >= 200 && resp.status < 300),
             status: resp && resp.status,
@@ -1300,12 +1311,12 @@ plugin.registerAPI("/test-emby", function (req) {
     }
 });
 
-plugin.registerAPI("/test-plex", function (req) {
+plugin.registerAPI("/test-plex", async function (req) {
     var url = config.get("plex_url");
     var token = config.get("plex_token");
     if (!nonEmpty(url) || !nonEmpty(token)) return { ok: false, error: "url/token missing" };
     try {
-        var resp = http.get(joinUrl(url, "/identity") + "?" + qs({ "X-Plex-Token": token }), { "Accept": "application/json" });
+        var resp = await http.get(joinUrl(url, "/identity") + "?" + qs({ "X-Plex-Token": token }), { "Accept": "application/json" });
         return {
             ok: !!(resp && resp.status >= 200 && resp.status < 300),
             status: resp && resp.status,

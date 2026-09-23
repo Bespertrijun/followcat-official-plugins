@@ -4,6 +4,8 @@
 
 **标签**：should-download、download-dedup、emby、plex、media-library、ruleflow、v3.5+
 
+> ⚠️ **0.4.0 需要 FollowCat 事件循环插件运行时**（`http.*` 现返回 Promise）：旧宿主上本插件的否决不生效，请先升级 FollowCat。详见文末「从 0.3.x 升级」。
+>
 > ⚠️ **0.3.0 是破坏性升级**：本插件已从「下载否决器」（用户手填 spec 规格）改写为「下载去重器」（like-for-like，比对值来自种子自身 `p.tags`，用户只配维度和操作符）。详见文末「从 0.2.0 升级」。
 
 ## 适用场景
@@ -248,6 +250,12 @@ dry_run=1：以上 false / bitmap 路径一律改成 return true（仅 log）
 - **`should_download` hook**：由主仓提供（v3.5+），本插件注册。宿主在推种前同步调用，读取返回值。
 - **`ruleflow.list()` API**：需 `api.ruleflow` 权限，用于 UI 列出所有 flow 以便逐条配置。
 - **通知功能**：自 v3.5 起请走主仓 `internal/notify`（钉钉 / 飞书等），本插件不再涉及通知。
+
+## 从 0.3.x 升级（0.4.0）
+
+- **需要 FollowCat 事件循环插件运行时**：`http.*` 现返回 Promise，本插件的 Emby / Plex 查询与 `should_download` 回调已改为 `async` / `await`。旧宿主不认 Promise 返回值，否决会失效（一律放行）。
+- 配置键、维度、操作符、缓存格式均不变，升级后无需重新配置。
+- 宿主 3s 超时（已 fail-open 放行）之后才回来的查询结果只写缓存，不再记决策日志、不计入计数器。
 
 ## 从 0.2.0 升级（迁移注意）
 

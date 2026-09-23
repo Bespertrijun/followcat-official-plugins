@@ -693,7 +693,7 @@ function bumpSyncedCount() {
 
 // ====== 主流程：syncOnce ==============================================
 
-function syncOnce() {
+async function syncOnce() {
     var host = config.get('host');
     var uuid = config.get('cloud_uuid');
     var pwd  = config.get('cloud_pwd');
@@ -713,7 +713,7 @@ function syncOnce() {
 
     var resp;
     try {
-        resp = http.get(url, { 'Accept': 'application/json' });
+        resp = await http.get(url, { 'Accept': 'application/json' });
     } catch (e) {
         return { ok: false, error: 'http get failed: ' + (e && e.message ? e.message : e) };
     }
@@ -847,10 +847,10 @@ function testDecrypt() {
 
 // ====== API 注册 =======================================================
 
-plugin.registerAPI('/sync', function (req) {
+plugin.registerAPI('/sync', async function (req) {
     var result;
     try {
-        result = syncOnce();
+        result = await syncOnce();
     } catch (e) {
         result = { ok: false, error: 'sync exception: ' + (e && e.message ? e.message : e) };
     }

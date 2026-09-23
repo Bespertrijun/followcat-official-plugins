@@ -21,9 +21,16 @@
 //     { event: "config", key, value }  ← when plugin code calls config.set
 //     { event: "ready", hooks: [...], apis: [...] }
 //
-// http.* mocking: requests are returned as 200/{} stubs unless ALLOW_HTTP=1 env
-// is set, in which case Node's built-in fetch is used synchronously via a
-// child node process (slow but accurate).
+// http.* mirrors the host (async facade): every method returns a Promise.
+// Requests are resolved with 200/{} stubs unless ALLOW_HTTP=1 env is set, in
+// which case Node's built-in fetch is used (10s per request, 5 MiB body cap,
+// 60 req/min token bucket, failures reject with a GoError-shaped Error whose
+// message is "http <METHOD> <url>: <cause>" like the host).
+//
+// Callbacks (hook / registerAPI / should_download) may return a Promise; the
+// dispatcher awaits it with the host's wall-clock timeouts (including await
+// time): hook 10s, API 10s, should_download 3s (fail-open). A rejection is
+// handled like a throw; a late settlement after the timeout is ignored.
 
 'use strict';
 
@@ -31,7 +38,7 @@ const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
 const readline = require('readline');
-const { spawnSync } = require('child_process');
+const { types: utilTypes } = require('util');
 
 const pluginDir = process.argv[2];
 if (!pluginDir) {
@@ -79,49 +86,108 @@ const config = {
   },
 };
 
-function httpReal(method, url, body, headers) {
-  // Spawn a fresh node -e to run async fetch synchronously (dev-only convenience)
-  const code = `
-    (async () => {
-      try {
-        const r = await fetch(${JSON.stringify(url)}, {
-          method: ${JSON.stringify(method)},
-          headers: ${JSON.stringify(headers || {})},
-          body: ${body == null ? 'undefined' : JSON.stringify(body)}
-        });
-        const text = await r.text();
-        const out = {
-          status: r.status,
-          headers: Object.fromEntries(r.headers),
-          body: text.length > 5 * 1024 * 1024 ? text.slice(0, 5 * 1024 * 1024) : text,
-          truncated: text.length > 5 * 1024 * 1024
-        };
-        process.stdout.write(JSON.stringify(out));
-      } catch (e) {
-        process.stdout.write(JSON.stringify({ __err: String(e) }));
-      }
-    })();`;
-  const child = spawnSync(process.execPath, ['-e', code], {
-    encoding: 'utf-8',
-    timeout: 15000,
-  });
-  if (child.status !== 0) throw new Error('http subprocess failed: ' + child.stderr);
-  const result = JSON.parse(child.stdout || '{}');
-  if (result.__err) throw new Error(result.__err);
-  return result;
+// Host constants (internal/plugin/host_api.go, engine.go, worker.go)
+const HTTP_TIMEOUT_MS = 10000;          // asyncCallTimeout: fixed 10s per request
+const HTTP_RESPONSE_LIMIT = 5 * 1024 * 1024;
+const HTTP_RATE_BURST = 60;             // token bucket: 60 burst, +1 / second
+const HOOK_TIMEOUT_MS = 10000;          // workerHookTimeout
+const API_TIMEOUT_MS = 10000;           // workerAPITimeout
+const FILTER_TIMEOUT_MS = 3000;         // workerFilterTimeout (fail-open)
+const ERR_RUNTIME_TIMEOUT = 'plugin runtime: execution timeout';
+
+// Filled in once the vm context exists: Promise / Error of the plugin realm, so
+// `http.get(...) instanceof Promise` and `e instanceof Error` hold inside the plugin.
+let CtxPromise = Promise;
+let CtxError = Error;
+
+// Host rejects with rt.NewGoError(err): an Error whose name is "GoError".
+function goError(message) {
+  const e = new CtxError(message);
+  e.name = 'GoError';
+  return e;
 }
 
-function httpMock(method, url, body, headers) {
+const rateBucket = { tokens: HTTP_RATE_BURST, lastRefill: Date.now() };
+function rateAllow() {
+  const now = Date.now();
+  const elapsed = Math.floor((now - rateBucket.lastRefill) / 1000);
+  if (elapsed > 0) {
+    rateBucket.tokens = Math.min(HTTP_RATE_BURST, rateBucket.tokens + elapsed);
+    rateBucket.lastRefill = now;
+  }
+  if (rateBucket.tokens <= 0) return false;
+  rateBucket.tokens--;
+  return true;
+}
+
+// Go's http.CanonicalHeaderKey: "content-type" → "Content-Type"
+function canonicalHeaderKey(k) {
+  return String(k).split('-').map(function (p) {
+    return p.length ? p[0].toUpperCase() + p.slice(1).toLowerCase() : p;
+  }).join('-');
+}
+
+// Host keeps the first value per header. Node's fetch joins repeated headers
+// with ", " (except Set-Cookie), so repeated non-cookie headers show the joined value.
+function headersMap(h) {
+  const out = {};
+  h.forEach(function (v, k) { out[canonicalHeaderKey(k)] = v; });
+  if (typeof h.getSetCookie === 'function') {
+    const sc = h.getSetCookie();
+    if (sc.length > 0) out['Set-Cookie'] = sc[0];
+  }
+  return out;
+}
+
+async function httpReal(method, url, body, headers) {
+  let resp;
+  try {
+    resp = await fetch(url, {
+      method: method,
+      headers: headers || {},
+      body: body == null || body === '' ? undefined : body,
+      signal: AbortSignal.timeout(HTTP_TIMEOUT_MS),
+    });
+  } catch (e) {
+    const cause = (e && e.name === 'TimeoutError') ? 'context deadline exceeded'
+      : String((e && e.cause && e.cause.message) || (e && e.message) || e);
+    throw goError('http ' + method + ' ' + url + ': ' + cause);
+  }
+  let buf;
+  try {
+    buf = Buffer.from(await resp.arrayBuffer());
+  } catch (e) {
+    throw goError('read response: ' + String((e && e.message) || e));
+  }
+  const truncated = buf.length > HTTP_RESPONSE_LIMIT;
+  if (truncated) buf = buf.subarray(0, HTTP_RESPONSE_LIMIT);
+  return { status: resp.status, headers: headersMap(resp.headers), body: buf.toString('utf-8'), truncated: truncated };
+}
+
+async function httpMock(method, url, body, headers) {
   log.info('[http stub] ' + method + ' ' + url + ' (set ALLOW_HTTP=1 for real requests)');
   return { status: 200, headers: {}, body: '{"mocked":true}', truncated: false };
 }
 
 const httpFn = allowHttp ? httpReal : httpMock;
+
+// Every http.* call returns a Promise (no sync alias). Rate limit is checked at
+// call time like the host and surfaces as a rejection, not a synchronous throw.
+function httpCall(method, url, body, headers) {
+  return new CtxPromise(function (resolve, reject) {
+    if (!rateAllow()) {
+      reject(goError('plugin http rate limit exceeded (60 req/min)'));
+      return;
+    }
+    httpFn(method, String(url), body == null ? '' : String(body), headers).then(resolve, reject);
+  });
+}
+
 const http = {
-  get:    function (url, headers)        { return httpFn('GET',    url, null, headers); },
-  post:   function (url, body, headers)  { return httpFn('POST',   url, body, headers); },
-  put:    function (url, body, headers)  { return httpFn('PUT',    url, body, headers); },
-  delete: function (url, headers)        { return httpFn('DELETE', url, null, headers); },
+  get:    function (url, headers)        { return httpCall('GET',    url, null, headers); },
+  post:   function (url, body, headers)  { return httpCall('POST',   url, body, headers); },
+  put:    function (url, body, headers)  { return httpCall('PUT',    url, body, headers); },
+  delete: function (url, headers)        { return httpCall('DELETE', url, null, headers); },
 };
 
 const anime = {
@@ -198,6 +264,8 @@ const sandbox = {
 };
 
 vm.createContext(sandbox);
+CtxPromise = vm.runInContext('Promise', sandbox);
+CtxError = vm.runInContext('Error', sandbox);
 
 let loadError = null;
 try {
@@ -215,6 +283,43 @@ emitEvent('ready', {
   manifest,
   loadError,
 });
+
+// ─── callback invocation (mirrors host worker.invoke) ────────────────────────
+
+function timeoutError() {
+  const e = new Error(ERR_RUNTIME_TIMEOUT);
+  e.devrtTimeout = true;
+  return e;
+}
+
+// Runs fn(...args) with the host's wall-clock budget (including await time).
+//   - synchronous segment runs via vm with `timeout` → a pure-JS infinite loop is
+//     interrupted, like the host's rt.Interrupt
+//   - a returned Promise is awaited for the remaining budget; late settlement ignored
+//   - throw / rejection → rejected Promise (handled as a throw)
+// Continuations after an await are not policed (same as the host).
+let invokeSeq = 0;
+function invokeWithTimeout(fn, args, budgetMs) {
+  const start = Date.now();
+  const slot = '__devrt_call_' + (++invokeSeq);
+  let value;
+  sandbox[slot] = { fn: fn, args: args };
+  try {
+    value = vm.runInContext(slot + '.fn.apply(undefined, ' + slot + '.args)', sandbox, { timeout: budgetMs });
+  } catch (e) {
+    if (e && e.code === 'ERR_SCRIPT_EXECUTION_TIMEOUT') return Promise.reject(timeoutError());
+    return Promise.reject(e);
+  } finally {
+    delete sandbox[slot];
+  }
+  if (!utilTypes.isPromise(value)) return Promise.resolve(value);
+  const remaining = Math.max(0, budgetMs - (Date.now() - start));
+  return new Promise(function (resolve, reject) {
+    const timer = setTimeout(function () { reject(timeoutError()); }, remaining);
+    value.then(function (v) { clearTimeout(timer); resolve(v); },
+               function (e) { clearTimeout(timer); reject(e); });
+  });
+}
 
 // ─── rpc loop ───────────────────────────────────────────────────────────────
 
@@ -249,30 +354,33 @@ rl.on('line', function (line) {
       case 'trigger': {
         const fn = hooks[params.hook];
         if (!fn) return fail('hook not registered: ' + params.hook);
-        try {
-          const result = fn(params.data || {});
-          // should_download is a synchronous veto hook — capture its return value
-          if (params.hook === 'should_download') {
+        const isFilter = params.hook === 'should_download';
+        invokeWithTimeout(fn, [params.data || {}], isFilter ? FILTER_TIMEOUT_MS : HOOK_TIMEOUT_MS).then(function (result) {
+          // should_download is the veto hook — capture its (awaited) return value
+          if (isFilter) {
             reply({ ok: true, result: result === undefined ? null : result });
           } else {
             reply({ ok: true });
           }
-        } catch (e) {
-          // Real host swallows hook errors and increments panic_count; here we surface them
+        }, function (e) {
+          if (isFilter && e && e.devrtTimeout) {
+            // Host: should_download timeout → fail-open (allow); late result ignored
+            log.warn('[devrt] should_download timed out after ' + FILTER_TIMEOUT_MS + 'ms → fail-open (allow)');
+            reply({ ok: true, result: null, fail_open: true, error: ERR_RUNTIME_TIMEOUT });
+            return;
+          }
+          // Real host swallows hook errors / rejections (WARN + last_error); here we surface them
           fail(e);
-        }
+        });
         break;
       }
 
       case 'callApi': {
         const fn = apis[params.path];
         if (!fn) return fail('api not registered: ' + params.path);
-        try {
-          const out = fn(params.req || { method: 'GET', body: '', query: {} });
+        invokeWithTimeout(fn, [params.req || { method: 'GET', body: '', query: {} }], API_TIMEOUT_MS).then(function (out) {
           reply({ result: out });
-        } catch (e) {
-          fail(e);
-        }
+        }, fail);
         break;
       }
 

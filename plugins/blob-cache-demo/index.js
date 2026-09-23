@@ -16,16 +16,16 @@ var INDEX_KEY = "cover_index"; // config 里存 anime_id -> blob_name 索引
 // 单张缩略图大小上限（200 KiB），远低于 data.* 默认 4 MiB / blob
 var MAX_COVER_BYTES = 200 * 1024;
 
-plugin.on("on_task_completed", function (event) {
+plugin.on("on_task_completed", async function (event) {
   try {
-    cacheCoverIfMissing(event.anime_id, event.anime_title);
+    await cacheCoverIfMissing(event.anime_id, event.anime_title);
   } catch (e) {
     log.error("cache cover for anime_id=" + event.anime_id + ": " + e);
   }
 });
 
 // 主流程：检查 → 拉取 → 存 blob → 更新 config 索引
-function cacheCoverIfMissing(animeID, animeTitle) {
+async function cacheCoverIfMissing(animeID, animeTitle) {
   if (!animeID) return;
 
   var index = readIndex();
@@ -53,7 +53,7 @@ function cacheCoverIfMissing(animeID, animeTitle) {
   // 拉封面
   var resp;
   try {
-    resp = http.get(coverURL, { "User-Agent": "FollowCat-blob-demo/0.1" });
+    resp = await http.get(coverURL, { "User-Agent": "FollowCat-blob-demo/0.1" });
   } catch (e) {
     log.warn("http.get failed: " + e);
     return;
