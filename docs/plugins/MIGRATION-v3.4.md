@@ -63,7 +63,7 @@ data["delete"]("cache.json");
 ```
 
 > goja 没有原生 `TextEncoder`/`TextDecoder`，需自己实现 UTF-8 编解码。
-> 可参考 [`blob-cache-demo/index.js`](../../blob-cache-demo/index.js) 的 `encodeUtf8`。
+> 可直接抄 [dev-guide「UTF-8 编解码」](./dev-guide.md#utf-8-编解码goja-没有原生-textencoder) 的 `encodeUtf8` / `decodeUtf8` 参考实现。
 
 **配额**：单 blob ≤ 4 MiB（admin 可调到 64 MiB），单 plugin 总和 ≤ 16 MiB（admin 可调到 256 MiB）。
 
@@ -200,6 +200,6 @@ PUT /api/admin/settings
 
 ## 参考实现
 
-- [`blob-cache-demo/`](../../blob-cache-demo/) — 最小演示 `data.*` 的插件
+- [`sdk.md`「`data` —— 加密 blob 存储」](./sdk.md) 与 [dev-guide §4.5](./dev-guide.md) — `data.*` 用法与示例代码
 - [`cookiecloud/`](../../cookiecloud/) — iframe UI + 内嵌 CryptoJS + 自定义 API 的综合示例（v3.4 不需要改，原文档里的 `notify/` 已在 v3.5 移入主仓 `internal/notify`）
 - [`dashboard-stats/`](../../dashboard-stats/) — 现有 headless 插件（v3.4 不需要改）

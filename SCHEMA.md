@@ -22,7 +22,7 @@
       "zip_url":      "https://github.com/followcat/plugin-notify/releases/download/v1.1.0/notify-1.1.0.zip",
       "zip_size":     81920,
       "zip_sha256":   "a3f1c2d4e5b6a7f8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2",
-      "permissions":  ["hook.download", "hook.link", "hook.task", "api.http", "ui.embed"],
+      "permissions":  ["hook.download.read", "hook.link.read", "hook.task.read", "api.http", "ui.embed"],
       "hooks":        ["on_download_done", "on_link_done", "on_task_completed"],
       "published_at": "2026-05-01T00:00:00Z"
     }

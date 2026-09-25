@@ -1,9 +1,0 @@
-{
-  "name": "blob-cache-demo",
-  "version": "0.2.0",
-  "author": "FollowCat",
-  "description": "演示 v3.4 data.* 加密 blob 存储 API：把番剧封面缓存到本地",
-  "source_url": "https://plugins.followcat.io/blob-cache-demo",
-  "permissions": ["hook.task", "api.http", "api.anime.read"],
-  "hooks": ["on_task_completed"]
-}

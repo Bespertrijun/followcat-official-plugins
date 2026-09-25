@@ -2,21 +2,23 @@
 
 > 你（用户）在 `D:\workpath\followcat-official-plugins\cookiecloud\` 下落地。本文只产出方案，不动代码。
 > 来源对照：`C:\Users\Chiyu\Desktop\文件夹合集\cipher\AutoFollow\plugin\cookiecloud\{cookiecloud,cipher}.go`
+>
+> **2026-09-23 修订**：主仓权限扩展批次 1（`plugin-permission-expansion-plan.md` §5.1）已落地——`crypto.*` 纯函数、`ptsite.*`（`api.ptsite.read/write`）、`douban.getCookie/setCookie`（`api.douban.cookie.read/write`）、方法级注入、写审计。旧方案写 `AppSetting.site_cookie_<id>` 的落点**已失效**（主仓已删 KV 读取，PT 凭据在 `site_configs.Cookie/APIKey` 加密列）。本文 §1/§2/§4/§5/§6/§9/§10/§11 随之修订；插件代码本身下一轮改。
 
 ---
 
 ## 1. 目标与集成模型
 
-**做什么**：从用户自托管的 [CookieCloud](https://github.com/easychen/CookieCloud) server 周期/手动拉取浏览器同步过来的 cookies → 解密 → 按用户配置的「域名 → site_id」映射 → 写入 FollowCat 的 `AppSetting` KV，覆写 PT 站的 `site_cookie_<site_id>`（这是 phase A pt.Provider 已经在读的 key）。
+**做什么**：从用户自托管的 [CookieCloud](https://github.com/easychen/CookieCloud) server 手动拉取浏览器同步过来的 cookies → 解密 → 按用户配置的「域名 → PT 站 id」映射 → 经宿主 facade 写入 FollowCat 的 PT 站凭据（`ptsite.setCookie/setAPIKey`）与豆瓣 Cookie（`douban.setCookie`）。
 
-**集成点（不需要改主仓代码）**：
-- 主仓 phase A 已经把 cookie 抽到 `AppSetting` key=`site_cookie_<site_id>`，详情页拉不到时降级 — 这就是「插件可覆写、未配也能跑」的解耦点。
-- 插件唯一需要的 host API：`http.*`（拉 CookieCloud server）+ `config.*`（保存自身配置）。**问题**：插件目前没有写 `AppSetting` 的能力，下面 §6 给出三种取舍。
+**集成点（主仓批次 1 已提供）**：
+- PT 站凭据存于 `site_configs.Cookie/APIKey`（AES-256-GCM 加密列）；豆瓣 Cookie 存于 `app_settings.douban_cookie`（同算法）。插件只能经 facade 写，宿主负责校验 / 加密 / 热加载 / 审计，明文不出宿主（读侧只有「已配置」+ 打码 + 指纹）。
+- 插件用到的 host API：`http.*`（拉 CookieCloud server）、`config.*`（自身配置）、`crypto.*`（解密）、`ptsite.*`、`douban.*`。
 
 **为什么做插件不是主仓内嵌**：
 - v3.4 的 plugin runtime（goja + iframe + sandbox REST + 加密 blob）天然适合此类「带凭据 + 周期性外部调用」的功能。
 - CookieCloud server 不是 FollowCat 的一等依赖，避免污染主仓。
-- 用户可以选不装；同时其他插件以后也能复用同样的「写 AppSetting」通道。
+- 用户可以选不装；同时其他插件以后也能复用同样的凭据写 facade（`ptsite` / `douban`）。
 
 ---
 
@@ -27,16 +29,21 @@
   "name": "cookiecloud",
   "version": "1.0.0",
   "author": "FollowCat",
-  "description": "从 CookieCloud server 同步浏览器 cookies 到 PT 站凭据 (site_cookie_<id>)",
+  "description": "从 CookieCloud server 同步浏览器 cookies 到 PT 站凭据与豆瓣 Cookie",
   "source_url": "https://plugins.followcat.io/cookiecloud",
-  "permissions": ["api.http", "ui.embed"],
+  "permissions": ["api.http", "ui.embed",
+                  "api.ptsite.read", "api.ptsite.write",
+                  "api.douban.cookie.read", "api.douban.cookie.write"],
   "hooks": []
 }
 ```
 
 - **不订阅任何 hook**：纯被动 + UI 触发，无 event-driven 业务。
 - **`ui.embed`**：用户在插件详情页配置 host/uuid/password + 点 "Sync Now" 必须有 UI。
-- **`api.http`**：拉 CookieCloud server。
+- **`api.http`**：拉 CookieCloud server（⚠️ 敏感权限）。
+- **`api.ptsite.read`**：UI 里列出 PT 站供用户挑映射（`ptsite.list/registry`），同步时用 `getCookieMeta` 指纹比对跳过没变的站。
+- **`api.ptsite.write`** / **`api.douban.cookie.write`**（⚠️ 敏感）：写凭据。**`api.douban.cookie.read`**：比对豆瓣 Cookie 指纹。权限之间不蕴含，四个都要声明。
+- 升级到这一版时，管理页会把这 4 项列在「本次升级新增权限」里，含 2 项敏感权限需二次确认。
 - **不要 `api.task.read` / `api.anime.read`**：cookie 同步与番剧数据无关，最小权限。
 
 ---
@@ -48,7 +55,8 @@
 | `host` | false | CookieCloud server 根 URL，如 `https://cc.example.com` |
 | `cloud_uuid` | true | CookieCloud 用户 UUID（Decrypt 的 key 派生原料） |
 | `cloud_pwd` | true | CookieCloud 端到端密码（前端浏览器扩展里设的那个） |
-| `site_map` | false | JSON 字符串：`{"hhan.example.com": "hhan", "u2.example.com": "ubits"}` — domain → FollowCat site_id |
+| `site_map` | false | JSON 字符串：`{"hhan.example.com": "<ptsite id>", ...}` — domain → PT 站行 id（`ptsite.list()` 的 `id`，UUID；不是 adapter 名） |
+| `sync_douban` | false | `"true"` 时同步 `.douban.com` 的 cookie 到豆瓣 Cookie（`douban.setCookie`，带验活） |
 | `last_synced_at` | false | RFC3339 时间，最近成功同步时间，UI 展示用 |
 | `last_error` | false | 最近一次失败原因，UI 展示用 |
 | `synced_count` | false | 历史成功同步次数 |
@@ -57,7 +65,11 @@
 
 ---
 
-## 4. **🔴 核心难点：CryptoJS-AES 解密**
+## 4. CryptoJS-AES 解密
+
+> **已定（2026-09-23）：选项 B，已随主仓批次 1 落地。** 宿主注入 `crypto.sha256/md5/base64Decode/evpBytesToKey/aesDecryptCBC`（无需权限、同步），插件删掉内嵌 CryptoJS。下文 A/C 保留作决策记录。devrt 的 `crypto.*` 用 `node:crypto` 真算，可本地拿真实 CookieCloud 数据验证。
+>
+> **UTF-8 解码不进宿主（2026-09-24 拍板）**：沙箱没有 `TextDecoder`，宿主也**不**提供 `crypto.utf8Decode`。`aesDecryptCBC` 返回的是 `Uint8Array`，插件自带一个 UTF-8 解码函数（几十行，按 1–4 字节序列解码为码点再拼字符串；直接抄 `docs/plugins/dev-guide.md`「UTF-8 编解码」的 `decodeUtf8` 参考实现）把它还原成 JSON 文本。下文伪代码里的 `utf8Decode` 即指这个插件内联函数。
 
 CookieCloud server 返回的 payload 是 `CryptoJS.AES.encrypt(json, "<md5(uuid+'-'+pwd)[:16]>")`：
 - base64 → `Salted__` + 8B salt + N×16B ciphertext
@@ -107,126 +119,97 @@ crypto.base64Decode(str) → Uint8Array
 
 ---
 
-## 5. 写 AppSetting：插件无能力 → 三种解法
+## 5. 写凭据：经 `ptsite` / `douban` facade（旧 KV 方案作废）
 
-`config.set()` 只写**插件自己的** namespace（`plugin_configs.<plugin_id>.<key>`），不能写 host 级 `app_settings`。
+旧方案假设写 `AppSetting.site_cookie_<id>`，但主仓 `pt/base.go loadCredential` 早已删除 KV fallback——凭据只从 `site_configs.Cookie/APIKey` 读，写 KV 等于写进黑洞（主仓批次 1 同时关掉了管理端写这些 key 的白名单死路径）。旧 §5 的三种解法（`hostkv.setSiteCookie` / 插件代打 admin REST / 主仓读插件 blob）全部作废。
 
-但同步出来的 cookie 必须写到 `site_cookie_<site_id>` 这个 host 级 key 才能被 PT pull 流程读到。
+现在的写入口（主仓批次 1）：
 
-### 方案 1（推荐 v1）：开"plugin → AppSetting"白名单 facade
+| 目标 | 方法 | 权限 | 说明 |
+|---|---|---|---|
+| PT 站 Cookie | `await ptsite.setCookie(siteId, ck)` | `api.ptsite.write` | 单列更新、加密落库；cookie 站才收，apikey / none 站拒绝（reject） |
+| PT 站 API Key | `await ptsite.setAPIKey(siteId, key)` | `api.ptsite.write` | 目前只有 mteam 是 apikey 站；CookieCloud 同步的是 cookie，通常用不到 |
+| 豆瓣 Cookie | `await douban.setCookie(ck, {validate: true})` | `api.douban.cookie.write` | 加密落库 + 立即热加载；验活上限 8s，回 `validation` 五态（到点未完 = `rate_limited`，已写入） |
+| 比对用指纹 | `ptsite.getCookieMeta(siteId)` / `douban.getCookie()` | `api.ptsite.read` / `api.douban.cookie.read` | `{configured, sha256}`（2026-09-24 去掉 masked：明文不出宿主，只需判「是否相同」），`sha256` 按 sdk.md「Cookie 归一化契约」计算 |
 
-主仓 `internal/plugin/host_*.go` 暴露：
-```js
-// 仅允许写以 site_cookie_ 开头的 key（白名单）
-hostkv.setSiteCookie(siteID, value)
-```
-- 权限名：`api.kv.write.site_cookie`
-- 实现：内部 `appSettingStore.Set("site_cookie_" + siteID, value)`，对 key 前缀做 strict regex 校验
-- 这是非常窄的能力暴露，可审计性强
+要点：
 
-### 方案 2：插件每次同步后调 admin REST `POST /api/admin/settings`
-
-- 但 plugin token 不是 admin token，REST 会被 RBAC 拦
-- 可以引入一个「plugin 代写 AppSetting」的内部端点，鉴权走 plugin token
-- 本质等于方案 1，只是走 HTTP 不走 native facade
-
-### 方案 3：把同步好的 cookie 存在 `data.*`（plugin blob），由主仓 PT pull 流程**读**插件 blob
-
-需要主仓 phase A 改 `pt.Provider.loadCookie()` 的 fallback 链：先 `AppSetting` → 找不到 → 查 `cookiecloud` 插件的 blob → 拿到。
-- 优点：插件无写主仓能力，最小信任
-- 缺点：耦合 — pt 框架知道有 cookiecloud 插件存在，违反插件解耦原则；多插件冲突时优先级模糊
-- **不推荐**
-
-→ **结论：v1 走方案 1**。这是这个插件能落地的最关键依赖项，建议先在主仓加 `hostkv.setSiteCookie` facade（小 PR），插件再开工。
+- **`site_map` 的值是 PT 站行 id**（`ptsite.list()` 返回的 `id`，UUID），不是 adapter 名；同一 adapter 可有多行（多账号）。UI 用 `ptsite.list()` 让用户下拉选，别让用户手填。另加一个开关「同步豆瓣 Cookie」+ 豆瓣域名（默认 `.douban.com`）。
+- **只写变了的**：插件侧 `crypto.sha256(normalizeCookie(新ck)) === meta.sha256` 就跳过，省一次写和一条审计；`normalizeCookie` 照抄 sdk.md 参考实现（不能用默认 `sort()`）。
+- **不写 `rss_urls`**：facade 不开放，也不需要。
+- **审计**：每次 set* 宿主都会在插件详情页日志里留一条 `[审计] AUDIT action=... target=...`（不含值），UI 文案可以提示用户去那里看。
+- 错误按站点收集：某站 reject（站点被删 / 类型不匹配）不影响其它站，汇总进返回值与 `last_error`。
 
 ---
 
 ## 6. JS 主流程
 
+**同步流程写死（2026-09-23 拍板）**：先拉 CookieCloud（数据依赖，必须在前）→ 解密 → 所有 `ptsite.setCookie/setAPIKey` 与 `douban.setCookie` **并发发出**（`Promise.all`，不逐个 `await`）→ 汇总。总耗时 ≈ 拉取 + 最慢一枪（豆瓣验活 ≤ 8s）；registerAPI 墙钟 10s，所以拉 CookieCloud 要尽量快（它本身有 `http` 的 10s 上限，但超过约 2s 就可能让整次 `/sync` 超时——超时后已发出的写照常完成，只是 UI 拿不到汇总）。
+
 ```js
-// index.js（伪代码）
+// index.js（伪代码，async 版；normalizeCookie 照抄 sdk.md 参考实现，utf8Decode 为插件内联的 UTF-8 解码函数，宿主不提供）
 
-// === 顶部内嵌 CryptoJS 子集 ===
-var CryptoJS = (function () { /* ~1000 行截取 */ return CryptoJS; })();
-
-function syncOnce() {
+async function syncOnce() {
     var host = config.get("host");
     var uuid = config.get("cloud_uuid");
     var pwd  = config.get("cloud_pwd");
-    var siteMapRaw = config.get("site_map") || "{}";
-
-    if (!host || !uuid || !pwd) {
-        return { ok: false, error: "missing config" };
-    }
-
-    var siteMap;
-    try { siteMap = JSON.parse(siteMapRaw); }
+    var siteMap;                       // { "pt.example.com": "<ptsite id>", ... }
+    try { siteMap = JSON.parse(config.get("site_map") || "{}"); }
     catch (e) { return { ok: false, error: "site_map JSON 无效" }; }
+    if (!host || !uuid || !pwd) return { ok: false, error: "missing config" };
 
-    // 1. 拉 ciphertext
-    var resp = http.get(host + "/get/" + uuid, {});
-    if (resp.status !== 200) {
-        return { ok: false, error: "server " + resp.status };
-    }
-    var payload = JSON.parse(resp.body); // { uuid, encrypted }
+    // 1. 拉 ciphertext（必须先于任何写：数据依赖）
+    var resp = await http.get(host + "/get/" + uuid, {});
+    if (resp.status !== 200) return { ok: false, error: "server " + resp.status };
+    var payload = JSON.parse(resp.body);               // { encrypted }
 
-    // 2. 解密
-    var keyPwd = CryptoJS.MD5(uuid + "-" + pwd).toString().substring(0, 16);
-    var plaintext;
+    // 2. 解密（宿主 crypto.*，同步）
+    var data;
     try {
-        plaintext = CryptoJS.AES.decrypt(payload.encrypted, keyPwd).toString(CryptoJS.enc.Utf8);
+        var raw = crypto.base64Decode(payload.encrypted);   // "Salted__" + salt + 密文
+        var kv  = crypto.evpBytesToKey(crypto.md5(uuid + "-" + pwd).substring(0, 16), raw.subarray(8, 16), 32, 16);
+        data = JSON.parse(utf8Decode(crypto.aesDecryptCBC(kv.key, kv.iv, raw.subarray(16))));
     } catch (e) {
         return { ok: false, error: "decrypt failed: " + e.message };
     }
-    var data = JSON.parse(plaintext); // { cookie_data: { "domain.com": [{name,value,...}, ...] } }
+    var jar = data.cookie_data || {};
+    var toHeader = function (cookies) {
+        return cookies.map(function (c) { return c.name + "=" + c.value; }).join("; ");
+    };
 
-    // 3. 按 site_map 把每个 domain 的 cookies 拼成 "k=v; k2=v2; ..." 写入 host KV
-    var written = 0;
-    for (var domain in siteMap) {
-        if (!siteMap.hasOwnProperty(domain)) continue;
-        var siteID = siteMap[domain];
-        var cookies = data.cookie_data && data.cookie_data[domain];
-        if (!cookies) {
-            log.warn("domain " + domain + " 不在 CookieCloud 数据中，跳过");
-            continue;
+    // 3. 组装所有写，并发发出（Promise.all，不逐个 await）
+    var jobs = [];
+    Object.keys(siteMap).forEach(function (domain) {
+        var siteId = siteMap[domain];
+        if (!jar[domain]) { log.warn("domain " + domain + " 不在 CookieCloud 数据中，跳过"); return; }
+        var ck = toHeader(jar[domain]);
+        var meta = ptsite.getCookieMeta(siteId);              // 同步；null = 站点已删
+        if (meta && meta.sha256 === crypto.sha256(normalizeCookie(ck))) return;   // 没变，跳过
+        jobs.push(ptsite.setCookie(siteId, ck).then(
+            function () { return { target: siteId, ok: true }; },
+            function (e) { return { target: siteId, ok: false, error: e.message }; }));
+    });
+    if (config.get("sync_douban") === "true" && jar[".douban.com"]) {
+        var dck = toHeader(jar[".douban.com"]);
+        if (douban.getCookie().sha256 !== crypto.sha256(normalizeCookie(dck))) {
+            jobs.push(douban.setCookie(dck, { validate: true }).then(
+                function (r) { return { target: "douban", ok: true, validation: r.validation }; },
+                function (e) { return { target: "douban", ok: false, error: e.message }; }));
         }
-        var parts = [];
-        for (var i = 0; i < cookies.length; i++) {
-            parts.push(cookies[i].name + "=" + cookies[i].value);
-        }
-        var cookieStr = parts.join("; ");
-        // ⚠️ 依赖：方案 1 的 hostkv.setSiteCookie facade
-        hostkv.setSiteCookie(siteID, cookieStr);
-        written++;
     }
+    var results = await Promise.all(jobs);                 // 总耗时 ≈ 最慢一枪（豆瓣验活 ≤ 8s）
 
     config.set("last_synced_at", new Date().toISOString());
-    config.set("last_error", "");
-    var n = parseInt(config.get("synced_count") || "0", 10) + 1;
-    config.set("synced_count", String(n));
-
-    return { ok: true, written: written };
+    var failed = results.filter(function (r) { return !r.ok; });
+    config.set("last_error", failed.map(function (r) { return r.target + ": " + r.error; }).join("; "));
+    config.set("synced_count", String(parseInt(config.get("synced_count") || "0", 10) + 1));
+    return { ok: failed.length === 0, results: results };
 }
 
-// 暴露给 UI 触发
-plugin.registerAPI("/sync", function (req) {
-    var result = syncOnce();
-    if (!result.ok) {
-        config.set("last_error", result.error);
-        log.error("cookiecloud sync 失败：" + result.error);
-    } else {
-        log.info("cookiecloud 同步完成，写入 " + result.written + " 个 site");
-    }
-    return result;
-});
-
-plugin.registerAPI("/status", function (req) {
-    return {
-        configured: !!(config.get("host") && config.get("cloud_uuid") && config.get("cloud_pwd")),
-        last_synced_at: config.get("last_synced_at") || "",
-        last_error: config.get("last_error") || "",
-        synced_count: parseInt(config.get("synced_count") || "0", 10)
-    };
+plugin.registerAPI("/sync", async function (req) {
+    var result = await syncOnce();
+    if (!result.ok) log.error("cookiecloud sync 失败：" + (result.error || config.get("last_error")));
+    return result;                                         // UI 一次拿到每站结果 + 豆瓣 validation
 });
 ```
 
@@ -258,21 +241,29 @@ UI 框架可选，原生 HTML+JS 即可（参考 dashboard-stats 插件的 UI �
 
 ## 9. 测试 / 验收清单
 
-- [ ] CryptoJS-mini 单测（拿 cipher.go 的 BytesToKeyAES256CBCMD5 + 已知 ciphertext/plaintext 对）
+- [ ] 解密链路用 devrt（`crypto.*` 是 node:crypto 真实现）拿一组已知 ciphertext/plaintext 对跑通；主仓 `host_api_crypto_test.go` 已有 OpenSSL 生成的 CookieCloud 形态向量
 - [ ] `syncOnce` 在 host=空 / uuid=空 / 网络失败 / 解密失败 / site_map 无效 5 种 path 都不 panic
-- [ ] `hostkv.setSiteCookie` 写入后，主仓 PT pull 立刻读到新 cookie（端到端 happy path）
+- [ ] `ptsite.setCookie` 写入后，主仓 PT pull 立刻读到新 cookie；`douban.setCookie` 后豆瓣请求立即带新 Cookie（端到端 happy path）
+- [ ] 同一份 cookie 再同步一次：指纹比对命中，不发写、不产生审计行
+- [ ] 某站被删 / 类型不匹配：该站 reject 被收集，其它站照常写入
+- [ ] 所有写并发发出（`Promise.all`），豆瓣验活慢（≤8s）时 PT 站写入不被拖住
 - [ ] `is_secret` 字段实际加密落库（admin REST 设过之后）
 - [ ] UI 在配置缺失时显式提示，不让用户以为「没事」
 
 ---
 
-## 10. 阻塞依赖（先解决再写插件）
+## 10. 依赖（主仓批次 1 清单，已落地）
 
-1. **🔴 主仓 PR**：`internal/plugin/host_*.go` 加 `hostkv.setSiteCookie(siteID, value)` facade + 权限名 `api.kv.write.site_cookie` + sdk.md 更新（约 100-200 行；codex APPROVE 后合）。
-2. **🔴 决定 §4 选 A 还是 B**。
-   - 选 A：你这边自己处理 CryptoJS 截子集 + 验证（无主仓改动）
-   - 选 B：再开个主仓 PR 加 `crypto` facade，会更通用但慢一周
-3. **🟡 跑通 §9 的端到端 happy path 验证**
+主仓 `plugin-permission-expansion-plan.md` §5.1：
+
+- [x] 权限常量 `api.ptsite.read/write`、`api.douban.cookie.read/write`（+ `api.ruleflow.read` 正式名），敏感权限规则（`.write` 后缀 / `api.http`）
+- [x] `crypto.*` 纯函数 facade（始终注入）——取代 §4 选项 A 的内嵌 CryptoJS
+- [x] `ptsite.*` facade：`pt/credential.go SetCredential` 与管理端 `PATCH /api/pt-sites/:id` 共用（authKind 校验 + 单列 UPDATE）
+- [x] `douban.*` facade：`metadata/douban_credential.go ApplyDoubanCookie` 与管理端共用；插件路径验活 8s 上限，到点回 `rate_limited`
+- [x] 方法级注入、写审计（`audit/plugin/<id>`）、插件详情页日志显示审计行
+- [x] 安装 / 升级 UI：敏感权限标红 + 二次确认，升级展示「本次升级新增权限」
+- [x] sdk.md / dev-guide.md 权限表与同步/异步一览、Cookie 归一化契约 + 测试向量；devrt `crypto`/`ptsite`/`douban` mock
+- [ ] **下一轮（插件侧）**：按 §2/§5/§6 改 `plugins/cookiecloud`——删内嵌 CryptoJS、写入改 facade、`/sync` 并发写、UI 用 `ptsite.list()` 选站；宿主部署须与此版插件一起上（旧插件写的 KV 早已没人读）
 
 ---
 
@@ -280,13 +271,13 @@ UI 框架可选，原生 HTML+JS 即可（参考 dashboard-stats 插件的 UI �
 
 | 项 | demo (Go) | 本方案 (JS plugin) |
 |---|---|---|
-| 解密 | Go std lib `crypto/aes` + `crypto/md5` | 内嵌 CryptoJS-mini（选项 A） |
-| Cookie 落地 | demo 没明确，看起来是返回给 caller | 写主仓 `AppSetting.site_cookie_<id>` 经 facade |
+| 解密 | Go std lib `crypto/aes` + `crypto/md5` | 宿主 `crypto.*` facade（选项 B，同样是 Go std lib） |
+| Cookie 落地 | demo 没明确，看起来是返回给 caller | 经 `ptsite.setCookie` / `douban.setCookie` 写入 `site_configs` 加密列 / `app_settings.douban_cookie` |
 | 触发 | demo 内嵌 .go 没看到调度 | UI 按钮 + 外部 cron curl |
 | 配置 | 结构体字段 host/uuid/pwd | plugin config + per-domain map |
 | 凭据加密 | 无 | 走 plugin config 的 AES-256-GCM |
 
 ---
 
-**总结**：插件本身约 200-300 行业务 JS + 1000 行内嵌 CryptoJS + 150 行 UI HTML。  
-**前置主仓改动**：`hostkv.setSiteCookie` facade（最小写权限）。
+**总结**：插件本身约 200-300 行业务 JS + 150 行 UI HTML（不再内嵌 CryptoJS）。  
+**前置主仓改动**：批次 1（见 §10），已落地。

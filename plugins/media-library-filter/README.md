@@ -17,7 +17,7 @@
 ## 安装
 
 1. 管理页 → 插件市场 → 搜索 `media-library-filter` → 安装。
-2. 首次安装会弹出授权确认：`hook.download`、`api.http`、`api.ruleflow`、`ui.embed`。
+2. 首次安装会弹出授权确认：`hook.download.write`（拦截下载）、`api.http`、`api.ruleflow.read`、`ui.embed`。
 3. 进入插件详情 → **设置**标签配置 Emby / Plex 连接及 per-flow 维度。
 
 ## 配置
@@ -248,7 +248,7 @@ dry_run=1：以上 false / bitmap 路径一律改成 return true（仅 log）
 ## 与主仓关系
 
 - **`should_download` hook**：由主仓提供（v3.5+），本插件注册。宿主在推种前同步调用，读取返回值。
-- **`ruleflow.list()` API**：需 `api.ruleflow` 权限，用于 UI 列出所有 flow 以便逐条配置。
+- **`ruleflow.list()` API**：需 `api.ruleflow.read` 权限，用于 UI 列出所有 flow 以便逐条配置。
 - **通知功能**：自 v3.5 起请走主仓 `internal/notify`（钉钉 / 飞书等），本插件不再涉及通知。
 
 ## 从 0.3.x 升级（0.4.0）

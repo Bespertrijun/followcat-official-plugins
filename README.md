@@ -13,7 +13,6 @@ plugin-registry/
 ├── requirements.txt        # 构建 + DevRT 的 Python 依赖
 ├── plugins/                # 所有插件源码（每个子目录 = 一个插件：manifest + index.js + README [+ ui/]）
 │   ├── dashboard-stats/
-│   ├── blob-cache-demo/
 │   ├── cookiecloud/
 │   └── media-library-filter/
 ├── docs/plugins/           # SDK / 开发指南 / 市场 / schema 文档
@@ -48,7 +47,7 @@ python devrt/server.py media-library-filter
 
 | 选项 | 说明 |
 |------|------|
-| `<plugin>` | 插件目录名（`dashboard-stats` / `cookiecloud` / `media-library-filter` / `blob-cache-demo` / 自己的目录） |
+| `<plugin>` | 插件目录名（`dashboard-stats` / `cookiecloud` / `media-library-filter` / 自己的目录） |
 | `--port 9100` | 改端口（默认 9000） |
 | `--allow-http` | 允许 `http.*` 真实出网（默认 mock，仅打日志），调试 Telegram / Emby / Plex 等真实 HTTP 时打开 |
 | `--persist` | 把 mock config 持久化到 `devrt/data/<plugin>/config.json`，重启不丢 |
@@ -125,7 +124,6 @@ python scripts/build.py
 | 插件 | 版本 | 说明 |
 |------|------|------|
 | `dashboard-stats` | 1.0.0 | 仅暴露统计 API 端点（headless） |
-| `blob-cache-demo` | 0.1.0 | 演示 v3.4 `data.*` 加密 blob 存储 API（教学示例，要求 FollowCat ≥ v3.4） |
 | `media-library-filter` | 0.3.0 | 下载去重器：在 `should_download` hook 里拿种子 tags 与 Emby/Plex 库内副本按 7 维+3 种操作符（==/≥/regex）逐副本比对，库内已有同规格副本则跳过下载（fail-open / 3s 超时；要求 FollowCat ≥ v3.5） |
 | `cookiecloud` | 1.0.0 | ⚠️ **草稿（未发布）** —— 从 CookieCloud server 同步浏览器 cookies 到 PT 站凭据；manifest 标 `"draft": true`，暂不进 `index.json`、不打包。其依赖的 `ui.embed` 已由主仓实现，技术阻塞已解除；走完发布流程（删 `draft` → 打 tag → CI 回填 `index.json`）即可上架 |
 
@@ -156,7 +154,6 @@ python scripts/build.py
 ```bash
 # 一次性给所有「正式」插件打 tag（cookiecloud 是 draft，跳过）
 git tag dashboard-stats/v1.0.0
-git tag blob-cache-demo/v0.1.0
 git tag media-library-filter/v0.1.0
 git push origin --tags
 ```

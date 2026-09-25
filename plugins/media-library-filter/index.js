@@ -1100,7 +1100,7 @@ plugin.on("should_download", async function (p) {
 
 plugin.registerAPI("/flows", function (req) {
     if (typeof ruleflow !== "object" || !ruleflow || typeof ruleflow.list !== "function") {
-        return { ok: false, error: "ruleflow unavailable (need api.ruleflow permission)", flows: [] };
+        return { ok: false, error: "ruleflow unavailable (need api.ruleflow.read permission)", flows: [] };
     }
     var flows = [];
     try {

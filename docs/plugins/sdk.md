@@ -31,31 +31,40 @@ my-plugin/
 
 ---
 
-## Hook 列表（MVP 9 个）
+## Hook 列表（9 个：8 个通知 hook + 1 个同步否决 hook）
 
-> JS 侧通过 `plugin.on("<hook_name>", function(data) { ... })` 订阅。同名 hook 多次注册以最后一次为准。所有 hook payload 字段命名见 `internal/domain/event.go`，并由 `internal/domain/event_payload_test.go` 锁定。
+> JS 侧通过 `plugin.on("<hook_name>", function(data) { ... })` 订阅。同名 hook 多次注册以最后一次为准。所有 hook payload 字段命名见 `internal/domain/event.go`，并由 `internal/domain/event_payload_test.go` 锁定。hook 须同时在 `manifest.hooks` 声明、并持有对应权限（见下表与「权限」章）。
 
-| Hook | 触发时机 | payload 关键字段 |
-|------|---------|-----------------|
-| `on_episode_found` | RSS 发现新集 | `anime_id`, `episode`, `torrent_url` |
-| `on_download_done` | qBittorrent 下载完成 | `anime_id`, `anime_title`, `episode`, `hash`, `files: [{path,size}]?`, `size?`, `save_path?`, `category?` |
-| `on_download_failed` | 下载失败（不可恢复） | `anime_id`, `anime_title`, `episode`, `hash`, `reason` |
-| `on_link_done` | 链接整理完成 | `anime_id`, `anime_title`, `episode`, `dest?`, `tmdb_episode?` |
-| `on_link_failed` | 链接执行失败 | `anime_id`, `anime_title`, `episode`, `reason`, `hash?` |
-| `on_task_completed` | 番剧全集追完 | `task_id`, `anime_title`, `total_ep` |
-| `on_task_reopened` | 已完成任务因总集数上调/新集出现被打回继续追更（done→tracking） | `source`（`"mikan"`/`"douban"`）, `task_id`, `media_id`, `media_title`, `old_total_ep`, `new_total_ep`, `acquired_units` |
-| `on_notification_before_send` | 主仓 `internal/notify` 即将通过某通道发送通知前 | `event_type`, `channel` ("slack"/"telegram"), `text`, `anime_id?`, `anime_title?`, `episode?` |
-| `on_notification_after_send` | 单条通知发送结束（成功或失败） | `event_type`, `channel`, `success`, `error_message?`, `anime_id?`, `anime_title?`, `episode?` |
+| Hook | 所需权限 | 触发时机 | payload 关键字段 |
+|------|---------|---------|-----------------|
+| `on_episode_found` | `hook.download.read` | RSS 发现新集 | `anime_id`, `episode`, `torrent_url` |
+| `on_download_done` | `hook.download.read` | qBittorrent 下载完成 | `anime_id`, `anime_title`, `episode`, `hash`, `files: [{path,size}]?`, `size?`, `save_path?`, `category?` |
+| `on_download_failed` | `hook.download.read` | 下载失败（不可恢复） | `anime_id`, `anime_title`, `episode`, `hash`, `reason` |
+| `on_link_done` | `hook.link.read` | 链接整理完成（自动整理路径） | `anime_id`, `anime_title`, `episode`, `dest?`, `tmdb_episode?` |
+| `on_link_failed` | `hook.link.read` | 链接执行失败 | `anime_id`, `anime_title`, `episode`, `reason`, `hash?` |
+| `on_episode_acquired` | `hook.task.read` | **集数新入库**：只在集数新入库（位图由灭变亮）时触发，覆盖自动整理 / 手动链接（含部分完成）/ 合集确认；重复整理已入库的集不触发 | `source`, `task_id`, `media_id`, `media_title`, `episodes`, `unit_kind`, `completed_units`, `total_units` |
+| `on_task_completed` | `hook.task.read` | 番剧或豆瓣任务完结（每次完结恰好一次） | `source`（`"mikan"`/`"douban"`）, `task_id`, `media_title`, `total_ep`；兼容旧字段 `anime_title`（同 `media_title`） |
+| `on_task_reopened` | `hook.task.read` | 已完成任务因总集数上调/新集出现被打回继续追更（done→tracking） | `source`（`"mikan"`/`"douban"`）, `task_id`, `media_id`, `media_title`, `old_total_ep`, `new_total_ep`, `acquired_units` |
+| `should_download` | `hook.download.write` ⚠️敏感 | ruleflow 推种到 qBittorrent 之前（同步否决，见下节） | 见下节 `PreDownloadCheck` |
 
 > `?` 表示后端可能省略（omitempty）；插件代码须自行做空值兜底。
 >
-> **`on_notification_*` 语义**：主仓自 v3.5 起把 Slack / Telegram 发送、节流、重试等业务逻辑收回到 `internal/notify`，提供这两个 hook 给插件**观察**（fire-and-forget，无 veto / payload 改写）。常见用法：把通知 fan-out 到主仓未内置的通道（钉钉 / 飞书 / 企业微信），或上报到可观测系统（Sentry / Slack 旁路）。**不要**在 `before_send` 里做耗时太久的 `http.*`——hook 整次调用墙钟 10s（含 `await`），超时后结果被丢弃；hook 是 fire-and-forget 投递，本来就不会拖住主仓的 channel 发送。
+> **`source` 决定 `task_id` 的命名空间**：`"mikan"` 时是番剧任务 ID，`"douban"` 时是豆瓣任务 ID，两者不通用。只关心番剧的插件（如按 `anime.get` 取元数据）应先 `if (p.source !== "mikan") return;`。
+>
+> **`on_episode_acquired`** 只在集数新入库（位图由灭变亮）时触发，覆盖自动整理 / 手动链接（含部分完成）/ 合集确认；重复整理已入库的集不触发。具体地：
+>
+> - 在入库结算事务**提交后**发，失败回滚不发；手动校正进度、豆瓣位图回填、强制切换清位图**不**触发。
+> - `episodes` 是**本次由灭变亮**的单位（升序）：`unit_kind` 为 `"episode"` 时是集号（Mikan 为番剧 cour 相对号，豆瓣为 TMDB 绝对号）；`"period"`（综艺按期）时是期号；`"acquired"`（电影）时为空数组——电影只在「已获取」由否变是那一次触发。一次结算没有新亮的单位就不发。
+> - 手动链接「部分完成」（种子仍待人工）也会触发（只含这次链上的集）；之后补完剩余文件只发剩下那几集。
+> - 与 `on_link_done` 并存：前者管「进度到哪」（全部入库路径），后者管「文件放哪」（仅自动整理路径；手动链接不发 `on_link_done` / `on_link_failed`）。
+>
+> **通知 hook 已删除**：旧的 `hook.notify` 与 `on_notification_before_send` / `on_notification_after_send`（把宿主发出的 Slack/Telegram 通知抄送给插件）已移除——manifest 声明它们会解析失败。「插件借宿主通知通道发通知」将另行设计。
 
 ---
 
-## 同步否决 hook：`should_download`（需 `hook.download`）
+## 同步否决 hook：`should_download`（需 `hook.download.write`，敏感）
 
-> ⚠️ 与上面 9 个 **fire-and-forget 通知 hook 不同**，`should_download` 是**同步、可否决**的 hook——宿主在每次 ruleflow 推送种子到 qBittorrent **之前**同步调用它，并**读取返回值**决定是否真的下载。典型用途：查询外部媒体库（Emby / Jellyfin / Plex），若该集已存在则拦下、不重复下载。
+> ⚠️ 与上面 8 个 **fire-and-forget 通知 hook 不同**，`should_download` 是**同步、可否决**的 hook——宿主在每次 ruleflow 推送种子到 qBittorrent **之前**同步调用它，并**读取返回值**决定是否真的下载。典型用途：查询外部媒体库（Emby / Jellyfin / Plex），若该集已存在则拦下、不重复下载。
 
 ### 注册与返回值契约
 
@@ -154,7 +163,7 @@ plugin.on("should_download", function(p) {
 
 "库里算不算有这集"应**按当前 ruleflow 的意图**判断、而非全局——否则你若用两条 ruleflow 各下 1080p / 4K 到同一库，第二份会被第一份误判成"已有"。做法：
 
-1. 用 [`ruleflow.list()`](#ruleflow--规则流只读需-apiruleflow) 在插件配置 UI 列出所有 ruleflow；
+1. 用 [`ruleflow.list()`](#ruleflow--规则流只读需-apiruleflowread旧名-apiruleflow-已弃用仍可用) 在插件配置 UI 列出所有 ruleflow；
 2. 让用户给每个 `flow_id` 挂一套满足标准（如"库内有 1080p 才算有"）；
 3. hook 触发时按 `p.flow_id` 取对应配置 + 用 `p.tags` / 查库做 like-for-like 比对。
 
@@ -174,8 +183,20 @@ plugin.on("should_download", function(p) {
 
 | 类别 | facade | 调用方式 |
 |------|--------|---------|
-| 同步（本地存储 / 纯计算，毫秒级） | `plugin.*`、`log.*`、`config.*`、`data.*`、`anime.get`、`task.get/list`、`ruleflow.list` | 直接取返回值：`var v = config.get("k")` |
-| **异步（返回 Promise）** | `http.get/post/put/delete` | 必须 `await`（或 `.then`）：`var resp = await http.get(url)` |
+| 同步（本地存储 / 纯计算，毫秒级） | `plugin.*`、`log.*`、`config.*`、`data.*`、`crypto.*`、`anime.get`、`task.get/list`、`ruleflow.list`、`ptsite.list/get/registry/getCookieMeta`、`douban.getCookie` | 直接取返回值：`var v = config.get("k")` |
+| **异步（返回 Promise）** | `http.get/post/put/delete`、`ptsite.setCookie/setAPIKey`、`douban.setCookie` | 必须 `await`（或 `.then`）：`var resp = await http.get(url)` |
+
+批次 1（凭据写入 / 加解密）新增方法逐个归属：
+
+| 方法 | 所需权限 | 同步 / 异步 |
+|------|---------|------------|
+| `crypto.sha256` / `crypto.md5` / `crypto.base64Decode` / `crypto.evpBytesToKey` / `crypto.aesDecryptCBC` | 无（始终可用） | 同步 |
+| `ptsite.list` / `ptsite.get` / `ptsite.registry` / `ptsite.getCookieMeta` | `api.ptsite.read` | 同步 |
+| `ptsite.setCookie` / `ptsite.setAPIKey` | `api.ptsite.write` | **异步** `Promise<{ok}>` |
+| `douban.getCookie` | `api.douban.cookie.read` | 同步 |
+| `douban.setCookie` | `api.douban.cookie.write` | **异步** `Promise<{ok, validation}>` |
+
+> 参数类型不对（如漏传 `value`）在调用处**同步**抛 `TypeError`，不会变成 reject；宿主侧的失败（站点不存在、凭据类型不匹配、加密失败、超时）才以 reject 交付。
 
 > ⚠️ **破坏性变更：`http.*` 现在返回 Promise，没有同步别名。** 旧写法 `var resp = http.get(url); resp.status` 拿到的是 Promise 对象，`resp.status` 为 `undefined`。所在函数改成 `async function`，调用处加 `await`，并把 `async` 一路传到回调（hook / registerAPI / should_download 都支持 async，见下）。失败（网络错误、超时、限流、SSRF 拦截）以 **reject** 形式交付——`await` 处抛出的仍是原来那个错误对象（`e.message` 形如 `http GET <url>: ...`），`try { await http.get(...) } catch (e) {}` 照常能接住。
 
@@ -311,7 +332,7 @@ data.put("cache.bin", { foo: 1 });
 | 番剧封面 / 缩略图 | `data.put` |
 | 大型 JSON 状态机快照 | `data.put` |
 
-> goja 没有原生 `TextEncoder`/`TextDecoder`，要把 string 转 Uint8Array 需自己实现 UTF-8 编解码。可参考 [`blob-cache-demo/index.js`](../../blob-cache-demo/index.js) 的 `encodeUtf8`。
+> goja 没有原生 `TextEncoder`/`TextDecoder`，要把 string 转 Uint8Array 需自己实现 UTF-8 编解码。可直接抄 [dev-guide「UTF-8 编解码」](./dev-guide.md#utf-8-编解码goja-没有原生-textencoder) 的 `encodeUtf8` / `decodeUtf8` 参考实现。
 
 ### 配额可调（管理员）
 
@@ -372,7 +393,7 @@ var all = task.list() // PluginTaskView[]
 
 > **安全说明**：`task` facade 严格返回 `PluginTaskView` 投影，不会泄漏 `Server.Password`、`Server.SSHKey`、`Download.Password` 等加密字段（受 `internal/plugin/host_facade_test.go` 静态保护）。
 
-### `ruleflow` —— 规则流只读（需 `api.ruleflow`）
+### `ruleflow` —— 规则流只读（需 `api.ruleflow.read`；旧名 `api.ruleflow` 已弃用、仍可用）
 
 ```js
 var flows = ruleflow.list()
@@ -382,6 +403,156 @@ var flows = ruleflow.list()
 - `id` == `should_download` payload 的 `flow_id` == 后端 `SiteConfig.FlowID`；插件按 `id` 存 per-flow 配置，UI 上展示 `name`。
 - 只读白名单投影，**仅 `{id, name}`**，不暴露节点结构 / 链接规则 / 任何凭据。
 - 典型配合 `should_download` 用：在配置 UI 枚举所有 ruleflow，逐条挂"满足判断"标准。
+- 权限名：新插件一律声明 `api.ruleflow.read`。`api.ruleflow` 是历史命名（无 `.read` 后缀），作为弃用别名保留——两者解锁同一个 `ruleflow.list`，已安装的旧插件不受影响。注意：只认新名的宿主版本之前，声明 `api.ruleflow.read` 的插件会因未知权限装不上，发布时留意宿主最低版本。
+
+### `crypto` —— 纯函数加解密（始终可用，**同步**）
+
+无权限语义，覆盖 CookieCloud 解密全链路（base64 → `Salted__` 拆解 → EVP_BytesToKey → AES-CBC），插件不必再内嵌 CryptoJS。
+
+| 方法 | 签名 |
+|------|------|
+| `crypto.sha256(x)` | `(string \| Uint8Array \| ArrayBuffer) → string`（小写 hex；string 按 UTF-8 编码） |
+| `crypto.md5(x)` | 同上 |
+| `crypto.base64Decode(str)` | `(string) → Uint8Array`（标准 `+/` 字母表，尾部 `=` 可省略；非法输入抛错） |
+| `crypto.evpBytesToKey(password, salt, keyLen, ivLen)` | `(string \| bytes, bytes \| null, int, int) → {key: Uint8Array, iv: Uint8Array}`（OpenSSL EVP_BytesToKey，MD5，1 轮；keyLen/ivLen ∈ [0, 256]） |
+| `crypto.aesDecryptCBC(key, iv, data)` | `(bytes, bytes, bytes) → Uint8Array`（key 16/24/32 字节、iv 16 字节、data 为 16 的正整数倍；自动去 PKCS7 填充，填充不合法 = 口令错 / 数据坏 → 抛错） |
+
+- `bytes` = `Uint8Array`（含 `subarray` 视图）或 `ArrayBuffer`；返回值都是新分配的 `Uint8Array`，改它不影响入参。
+- 沙箱没有 `TextDecoder`：解密出的 UTF-8 字节转字符串需自行解码（纯 ASCII 可逐字节 `String.fromCharCode`）。
+
+```js
+// CookieCloud：encrypted = CryptoJS.AES.encrypt(json, md5(uuid + "-" + password).substring(0, 16))
+var pass = crypto.md5(uuid + "-" + password).substring(0, 16);
+var raw  = crypto.base64Decode(payload.encrypted);          // "Salted__" + 8B salt + 密文
+var kv   = crypto.evpBytesToKey(pass, raw.subarray(8, 16), 32, 16);
+var json = utf8Decode(crypto.aesDecryptCBC(kv.key, kv.iv, raw.subarray(16)));
+```
+
+### `ptsite` —— PT 站配置与凭据（需 `api.ptsite.read` / `api.ptsite.write`）
+
+对象按域注入、方法按权限挂载：只声明 `api.ptsite.read` 时对象上**没有** `setCookie/setAPIKey`（`typeof ptsite.setCookie === "undefined"`）；只声明 `api.ptsite.write` 时没有读方法。两个都没声明时 `ptsite` 本身为 `undefined`。
+
+**读（`api.ptsite.read`，同步）**——凭据本体永不出宿主，只回「已配置」标记与指纹：
+
+| 方法 | 返回 |
+|------|------|
+| `ptsite.list()` | `[{id, name, adapter, enabled, auth_kind, has_cookie, has_apikey}]`（仅已注册 adapter 的 PT 站行） |
+| `ptsite.get(id)` | 同形单个；不存在 / 非 PT 站 / adapter 未注册 → `null` |
+| `ptsite.registry()` | `[{site_id, name, auth_kind}]`，`auth_kind ∈ "cookie" \| "apikey" \| "none"`（none = RSS 链接自带 passkey） |
+| `ptsite.getCookieMeta(id)` | `{configured, sha256}`；`sha256` 按下文「Cookie 归一化契约」对**归一化后**的明文计算，未配置时为 `""`；站点不存在 → `null`。不提供打码值：明文永不出宿主，插件只需判「是否相同」 |
+
+**写（`api.ptsite.write`，异步）**：
+
+| 方法 | 返回 |
+|------|------|
+| `ptsite.setCookie(id, value)` | `Promise<{ok: true}>` |
+| `ptsite.setAPIKey(id, value)` | `Promise<{ok: true}>` |
+
+- `value` 为明文，`""` = 清空。宿主加密落库（AES-256-GCM），**只更新这一列**，不会用旧值冲掉管理端同时改的其它字段。
+- 与管理端 `PATCH /api/pt-sites/:id` 同一份校验：cookie 站拒绝 `setAPIKey`、apikey 站拒绝 `setCookie`、`auth_kind=none` 的站拒绝任何非空写入（清空一律放行）；不匹配 / 站点不存在 → reject（`e.message` 以 `pt credential: ...` 开头）。
+- 每次调用在入口记一条审计日志（见下文「审计日志」）。
+- `rss_urls` / `adapter` 不开放写入（将来的 `ptsite.update` 也不会开放）：宿主拉 RSS 时会把 Cookie 头发给 `rss_urls` 里的每个 URL，能改它就等于能把明文 cookie 送去任意服务器。
+
+```js
+// 只在 cookie 真的变了时才覆写（明文不出宿主，比对在插件侧）
+var meta = ptsite.getCookieMeta(siteId);
+if (!meta || crypto.sha256(normalizeCookie(newCk)) !== meta.sha256) {
+  await ptsite.setCookie(siteId, newCk);
+}
+```
+
+### `douban` —— 豆瓣 Cookie（需 `api.douban.cookie.read` / `api.douban.cookie.write`）
+
+同样按方法挂载（`douban` 对象将来还会挂 `api.douban.read/write` 的 media/task 方法，权限之间互不蕴含）。
+
+| 方法 | 权限 | 返回 |
+|------|------|------|
+| `douban.getCookie()` | `api.douban.cookie.read` | 同步 `{configured, sha256}`，`sha256` 同归一化契约；未配置 / 解密失败 → `{configured:false, sha256:""}` |
+| `douban.setCookie(value, {validate})` | `api.douban.cookie.write` | **异步** `Promise<{ok: true, validation}>` |
+
+`douban.setCookie`：宿主加密落库 + 热加载（立即生效），`validate: true` 时再真打豆瓣验活，`validation` 取值：
+
+| `validation` | 含义 |
+|---|---|
+| `"ok"` | Cookie 登录态有效 |
+| `"cookie_invalid"` | 匿名 / Cookie 失效 |
+| `"rate_limited"` | 豆瓣风控 / 通道忙——**包括验活 8s 内没做完**（已写入，稍后可再验） |
+| `"unreachable"` | 网络 / 代理打不通 |
+| `"no_cookie"` | `value === ""`（清空；不验活） |
+| `""` | `validate` 为假且非清空（没验活） |
+
+- 顺序固定：**先写入**（本地、快）再验活；验活在插件路径上限 **8s**，到点未完回 `rate_limited`（不是 `unreachable`），给同一次 registerAPI 调用（10s 墙钟）留约 2s 做别的出网。
+- 验活期间插件工人不被占，`await` 即可，UI 一次请求拿到结果，无需轮询。
+- 失败（加密失败、落库失败、10s 请求墙钟到期、插件停用）→ reject。每次调用入口记审计。
+
+```js
+plugin.registerAPI("/sync", async function (req) {
+  var ck = await http.get(cloudURL);                          // 出网：Promise
+  var r  = await douban.setCookie(decrypt(ck), { validate: true });
+  return { validation: r.validation };                        // UI 一次拿到
+});
+```
+
+### Cookie 归一化契约
+
+宿主算指纹（`getCookieMeta().sha256` / `douban.getCookie().sha256`）与插件算候选指纹必须走同一规则，否则同一 cookie 换个写法就会被误判成「变了」：
+
+1. 按 `;` 拆分
+2. 每段去掉首尾 **ASCII** 空白（空格 / `\t` / `\n` / `\r`；**不**用 `String.prototype.trim`——它还会去掉 U+00A0、U+FEFF 等，宿主不去）
+3. 丢弃空段（尾分号、`;;` 不产生段）
+4. 按 **Unicode 码点序**排序（== UTF-8 字节序）。**不能用默认 `sort()`**：它按 UTF-16 码元比较，对 emoji 等 BMP 之外的字符与 U+E000–U+FFFF 之间的顺序和宿主不同（V8 / Node 上可复现）
+5. 用 `"; "` 拼接
+
+重复键不去重（两段都保留）。指纹 = `crypto.sha256(normalizeCookie(ck))`。参考实现（主仓测试与 `devrt/cookie-normalize.js` 用的是同一段代码，直接抄进插件即可）：
+
+```js
+function normalizeCookie(s) {
+  var parts = String(s).split(";");
+  var out = [];
+  for (var i = 0; i < parts.length; i++) {
+    var p = parts[i].replace(/^[ \t\n\r]+|[ \t\n\r]+$/g, "");
+    if (p !== "") out.push(p);
+  }
+  out.sort(compareCodePoints);
+  return out.join("; ");
+}
+
+// 按 Unicode 码点比较（== UTF-8 字节序）。不能用默认 sort()：它按 UTF-16 码元比较，
+// 对 BMP 之外的字符（emoji 等）与 U+E000–U+FFFF 之间的顺序和宿主不一致。
+function compareCodePoints(a, b) {
+  var i = 0, j = 0;
+  while (i < a.length && j < b.length) {
+    var ca = a.codePointAt(i), cb = b.codePointAt(j);
+    if (ca !== cb) return ca < cb ? -1 : 1;
+    i += ca > 0xffff ? 2 : 1;
+    j += cb > 0xffff ? 2 : 1;
+  }
+  return (a.length - i) - (b.length - j);
+}
+```
+
+测试向量（单一来源：[`cookie-normalize-vectors.json`](./cookie-normalize-vectors.json)，与主仓 `pkg/crypto/testdata/cookie_normalize_vectors.json` 逐字节相同；主仓 Go `NormalizeCookie`、主仓对上面这段 JS 的 goja 对拍、`node --test devrt/cookie-normalize.test.js` 三处都跑这一组，改规则须三处同步）：
+
+| 用例 | 输入（JSON 字符串） | 输出（JSON 字符串） |
+|---|---|---|
+| empty | `""` | `""` |
+| only separators and blanks | `" ; ;; \t"` | `""` |
+| sorted by key | `"b=2; a=1"` | `"a=1; b=2"` |
+| leading and trailing blanks | `"  a=1 ;\tb=2\r\n"` | `"a=1; b=2"` |
+| trailing semicolon | `"a=1; b=2;"` | `"a=1; b=2"` |
+| no space after semicolon | `"b=2;a=1"` | `"a=1; b=2"` |
+| duplicate keys kept | `"a=2; a=1; a=2"` | `"a=1; a=2; a=2"` |
+| inner blanks kept | `"k=a b ; x = y"` | `"k=a b; x = y"` |
+| uppercase before lowercase | `"b=1; B=1; a=1"` | `"B=1; a=1; b=1"` |
+| segment without equals | `"flag; a=1"` | `"a=1; flag"` |
+| non-ascii values | `"name=\u5f20\u4e09; city=\u5317\u4eac"` | `"city=\u5317\u4eac; name=\u5f20\u4e09"` |
+| code point order not utf-16 order | `"k=\ud83d\ude00; k=\uff01"` | `"k=\uff01; k=\ud83d\ude00"` |
+| nbsp is not trimmed | `"a=1\u00a0; b=2"` | `"a=1\u00a0; b=2"` |
+| bom is not trimmed | `"\ufeffa=1; b=2"` | `"b=2; \ufeffa=1"` |
+
+### 审计日志
+
+所有写 facade（当前：`ptsite.setCookie/setAPIKey`、`douban.setCookie`）在入口由宿主记一行：来源 `audit/plugin/<id>`，消息 `AUDIT action=<方法> target=<目标>`（`target` 为站点 id 或 `douban_cookie`，超长截断、非 `[A-Za-z0-9_.-]` 字符替换为 `_`），**不记值**。插件的 `log.*` 固定来源 `plugin/<id>`，打不出 `audit/` 前缀，所以审计行无法伪造。插件详情页日志窗口两类行都显示，审计行带「[审计]」标签。
 
 ---
 
@@ -389,7 +560,9 @@ var flows = ruleflow.list()
 
 | ✅ 可以 | ❌ 不可以 |
 |--------|----------|
-| 读 `anime.get(id)` | 写任何 anime/task 数据 |
+| 读 `anime.get(id)` | 写任何 anime/task 数据（批次 3 规划中） |
+| 经 `ptsite` / `douban` facade 写 PT 站凭据 / 豆瓣 Cookie（需对应 `.write` 权限） | 读回任何凭据明文（只有「已配置」+ 指纹） |
+| `crypto.*` 本地加解密 | 用 `api.http` 回跳 FollowCat 自己的 REST（见下文「内部访问走 facade」） |
 | 读 `task.get/list` | 直接访问 `domain.Server` / `domain.Download` |
 | `http.*` 调外部 HTTP | `require` / `import` / `eval` / `Function(...)` |
 | `log.*` / `config.*` | 文件系统、子进程、数据库句柄 |
@@ -448,7 +621,7 @@ var flows = ruleflow.list()
 | `FC.notify(level, msg)` | `Promise<void>` | 在宿主界面显示 Toast，`level` ∈ `"info"\|"success"\|"warning"\|"error"`（宿主把 `info`/`success` 当成功提示、其余按错误） |
 | `FC.resize(height)` | `Promise<void>` | 请求宿主调整 iframe 高度（像素，宿主 clamp 到 200–1500） |
 
-> **iframe 桥就这 6 类消息**（`fc.init` / `api.call` / `config.get` / `config.put` / `host.notify` / `host.resize`）。`data.*` 加密 blob、`config.list`、`http.*`、`anime`/`task`/`ruleflow` 等**都不在 iframe 桥里**——它们只活在 `index.js` 的 goja 运行时。
+> **iframe 桥就这 6 类消息**（`fc.init` / `api.call` / `config.get` / `config.put` / `host.notify` / `host.resize`）。`data.*` 加密 blob、`config.list`、`http.*`、`crypto.*`、`anime`/`task`/`ruleflow`/`ptsite`/`douban` 等**都不在 iframe 桥里**——它们只活在 `index.js` 的 goja 运行时。
 >
 > 而且 iframe 的 CSP 是 `connect-src 'none'`，连 `fetch`/`XHR` 都被禁，UI **不能**直接打 sandbox REST（`/api/plugins/<id>/sandbox/*`）。要在 UI 里读写 blob 或调上述能力，正确做法是在 `index.js` 里用 `plugin.registerAPI` 包一个端点，内部用 `data.*` / `http.*` 完成，UI 再通过 `FC.api` 调它：
 >
@@ -499,34 +672,70 @@ var flows = ruleflow.list()
 
 ---
 
-## 权限白名单（MVP）
+## 权限
 
-`internal/plugin/permission.go` 是单一事实源：
+`internal/plugin/permission.go` 是单一事实源。manifest 声明白名单外的权限会 fail-closed（解析报错并列出有效权限集）。
 
-| 权限 | 注入对象 |
-|------|---------|
-| `hook.download` | 允许订阅 `on_episode_found` / `on_download_done` / `on_download_failed`，以及同步否决 hook `should_download` |
-| `hook.link`     | 允许订阅 `on_link_done` / `on_link_failed` |
-| `hook.task`     | 允许订阅 `on_task_completed` / `on_task_reopened` |
-| `hook.notify`   | 允许订阅 `on_notification_before_send` / `on_notification_after_send` |
-| `api.http`      | 注入全局 `http` |
-| `api.anime.read` | 注入全局 `anime` |
-| `api.task.read`  | 注入全局 `task` |
-| `api.ruleflow`   | 注入全局 `ruleflow`（`ruleflow.list()`） |
-| `ui.embed`       | 允许声明 `manifest.ui.entry`（iframe 内嵌前端 UI） |
+### 规则
 
-> `hook.rss` / `hook.route` / `api.*.write` / `api.douban.*` / `api.site.*` 在 plugin_guide.md 中规划但**未在 MVP 实现**，声明会导致 manifest 解析报错。
+- **声明式**：`manifest.permissions` 声明即授予（安装 / 升级时管理员确认），运行时不能增减。
+- **命名**：`<api|hook>.<域>[.<资源>].<read|write>`，发布后**不改名**（改名会让已装插件过不了白名单、重启即加载失败）。唯一例外是 2026-09-24 的一次性硬改名：`hook.download` → `hook.download.read` + `hook.download.write`、`hook.link` → `hook.link.read`、`hook.task` → `hook.task.read`（**不留别名**，旧名声明直接解析失败），`hook.notify` 删除。
+- **互不蕴含**：`api.douban.write` 不含 `api.douban.cookie.write`，`api.ptsite.write` 不含 `api.ptsite.read`——用什么声明什么。
+- **方法级注入**：缺权限时对应全局对象为 `undefined`；对象存在时，没授权的方法也是 `undefined`（如只有 `api.ptsite.read` 时 `ptsite.setCookie` 不存在），可用 `typeof` 探测。
+- **敏感权限**：`.write` 结尾，或显式名单（`api.http`：配任意读权限即可把数据外发）。安装 / 升级时管理页红色标注，需二次确认；升级只对**新增**的敏感权限再确认。
+- **写 facade 三铁律**：与管理端同一份写逻辑（同校验 / 同加密 / 同热加载）；凭据只写不读；每次写记审计。
+
+### 全集
+
+| 权限 | 能力 | 状态 |
+|------|------|------|
+| `hook.download.read` | 订阅 `on_episode_found` / `on_download_done` / `on_download_failed`（只看） | 已实现 |
+| `hook.download.write` ⚠️敏感 | 注册同步否决 hook `should_download`（推送下载前可决定不下载） | 已实现 |
+| `hook.link.read` | 订阅 `on_link_done` / `on_link_failed` | 已实现 |
+| `hook.task.read` | 订阅 `on_episode_acquired` / `on_task_completed` / `on_task_reopened` | 已实现 |
+| `api.http` ⚠️敏感 | 注入全局 `http`（仅外部调用，SSRF 守卫） | 已实现 |
+| `api.anime.read` | `anime.get` | 已实现 |
+| `api.task.read` | `task.get/list` | 已实现 |
+| `api.ruleflow.read` | `ruleflow.list` | 已实现（正式名） |
+| `api.ruleflow` | 同 `api.ruleflow.read` | **已弃用别名**（仍可用，新插件别用） |
+| `ui.embed` | 声明 `manifest.ui.entry`（iframe 内嵌 UI） | 已实现 |
+| `api.ptsite.read` | `ptsite.list/get/registry/getCookieMeta` | 已实现 |
+| `api.ptsite.write` ⚠️敏感 | `ptsite.setCookie/setAPIKey`（批次 3 补 `create/update/delete`） | 已实现（凭据写入） |
+| `api.douban.cookie.read` | `douban.getCookie` | 已实现 |
+| `api.douban.cookie.write` ⚠️敏感 | `douban.setCookie(v, {validate})` | 已实现 |
+| `api.rsssite.read` | `rsssite.list/get` | 规划中 |
+| `api.rsssite.write` ⚠️敏感 | `rsssite.create/update/delete` | 规划中 |
+| `api.douban.read` | `douban.listMedias/getMedia/listTasks/getTask` | 规划中 |
+| `api.douban.write` ⚠️敏感 | `douban.createMedia/updateMedia/rematch/createTask/updateProgress` | 规划中 |
+| `api.anime.write` ⚠️敏感 | `anime.rematch/updateExternalIds/setSeries` | 规划中 |
+| `api.task.write` ⚠️敏感 | `task.subscribe/start/stop/retry/updateProgress/markLinked` | 规划中 |
+| `api.ruleflow.write` ⚠️敏感 | `ruleflow.create/update/saveFull` | 规划中 |
+| `api.linkrule.read` | `linkrule.list/get/export` | 规划中 |
+| `api.linkrule.write` ⚠️敏感 | `linkrule.create/update/import` | 规划中 |
+| `api.series.read` | `series.list/get` | 规划中 |
+| `api.series.write` ⚠️敏感 | `series.confirm/split/recompute` | 规划中 |
+| `api.download.read` | `download.list` + qB 查询 `info/infoAll/files/trackers` | 规划中 |
+| `api.download.write` ⚠️敏感 | qB 变更 `add/delete/pause/resume/setFilePriority`（`delete(deleteFiles=true)` 真删磁盘文件） | 规划中 |
+
+`crypto.*` 是纯函数，无需权限。**「规划中」的权限现在声明会导致 manifest 解析报错**，等宿主对应批次发布后再用。
+
+明确**不给**：`api.server.*`、`api.notify.write`（webhook URL 即凭据外发通道）、用户 / 邀请码、密钥备份恢复、系统升级、插件管理自身、裸 `app_settings` 写与 `plugin.*` 配额键、qB WebUI 会话。暂缓：`api.notify.read`、`api.logs.read`、`api.link.execute`。
+
+## 内部访问走 facade，禁止 `api.http` 回跳宿主 REST
+
+- 读写 FollowCat 自身数据**只能**经上面这些注入对象（进程内直调，无网络面）。**不要**用 `http.*` 去请求 FollowCat 自己的 `/api/...`（`localhost`、内网地址、宿主域名都算）——哪怕今天打得通。
+- 理由：`api.http` 的 SSRF 守卫为了让插件能查局域网里的 Emby / qBittorrent，放行了内网地址，所以回跳在网络层是可达的；插件进程没有用户 JWT，今天只能打到免鉴权端点，但规范要堵的是「将来新增免鉴权端点时被插件顺手用上」这条路。
+- registry 人工审核会检查这一条：发现插件拿 `http.*` 访问宿主 REST 的，不予上架。需要的能力请提 issue 走 facade。
 
 ---
 
 ## 示例
 
-- 通知过滤类（订阅 `on_notification_before_send` + Emby/Plex 查询 + 自家 fan-out）：[plugin-registry/media-library-filter](https://github.com/followcat/plugin-registry/tree/main/media-library-filter)
+- 下载去重类（`should_download` 同步否决 + Emby/Plex 查询，per-flow 满足判断）：[plugin-registry/media-library-filter](https://github.com/followcat/plugin-registry/tree/main/media-library-filter)
 - 聚合 API 类（headless，仅 `registerAPI`）：[plugin-registry/dashboard-stats](https://github.com/followcat/plugin-registry/tree/main/dashboard-stats)
 - 综合类（iframe UI + 内嵌 CryptoJS + 自定义 API + http 外网调用）：[plugin-registry/cookiecloud](https://github.com/followcat/plugin-registry/tree/main/cookiecloud)
-- v3.4 `data.*` blob API 演示：[plugin-registry/blob-cache-demo](https://github.com/followcat/plugin-registry/tree/main/blob-cache-demo)
 
-> Slack / Telegram 通知不再以插件形式提供，自 v3.5 起已并入主仓 `internal/notify`。**想扩通道**（钉钉 / 飞书 / 企微等）PR 到主仓 channel registry；**想过滤通知**（如示例 media-library-filter）走 `on_notification_before_send` hook。
+> Slack / Telegram 通知不再以插件形式提供，自 v3.5 起已并入主仓 `internal/notify`。**想扩通道**（钉钉 / 飞书 / 企微等）PR 到主仓 channel registry；（旧的 `on_notification_*` 抄送 hook 已删除。）
 
 ---
 

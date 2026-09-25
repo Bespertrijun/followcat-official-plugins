@@ -2,7 +2,8 @@
 // =====================================
 //
 // Loads <plugin>/index.js inside Node's `vm` module with goja-compatible globals
-// injected (plugin / log / config / http / anime / task), then talks JSON-RPC to
+// injected (plugin / log / config / crypto / http / anime / task / ruleflow /
+// ptsite / douban), then talks JSON-RPC to
 // the Python parent over stdin/stdout.
 //
 // Protocol (newline-delimited JSON):
@@ -27,6 +28,19 @@
 // 60 req/min token bucket, failures reject with a GoError-shaped Error whose
 // message is "http <METHOD> <url>: <cause>" like the host).
 //
+// Batch-1 facades (mirror internal/plugin/host_api_{crypto,ptsite,douban}.go):
+//   - crypto.*  always injected, synchronous, REAL (node:crypto) so CookieCloud
+//     decryption can be exercised locally; returns plugin-realm Uint8Array.
+//   - ptsite.*  api.ptsite.read  → list/get/registry/getCookieMeta (sync)
+//               api.ptsite.write → setCookie/setAPIKey (Promise<{ok}>)
+//   - douban.*  api.douban.cookie.read  → getCookie() (sync)
+//               api.douban.cookie.write → setCookie(v, {validate}) (Promise<{ok, validation}>)
+//   Objects are injected per domain and methods mounted per permission (read-only
+//   ⇒ no write methods). Mock data lives in memory; writes emit an "[audit]" log line
+//   (action + target only, never the value) like the host's audit/plugin/<id> rows.
+//   DEVRT_DOUBAN_VALIDATION=<ok|cookie_invalid|rate_limited|unreachable> picks the
+//   mocked validation result (default "ok").
+//
 // Callbacks (hook / registerAPI / should_download) may return a Promise; the
 // dispatcher awaits it with the host's wall-clock timeouts (including await
 // time): hook 10s, API 10s, should_download 3s (fail-open). A rejection is
@@ -38,7 +52,9 @@ const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
 const readline = require('readline');
+const nodeCrypto = require('crypto');
 const { types: utilTypes } = require('util');
+const { normalizeCookie } = require('./cookie-normalize');
 
 const pluginDir = process.argv[2];
 if (!pluginDir) {
@@ -99,6 +115,8 @@ const ERR_RUNTIME_TIMEOUT = 'plugin runtime: execution timeout';
 // `http.get(...) instanceof Promise` and `e instanceof Error` hold inside the plugin.
 let CtxPromise = Promise;
 let CtxError = Error;
+let CtxTypeError = TypeError;
+let CtxUint8Array = Uint8Array;
 
 // Host rejects with rt.NewGoError(err): an Error whose name is "GoError".
 function goError(message) {
@@ -190,6 +208,195 @@ const http = {
   delete: function (url, headers)        { return httpCall('DELETE', url, null, headers); },
 };
 
+// ─── batch-1 facades: crypto / ptsite / douban ──────────────────────────────
+
+function typeError(message) { return new CtxTypeError(message); }
+
+// Plugin-realm Uint8Array (so `x instanceof Uint8Array` holds inside the plugin)
+function u8(buf) {
+  const out = new CtxUint8Array(buf.length);
+  for (let i = 0; i < buf.length; i++) out[i] = buf[i];
+  return out;
+}
+
+// Host accepts Uint8Array (incl. subarray views) / ArrayBuffer; string only where allowed (UTF-8)
+function argBytes(v, what, allowString) {
+  if (v === undefined || v === null) throw typeError(what + ' is required');
+  if (typeof v === 'string') {
+    if (allowString) return Buffer.from(v, 'utf-8');
+  } else if (utilTypes.isUint8Array(v)) {
+    return Buffer.from(v.buffer, v.byteOffset, v.byteLength);
+  } else if (utilTypes.isArrayBuffer(v)) {
+    return Buffer.from(v);
+  }
+  throw typeError(what + (allowString ? ' must be a string, Uint8Array or ArrayBuffer' : ' must be a Uint8Array or ArrayBuffer'));
+}
+
+const EVP_MAX_LEN = 256;
+function argLen(v, what) {
+  if (typeof v !== 'number') throw typeError(what + ' must be a number');
+  if (!Number.isInteger(v)) throw typeError(what + ' must be an integer');
+  if (v < 0 || v > EVP_MAX_LEN) throw typeError(what + ' must be within [0, ' + EVP_MAX_LEN + ']');
+  return v;
+}
+
+function hashHex(alg, v, name) {
+  return nodeCrypto.createHash(alg).update(argBytes(v, 'crypto.' + name + ' input', true)).digest('hex');
+}
+
+const cryptoFacade = {
+  sha256: function (v) { return hashHex('sha256', v, 'sha256'); },
+  md5: function (v) { return hashHex('md5', v, 'md5'); },
+  base64Decode: function (s) {
+    if (typeof s !== 'string') throw typeError('crypto.base64Decode requires a string');
+    // Host: standard alphabet (+/), trailing '=' optional, anything else is an error
+    if (!/^[A-Za-z0-9+/]*={0,2}$/.test(s) || (s.length % 4 === 1) || (s.includes('=') && s.length % 4 !== 0)) {
+      throw goError('crypto.base64Decode: illegal base64 data');
+    }
+    return u8(Buffer.from(s, 'base64'));
+  },
+  // OpenSSL EVP_BytesToKey (digest=MD5, count=1)
+  evpBytesToKey: function (password, salt, keyLen, ivLen) {
+    const pwd = argBytes(password, 'crypto.evpBytesToKey password', true);
+    const saltBuf = (salt === undefined || salt === null) ? Buffer.alloc(0) : argBytes(salt, 'crypto.evpBytesToKey salt', false);
+    const kl = argLen(keyLen, 'crypto.evpBytesToKey keyLen');
+    const il = argLen(ivLen, 'crypto.evpBytesToKey ivLen');
+    let out = Buffer.alloc(0);
+    let prev = Buffer.alloc(0);
+    while (out.length < kl + il) {
+      prev = nodeCrypto.createHash('md5').update(Buffer.concat([prev, pwd, saltBuf])).digest();
+      out = Buffer.concat([out, prev]);
+    }
+    return { key: u8(out.subarray(0, kl)), iv: u8(out.subarray(kl, kl + il)) };
+  },
+  // AES-CBC decrypt + PKCS7 unpad (key 16/24/32 bytes, iv 16 bytes)
+  aesDecryptCBC: function (key, iv, data) {
+    const k = argBytes(key, 'crypto.aesDecryptCBC key', false);
+    const i = argBytes(iv, 'crypto.aesDecryptCBC iv', false);
+    const d = argBytes(data, 'crypto.aesDecryptCBC data', false);
+    if (![16, 24, 32].includes(k.length)) throw goError('crypto.aesDecryptCBC: key must be 16, 24 or 32 bytes (got ' + k.length + ')');
+    if (i.length !== 16) throw goError('crypto.aesDecryptCBC: iv must be 16 bytes (got ' + i.length + ')');
+    if (d.length === 0 || d.length % 16 !== 0) throw goError('crypto.aesDecryptCBC: data length must be a positive multiple of 16 (got ' + d.length + ')');
+    try {
+      const decipher = nodeCrypto.createDecipheriv('aes-' + (k.length * 8) + '-cbc', k, i);
+      return u8(Buffer.concat([decipher.update(d), decipher.final()]));
+    } catch (e) {
+      throw goError('crypto.aesDecryptCBC: invalid PKCS7 padding (wrong key or corrupted data)');
+    }
+  },
+};
+
+// Host audit rows are written under source "audit/plugin/<id>"; devrt surfaces them as log lines
+function sanitizeAuditTarget(t) {
+  if (!t) return '-';
+  return String(t).slice(0, 64).replace(/[^A-Za-z0-9_.-]/g, '_');
+}
+function audit(action, target) {
+  emitEvent('log', { level: 'info', args: ['[audit] AUDIT action=' + action + ' target=' + sanitizeAuditTarget(target)] });
+}
+
+function fingerprint(plain) {
+  return plain ? nodeCrypto.createHash('sha256').update(normalizeCookie(plain), 'utf8').digest('hex') : '';
+}
+
+// Mock PT registry + site rows (auth_kind: cookie / apikey / none)
+const PT_REGISTRY = [
+  { site_id: 'hhan', name: '憨憨', auth_kind: 'cookie' },
+  { site_id: 'ourbits', name: '我堡', auth_kind: 'cookie' },
+  { site_id: 'mteam', name: '馒头', auth_kind: 'apikey' },
+  { site_id: 'pter', name: '猫站', auth_kind: 'none' },
+];
+const ptRows = [
+  { id: 'mock-hhan', name: 'Mock 憨憨', adapter: 'hhan', enabled: true, cookie: 'uid=1; pass=mockcookie0001', apikey: '' },
+  { id: 'mock-ourbits', name: 'Mock 我堡', adapter: 'ourbits', enabled: true, cookie: '', apikey: '' },
+  { id: 'mock-mteam', name: 'Mock 馒头', adapter: 'mteam', enabled: false, cookie: '', apikey: '' },
+  { id: 'mock-pter', name: 'Mock 猫站', adapter: 'pter', enabled: true, cookie: '', apikey: '' },
+];
+function ptAuthKind(row) {
+  const m = PT_REGISTRY.find((r) => r.site_id === row.adapter);
+  return m ? m.auth_kind : null;
+}
+function ptView(row) {
+  return { id: row.id, name: row.name, adapter: row.adapter, enabled: row.enabled,
+    auth_kind: ptAuthKind(row), has_cookie: row.cookie !== '', has_apikey: row.apikey !== '' };
+}
+function ptFind(id) {
+  const row = ptRows.find((r) => r.id === id);
+  return row && ptAuthKind(row) ? row : null;
+}
+
+function buildPTSite(perms) {
+  const api = {};
+  if (perms.has('api.ptsite.read')) {
+    api.list = function () { return ptRows.filter((r) => ptAuthKind(r)).map(ptView); };
+    api.get = function (id) { const r = ptFind(String(id)); return r ? ptView(r) : null; };
+    api.registry = function () { return PT_REGISTRY.map((r) => Object.assign({}, r)); };
+    api.getCookieMeta = function (id) {
+      const r = ptFind(String(id));
+      if (!r) return null;
+      return { configured: r.cookie !== '', sha256: fingerprint(r.cookie) };
+    };
+  }
+  if (perms.has('api.ptsite.write')) {
+    const set = function (method, kind) {
+      return function (id, value) {
+        if (typeof id !== 'string' || typeof value !== 'string') {
+          throw typeError('ptsite.' + method + ' requires (id: string, value: string)');
+        }
+        audit('ptsite.' + method, id);
+        return new CtxPromise(function (resolve, reject) {
+          const row = ptRows.find((r) => r.id === id);
+          if (!row) return reject(goError('pt credential: site not found: "' + id + '"'));
+          const authKind = ptAuthKind(row);
+          if (!authKind) return reject(goError('pt credential: pt adapter not registered: "' + row.adapter + '"'));
+          if (value !== '' && authKind !== kind) {
+            return reject(goError('pt credential: credential kind does not match the site\'s auth kind: site auth kind is "' + authKind + '", got a ' + kind + ' write'));
+          }
+          if (kind === 'cookie') row.cookie = value; else row.apikey = value;
+          resolve({ ok: true });
+        });
+      };
+    };
+    api.setCookie = set('setCookie', 'cookie');
+    api.setAPIKey = set('setAPIKey', 'apikey');
+  }
+  return api;
+}
+
+let doubanCookie = '';
+const DOUBAN_VALIDATION = process.env.DEVRT_DOUBAN_VALIDATION || 'ok';
+
+function buildDouban(perms) {
+  const api = {};
+  if (perms.has('api.douban.cookie.read')) {
+    api.getCookie = function () {
+      return doubanCookie
+        ? { configured: true, sha256: fingerprint(doubanCookie) }
+        : { configured: false, sha256: '' };
+    };
+  }
+  if (perms.has('api.douban.cookie.write')) {
+    api.setCookie = function (value, opts) {
+      if (typeof value !== 'string') {
+        throw typeError('douban.setCookie requires (value: string, options?: {validate?: boolean})');
+      }
+      if (opts !== undefined && opts !== null && (typeof opts !== 'object')) {
+        throw typeError('douban.setCookie options must be an object');
+      }
+      const validate = !!(opts && opts.validate);
+      audit('douban.setCookie', 'douban_cookie');
+      return new CtxPromise(function (resolve) {
+        doubanCookie = value;
+        // Host: "" clears → no_cookie; validate=false → ""; otherwise the 5-state result
+        // (plugin path caps validation at 8s; hitting the cap resolves "rate_limited")
+        const validation = value === '' ? 'no_cookie' : (validate ? DOUBAN_VALIDATION : '');
+        resolve({ ok: true, validation: validation });
+      });
+    };
+  }
+  return api;
+}
+
 const anime = {
   get: function (id) {
     return { id, title: 'Mock Anime ' + id, mikan_id: '', douban_id: '', total_ep: 12, ep_num: 1, status: 'tracking' };
@@ -211,17 +418,17 @@ const task = {
 const declaredHooks = new Set(manifest.hooks || []);
 const declaredPerms = new Set(manifest.permissions || []);
 
+// Mirror of host internal/plugin/permission.go hookToPerm (2026-09-24 hard rename, no aliases)
 const HOOK_PERM_REQ = {
-  on_episode_found: 'hook.download',
-  on_download_done: 'hook.download',
-  on_download_failed: 'hook.download',
-  on_link_done: 'hook.link',
-  on_link_failed: 'hook.link',
-  on_task_completed: 'hook.task',
-  on_task_reopened: 'hook.task',
-  on_notification_before_send: 'hook.notify',
-  on_notification_after_send: 'hook.notify',
-  should_download: 'hook.download',
+  on_episode_found: 'hook.download.read',
+  on_download_done: 'hook.download.read',
+  on_download_failed: 'hook.download.read',
+  on_link_done: 'hook.link.read',
+  on_link_failed: 'hook.link.read',
+  on_episode_acquired: 'hook.task.read',
+  on_task_completed: 'hook.task.read',
+  on_task_reopened: 'hook.task.read',
+  should_download: 'hook.download.write',
 };
 
 const plugin = {
@@ -251,12 +458,18 @@ const ruleflow = {
 
 const sandbox = {
   plugin, log, config,
+  // crypto: pure functions, always injected (no permission semantics)
+  crypto: cryptoFacade,
   // Conditionally inject anime/task/http/ruleflow only when the matching
   // permission is declared, mirror host (internal/plugin/runtime.go)
   anime: declaredPerms.has('api.anime.read') ? anime : undefined,
   task: declaredPerms.has('api.task.read') ? task : undefined,
   http: declaredPerms.has('api.http') ? http : undefined,
-  ruleflow: declaredPerms.has('api.ruleflow') ? ruleflow : undefined,
+  // api.ruleflow is the deprecated alias of api.ruleflow.read — either one injects ruleflow.list
+  ruleflow: (declaredPerms.has('api.ruleflow.read') || declaredPerms.has('api.ruleflow')) ? ruleflow : undefined,
+  // Object per domain, methods per permission (read-only ⇒ no write methods)
+  ptsite: (declaredPerms.has('api.ptsite.read') || declaredPerms.has('api.ptsite.write')) ? buildPTSite(declaredPerms) : undefined,
+  douban: (declaredPerms.has('api.douban.cookie.read') || declaredPerms.has('api.douban.cookie.write')) ? buildDouban(declaredPerms) : undefined,
   // utility: runtime needs Date / JSON / Math / etc — vm provides them by default
   setTimeout: undefined,        // goja: no timers
   setInterval: undefined,
@@ -266,6 +479,8 @@ const sandbox = {
 vm.createContext(sandbox);
 CtxPromise = vm.runInContext('Promise', sandbox);
 CtxError = vm.runInContext('Error', sandbox);
+CtxTypeError = vm.runInContext('TypeError', sandbox);
+CtxUint8Array = vm.runInContext('Uint8Array', sandbox);
 
 let loadError = null;
 try {

@@ -6,7 +6,7 @@
   "source_url": "https://plugins.followcat.io/media-library-filter",
   "homepage_url": "https://github.com/followcat/plugin-registry/tree/main/plugins/media-library-filter",
   "icon": "🎬",
-  "permissions": ["hook.download", "api.http", "api.ruleflow", "ui.embed"],
+  "permissions": ["hook.download.write", "api.http", "api.ruleflow.read", "ui.embed"],
   "hooks": ["should_download"],
   "ui": {
     "entry": "ui/index.html",

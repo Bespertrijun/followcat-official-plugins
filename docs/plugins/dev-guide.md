@@ -26,7 +26,7 @@ hello-world.zip
   "name": "hello-world",
   "version": "0.1.0",
   "source_url": "https://example.com/hello",
-  "permissions": ["hook.task"],
+  "permissions": ["hook.task.read"],
   "hooks": ["on_task_completed"]
 }
 ```
@@ -56,9 +56,9 @@ qBit / linker --->|  EventBus 同步分 |       |
 
 - **Hook 是只读通知**：你看到的 `data` 是宿主推过来的副本，改它不会影响主流程。
 - **每个插件一个事件循环**：你的代码仍是单线程执行（不用加锁），同步代码段之间不会并发；但 `async` 回调在 `await`（比如 `await http.get(...)`）期间，同一插件的其它 hook / API 可以先跑。每次调用有墙钟上限（hook 10s / API 10s / `should_download` 3s，**含 `await`**），超时结果被丢弃。
-- **出网是异步的**：`http.*` 返回 Promise，所在函数写成 `async function` 并 `await`（见 §5）；其余 facade（`config` / `data` / `anime` / `task` / `ruleflow` / `log`）是同步的。
-- **凭证不会泄漏**：`anime.get` 返回的是脱敏 view，拿不到 `Server.Password` 之类。
-- **没有文件系统、没有 require**：能用的就是 `log` / `config` / `http` / `anime` / `task` / `plugin` 这 6 个全局对象。
+- **出网是异步的**：`http.*`、`ptsite.setCookie/setAPIKey`、`douban.setCookie` 返回 Promise，所在函数写成 `async function` 并 `await`（见 §5）；其余 facade（`config` / `data` / `crypto` / `anime` / `task` / `ruleflow` / `ptsite` 读方法 / `douban.getCookie` / `log`）是同步的。
+- **凭证不会泄漏**：`anime.get` 返回的是脱敏 view，拿不到 `Server.Password` 之类；PT 站 / 豆瓣凭据只写不读，读侧只有「已配置」+ 指纹。
+- **没有文件系统、没有 require**：始终可用的是 `plugin` / `log` / `config` / `data` / `crypto`；`http` / `anime` / `task` / `ruleflow` / `ptsite` / `douban` 按 manifest 权限注入（见 §2 权限表）。
 
 ---
 
@@ -72,7 +72,7 @@ qBit / linker --->|  EventBus 同步分 |       |
   "author": "you@example.com",                     // 可选，仅显示
   "description": "Slack/Telegram 多渠道通知",        // 可选，仅显示
   "permissions": [                                 // 必填，每条都要在白名单
-    "hook.download", "hook.link", "hook.task", "api.http"
+    "hook.download.read", "hook.link.read", "hook.task.read", "api.http"
   ],
   "hooks": [                                       // 必填，每条都要在白名单
     "on_download_done", "on_link_done", "on_task_completed"
@@ -89,19 +89,46 @@ qBit / linker --->|  EventBus 同步分 |       |
 
 ### `permissions` 与 `hooks` 必须**双校验**
 
-权限白名单见 sdk.md，完整 hook 白名单见 sdk.md「Hook 列表」。其中 `should_download` 是**同步否决 hook**（读返回值可拦下载，需 `hook.download`，详见 sdk.md「同步否决 hook」），其余 `on_*` 都是只读通知 hook：
-`on_episode_found`, `on_download_done`, `on_download_failed`, `on_link_done`, `on_link_failed`, `on_task_completed`, `on_task_reopened`, `on_notification_before_send`, `on_notification_after_send`。
+权限白名单见 sdk.md，完整 hook 白名单见 sdk.md「Hook 列表」。其中 `should_download` 是**同步否决 hook**（读返回值可拦下载，需 `hook.download.write`——敏感权限，详见 sdk.md「同步否决 hook」），其余 `on_*` 都是只读通知 hook：
+`on_episode_found`, `on_download_done`, `on_download_failed`, `on_link_done`, `on_link_failed`, `on_episode_acquired`, `on_task_completed`, `on_task_reopened`。
 
 **关键点**：`plugin.on("on_link_done", fn)` 只有当 manifest 同时声明
-`"hooks": [..., "on_link_done", ...]` **且** `"permissions": [..., "hook.link", ...]`
+`"hooks": [..., "on_link_done", ...]` **且** `"permissions": [..., "hook.link.read", ...]`
 才能注册成功，否则运行期 throw。
 
 | Hook | 需要的 permission |
 |------|------------------|
-| `on_episode_found`, `on_download_done`, `on_download_failed`, `should_download` | `hook.download` |
-| `on_link_done`, `on_link_failed` | `hook.link` |
-| `on_task_completed`, `on_task_reopened` | `hook.task` |
-| `on_notification_before_send`, `on_notification_after_send` | `hook.notify` |
+| `on_episode_found`, `on_download_done`, `on_download_failed` | `hook.download.read` |
+| `should_download` | `hook.download.write` ⚠️ |
+| `on_link_done`, `on_link_failed` | `hook.link.read` |
+| `on_episode_acquired`, `on_task_completed`, `on_task_reopened` | `hook.task.read` |
+
+> 2026-09-24 起 hook 权限一次性硬改名，**不留别名**：旧的 `hook.download` / `hook.link` / `hook.task` 声明直接解析失败；`hook.notify` 与 `on_notification_before_send` / `on_notification_after_send` 已删除。
+>
+> `on_task_completed` / `on_episode_acquired` / `on_task_reopened` 同时覆盖 Mikan 与豆瓣任务，按 `p.source`（`"mikan"` / `"douban"`）区分；`task_id` 只在各自命名空间内有意义。
+>
+> `on_episode_acquired` 只在集数新入库（位图由灭变亮）时触发，覆盖自动整理 / 手动链接（含部分完成）/ 合集确认；重复整理已入库的集不触发。`p.episodes` 只含本次新亮的集（综艺按期为期号、电影为空数组且只在首次获取时发一次）。
+
+### facade 权限表
+
+没声明权限时对应全局对象是 `undefined`；对象存在但没授权的方法也是 `undefined`（方法级注入，`typeof ptsite.setCookie` 可探测）。权限之间**不蕴含**：要读又要写就两个都声明。⚠️ = 敏感权限（安装 / 升级时管理员需二次确认）。完整规则与「规划中」权限见 sdk.md「权限」章。
+
+| permission | 注入 / 解锁 | 同步 / 异步 |
+|------------|------------|------------|
+| （无需权限） | `plugin` / `log` / `config` / `data` / `crypto`（sha256 / md5 / base64Decode / evpBytesToKey / aesDecryptCBC） | 同步 |
+| `api.http` ⚠️ | `http.get/post/put/delete` | 异步 |
+| `api.anime.read` | `anime.get` | 同步 |
+| `api.task.read` | `task.get/list` | 同步 |
+| `api.ruleflow.read`（旧名 `api.ruleflow` 已弃用，仍可用） | `ruleflow.list` | 同步 |
+| `api.ptsite.read` | `ptsite.list/get/registry/getCookieMeta` | 同步 |
+| `api.ptsite.write` ⚠️ | `ptsite.setCookie/setAPIKey` | 异步 |
+| `api.douban.cookie.read` | `douban.getCookie` | 同步 |
+| `api.douban.cookie.write` ⚠️ | `douban.setCookie(v, {validate})`（验活上限 8s，到点回 `rate_limited`） | 异步 |
+| `ui.embed` | 允许声明 `manifest.ui.entry` | — |
+
+hook 类权限（`hook.download.read` / `hook.download.write` ⚠️ / `hook.link.read` / `hook.task.read`）不注入对象，只决定能 `plugin.on` 哪些 hook，见上表。
+
+**不要用 `http.*` 回跳 FollowCat 自己的 REST**（`localhost` / 内网 / 宿主域名的 `/api/...`）：宿主数据一律走上表的 facade，registry 审核会拦（见 sdk.md「内部访问走 facade」）。
 
 ---
 
@@ -263,9 +290,13 @@ function encodeUtf8(str) {
   var bytes = [];
   for (var i = 0; i < str.length; i++) {
     var c = str.charCodeAt(i);
-    if (c < 0x80)        { bytes.push(c); }
-    else if (c < 0x800)  { bytes.push(0xc0 | (c >> 6), 0x80 | (c & 0x3f)); }
-    else                 { bytes.push(0xe0 | (c >> 12), 0x80 | ((c >> 6) & 0x3f), 0x80 | (c & 0x3f)); }
+    if (c < 0x80) { bytes.push(c); }
+    else if (c < 0x800) { bytes.push(0xc0 | (c >> 6), 0x80 | (c & 0x3f)); }
+    else if (c < 0xd800 || c >= 0xe000) { bytes.push(0xe0 | (c >> 12), 0x80 | ((c >> 6) & 0x3f), 0x80 | (c & 0x3f)); }
+    else { // surrogate pair → 4 字节
+      var cp = 0x10000 + (((c & 0x3ff) << 10) | (str.charCodeAt(++i) & 0x3ff));
+      bytes.push(0xf0 | (cp >> 18), 0x80 | ((cp >> 12) & 0x3f), 0x80 | ((cp >> 6) & 0x3f), 0x80 | (cp & 0x3f));
+    }
   }
   return new Uint8Array(bytes);
 }
@@ -273,10 +304,13 @@ function encodeUtf8(str) {
 function decodeUtf8(u8) {
   var out = "", i = 0;
   while (i < u8.length) {
-    var b = u8[i++];
-    if (b < 0x80) out += String.fromCharCode(b);
-    else if (b < 0xe0) out += String.fromCharCode(((b & 0x1f) << 6) | (u8[i++] & 0x3f));
-    else out += String.fromCharCode(((b & 0x0f) << 12) | ((u8[i++] & 0x3f) << 6) | (u8[i++] & 0x3f));
+    var b = u8[i++], cp;
+    if (b < 0x80) cp = b;
+    else if (b < 0xe0) cp = ((b & 0x1f) << 6) | (u8[i++] & 0x3f);
+    else if (b < 0xf0) cp = ((b & 0x0f) << 12) | ((u8[i++] & 0x3f) << 6) | (u8[i++] & 0x3f);
+    else cp = ((b & 0x07) << 18) | ((u8[i++] & 0x3f) << 12) | ((u8[i++] & 0x3f) << 6) | (u8[i++] & 0x3f);
+    if (cp >= 0x10000) { cp -= 0x10000; out += String.fromCharCode(0xd800 + (cp >> 10), 0xdc00 + (cp & 0x3ff)); }
+    else out += String.fromCharCode(cp);
   }
   return out;
 }
@@ -287,7 +321,7 @@ var got = data.get("state.json");
 var parsed = JSON.parse(decodeUtf8(new Uint8Array(got)));
 ```
 
-完整可运行示例见 [`blob-cache-demo/index.js`](../../blob-cache-demo/index.js)（含 surrogate pair 处理）。
+上面两段即完整参考实现（含 surrogate pair / 4 字节 UTF-8 处理，已对 Node `Buffer` 的 UTF-8 结果逐字节对拍），直接抄进插件即可。
 
 ### 何时用 config / 何时用 data？
 
@@ -498,26 +532,21 @@ plugin.registerAPI("/test-webhook", async function (req) {
 
 ---
 
-## 8. 完整示例：媒体库感知的通知过滤
+## 8. 完整示例：媒体库感知的下载去重（`should_download`）
 
-> 主仓 v3.5+ 已把 Slack / Telegram 通知业务收回 `internal/notify`，所以"在插件里实现通知通道"不再是推荐姿势。如果想加新通道（钉钉 / 飞书等长尾），PR 到主仓 channel registry 即可。
->
-> 留给插件的两个新接口是 `on_notification_before_send` / `on_notification_after_send`，最典型用法是**过滤**（决定要不要 fan-out）和**监控**（拿失败上报到 Sentry / Grafana），下面的示例插件展示前者。
+> 旧版本这里介绍的是「订阅 `on_notification_before_send` 做通知过滤」——那两个通知 hook 已于 2026-09-24 删除（`hook.notify` 一并移除）。`media-library-filter` 现在是 `should_download` 同步否决插件：推种前查 Emby / Plex，库里已有同规格副本就拦下。
 
 参考实现：[`plugins/media-library-filter` @ followcat/plugin-registry](https://github.com/followcat/plugin-registry/tree/main/media-library-filter)
 
 特性清单（用作你的设计参考）：
 
-- **`on_notification_before_send` 订阅**：拿到主仓即将发送的 `{event_type, channel, text, anime_id, anime_title, episode}`
-- **Emby + Plex 双后端**：`/emby/Items?SearchTerm=` 与 `/hubs/search?query=`，任一命中即视为「库里有」
-- **结果缓存**：把 `anime_id → hit?` 存到 `config.lib_cache_<id>` JSON，TTL 默认 1 小时，避免刷爆 Emby/Plex
-- **跨通道去重**：主仓启用多 channel 时同事件会触发 N 次 hook，用内存 map 在 5 s 窗口内只放行第一次
-- **自家 fan-out**：库里没有时 POST 一份到 Telegram bot 或通用 webhook（用户可选）
-- **fail-open**：Emby / Plex 不可达时按"库里没有"处理，宁可多推不漏推
-- **soft budget**：库查询 2.5 s 软超时，给 host `should_download` 3 s 硬超时（墙钟，含 `await`）留出余量
-- **dry-run + suppress_event_types**：调试 / 强制静默某些事件的开关
-- **统计 API**：`GET /api/plugins/<id>/api/stats` 返回过滤命中、fan-out 成功失败、各通道 last_error
-- **trace API**：`GET /api/plugins/<id>/api/check?anime_id=N` 单次库查询透传（不写缓存）
+- **`should_download` 注册**（需 `hook.download.write`，敏感权限）：返回 `false` 拦下载，其余一律放行（fail-open）
+- **per-flow 满足判断**：`ruleflow.list()`（`api.ruleflow.read`）在配置 UI 列出所有规则流，按 `p.flow_id` 取各自标准
+- **Emby + Plex 双后端**：任一命中即视为「库里有」；合集种子可回 `{ have_bitmap }` 逐集过滤
+- **结果缓存**：库查询结果按 TTL 缓存到 `config.*`，避免刷爆 Emby/Plex
+- **fail-open**：Emby / Plex 不可达时按「库里没有」处理，宁可多推不漏推
+- **soft budget**：库查询软超时，给 host `should_download` 3 s 硬超时（墙钟，含 `await`）留出余量
+- **统计 / trace API**：`GET /api/plugins/<id>/api/stats`、`/check` 透传单次库查询
 
 详见示例代码注释。
 
@@ -591,10 +620,9 @@ plugin.registerAPI("/notify-all", function (req) {
 
 - [`sdk.md`](./sdk.md) —— API 签名、字段表、限制清单速查
 - [`plugin_guide.md`](../../plugin_guide.md) —— 完整设计文档（含 Phase B/C 路线图）
-- [`media-library-filter` @ followcat/plugin-registry](https://github.com/followcat/plugin-registry/tree/main/media-library-filter) —— `on_notification_before_send` 过滤式用法的完整参考实现
+- [`media-library-filter` @ followcat/plugin-registry](https://github.com/followcat/plugin-registry/tree/main/media-library-filter) —— `should_download` 下载去重（否决式 hook）的完整参考实现
 - [`dashboard-stats` @ followcat/plugin-registry](https://github.com/followcat/plugin-registry/tree/main/dashboard-stats) —— headless API 插件示例
 - [`cookiecloud` @ followcat/plugin-registry](https://github.com/followcat/plugin-registry/tree/main/cookiecloud) —— 带 iframe UI、内嵌 CryptoJS 解密、自定义 API 端点的综合示例
-- [`blob-cache-demo` @ followcat/plugin-registry](https://github.com/followcat/plugin-registry/tree/main/blob-cache-demo) —— v3.4 `data.*` 加密 blob 存储 API 示例
 
 ---
 
