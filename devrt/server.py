@@ -16,7 +16,11 @@ followcat 插件 Dev Runtime（参考 drivecat-official-plugins/devrt/server.py 
   - 插件 index.js 在 Node 子进程（devrt/sandbox.js）里跑，使用 Node 的 vm 模块
     模拟 goja 沙箱，注入 plugin / log / config / http / anime / task 全局
   - http.* 默认 mock（仅打日志），加 --allow-http 后真实出网
-  - Python 端持有 mock config（默认仅内存；加 --persist 写到 devrt/data/<plugin>/config.json）
+  - Python 端持有 mock config（含 is_secret 标记；默认仅内存；加 --persist 写到
+    devrt/data/<plugin>/config.json）
+  - iframe 桥（host.html）讲生产协议，经 /api/sandbox/* 取数；这组端点按生产
+    internal/api/plugin_handler.go 的 Sandbox* 复刻（统一信封、secret 脱敏、键/值校验）；
+    /plugin-ui 带与生产 plugin_ui_handler.go 相同的 CSP / 安全头
 
 用法：
 
@@ -30,8 +34,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import datetime
 import json
 import os
+import posixpath
+import re
 import sys
 import threading
 import time
@@ -53,6 +60,79 @@ except ImportError:
 ROOT = Path(__file__).resolve().parent.parent
 DEVRT_DIR = ROOT / "devrt"
 DATA_DIR = DEVRT_DIR / "data"
+
+# ─── 与生产宿主逐字对齐的常量 ───
+# internal/api/plugin_ui_handler.go ServeUI：插件 UI 响应头（CSP 只在 UI 路由上设）
+PLUGIN_UI_HEADERS: Dict[str, str] = {
+    "Content-Security-Policy": (
+        "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data: https:; connect-src 'none'; font-src 'self' data:; frame-ancestors 'self'"
+    ),
+    "X-Content-Type-Options": "nosniff",
+    "Cache-Control": "no-store",
+}
+
+# internal/api/contract/response.go 错误码
+ERR_INVALID_PARAM = 40001
+ERR_NOT_FOUND = 40400
+ERR_INTERNAL = 50000
+
+# internal/plugin/config/validate.go
+CONFIG_KEY_PATTERN = re.compile(r"[a-zA-Z0-9_.\-]{1,128}")  # 用 fullmatch，等价 Go 的 ^...$
+CONFIG_DENIED_KEYS = {"__proto__", "constructor", "prototype"}
+CONFIG_MAX_VALUE_BYTES = 64 * 1024
+
+
+def _now_iso() -> str:
+    # Go time.Time 的 JSON（RFC3339Nano，带本地时区偏移）；精度到微秒
+    return datetime.datetime.now().astimezone().isoformat()
+
+
+def validate_config_key(key: str) -> Optional[str]:
+    """复刻 pluginconfig.ValidateConfigKey：返回错误文案，合法返回 None。"""
+    if not CONFIG_KEY_PATTERN.fullmatch(key):
+        return "invalid config key: must match ^[a-zA-Z0-9_.\\-]{1,128}$"
+    if key in CONFIG_DENIED_KEYS:
+        return f"invalid config key: {json.dumps(key)} is a reserved name"
+    return None
+
+
+def validate_config_value(value: str) -> Optional[str]:
+    """复刻 pluginconfig.ValidateConfigValue（按 UTF-8 字节计）。"""
+    n = len(value.encode("utf-8"))
+    if n > CONFIG_MAX_VALUE_BYTES:
+        return f"invalid config value: value {n} bytes exceeds max {CONFIG_MAX_VALUE_BYTES}"
+    return None
+
+
+def canonical_api_path(raw: str) -> str:
+    """复刻 internal/plugin/runtime.go canonicalAPIPath；非法时抛 ValueError(生产文案)。"""
+    s = raw.strip()
+    if s == "":
+        raise ValueError("plugin api path is empty")
+    if any(seg == ".." for seg in s.split("/")):
+        raise ValueError(f"plugin api path {json.dumps(raw)} contains traversal")
+    if not s.startswith("/"):
+        s = "/" + s
+    cleaned = posixpath.normpath(s)
+    # Go path.Clean 会把前导 "//" 收成 "/"，posixpath.normpath 保留（POSIX 特例）
+    cleaned = "/" + cleaned.lstrip("/")
+    if cleaned == "/":
+        raise ValueError(f"plugin api path {json.dumps(raw)} is empty after clean")
+    return cleaned
+
+
+_STACK_FRAME = re.compile(r"^\s+at\s")
+# vm 同步抛错时 Node 给 stack 加的源码定位装饰头："<file>:<line>\n<源码行>\n   ^\n\n"
+_STACK_DECORATION = re.compile(r"\A[^\n]*:\d+\n[^\n]*\n[ \t]*\^+[ \t]*\n\n")
+
+
+def plugin_error_message(raw: str) -> str:
+    """sandbox.js 回的是 Node 的 err.stack；去掉源码定位装饰头与 "    at ..." 栈帧行，
+    留下 String(err)（如 "Error: boom"）——与生产 rejectionError 的文案一致。多行 message 保留。"""
+    text = _STACK_DECORATION.sub("", str(raw), count=1)
+    lines = [ln for ln in text.split("\n") if not _STACK_FRAME.match(ln)]
+    return "\n".join(lines).rstrip()
 
 # ─── 默认 hook payload，便于点一键触发 ───
 HOOK_SAMPLES: Dict[str, Dict[str, Any]] = {
@@ -206,7 +286,14 @@ class NodeSandbox:
         self._lock = threading.Lock()
         self._pending: Dict[str, Queue] = {}
         self._log_subscribers: List[Queue] = []
-        self._config_cache: Dict[str, str] = {}
+        self._config_cache: Dict[str, str] = {}  # key → 明文 value（原样喂给 sandbox）
+        # key → {"is_secret": bool, "updated_at": str}；与 _config_cache 同步维护
+        self._config_meta: Dict[str, Dict[str, Any]] = {}
+        self._config_lock = threading.RLock()
+        # 串行化「改内存 → configReplace 进 sandbox → 落盘」。reader 线程不拿它；调 sandbox
+        # 时绝不能持有 _config_lock，否则插件同时 config.set 发来的事件会卡住 reader 线程，
+        # configReplace 的回复读不出来（死等到超时）。
+        self._sync_lock = threading.Lock()
         self.logs: List[Dict[str, Any]] = []
 
     # public
@@ -281,22 +368,116 @@ class NodeSandbox:
         return self.call("callApi", {"path": path, "req": req})
 
     def get_config(self) -> Dict[str, str]:
-        return dict(self._config_cache)
+        with self._config_lock:
+            return dict(self._config_cache)
 
-    def set_config_entries(self, entries: Dict[str, str], persist: Optional[Path] = None) -> None:
-        self._config_cache.update(entries)
+    def get_config_secrets(self) -> List[str]:
+        with self._config_lock:
+            return sorted(k for k, m in self._config_meta.items() if m.get("is_secret"))
+
+    def _meta_for(self, key: str) -> Dict[str, Any]:
+        m = self._config_meta.get(key)
+        if m is None:
+            m = {"is_secret": False, "updated_at": _now_iso()}
+            self._config_meta[key] = m
+        return m
+
+    def sandbox_config_list(self) -> List[Dict[str, Any]]:
+        """复刻 SandboxGetConfig：按 key 升序；secret 脱敏；value 按 Go omitempty（空串不出现）。"""
+        out: List[Dict[str, Any]] = []
+        with self._config_lock:
+            for key in sorted(self._config_cache.keys()):
+                meta = self._meta_for(key)
+                item: Dict[str, Any] = {"key": key}
+                value = self._config_cache[key]
+                if not meta["is_secret"] and value != "":
+                    item["value"] = value
+                item["is_secret"] = bool(meta["is_secret"])
+                item["updated_at"] = meta["updated_at"]
+                out.append(item)
+        return out
+
+    def put_config_entries(self, entries: List[Dict[str, Any]], persist: Optional[Path] = None) -> None:
+        """复刻 SandboxPutConfig / SetBatchWithSecret：每条显式写 is_secret（不保留旧标记）。"""
+        now = _now_iso()
+        with self._sync_lock:
+            with self._config_lock:
+                for e in entries:
+                    self._config_cache[e["key"]] = e["value"]
+                    self._config_meta[e["key"]] = {"is_secret": bool(e["is_secret"]), "updated_at": now}
+            self._sync_config(persist)
+
+    def set_config_entries(
+        self,
+        entries: Dict[str, str],
+        persist: Optional[Path] = None,
+        secrets: Optional[List[str]] = None,
+    ) -> None:
+        """侧栏（类比管理页）写入：已有 key 保留原 is_secret，除非 secrets 显式点名；值变了才刷 updated_at。"""
+        now = _now_iso()
+        with self._sync_lock:
+            with self._config_lock:
+                for k, v in entries.items():
+                    meta = self._config_meta.get(k)
+                    if meta is None or self._config_cache.get(k) != v:
+                        self._config_meta[k] = {
+                            "is_secret": bool(meta and meta.get("is_secret")),
+                            "updated_at": now,
+                        }
+                    self._config_cache[k] = v
+                for k in secrets or []:
+                    if k in self._config_meta:
+                        self._config_meta[k]["is_secret"] = True
+            self._sync_config(persist)
+
+    def _sync_config(self, persist: Optional[Path]) -> None:
+        # 调用方持有 _sync_lock、不持有 _config_lock（见 __init__ 注释）
+        with self._config_lock:
+            values = dict(self._config_cache)
+            doc = {
+                "version": 2,
+                "entries": {
+                    k: {
+                        "value": values[k],
+                        "is_secret": bool(self._meta_for(k)["is_secret"]),
+                        "updated_at": self._meta_for(k)["updated_at"],
+                    }
+                    for k in sorted(values.keys())
+                },
+            }
         if self._proc and self._proc.poll() is None:
-            self.call("configReplace", {"entries": self._config_cache})
+            self.call("configReplace", {"entries": values})
         if persist is not None:
             persist.parent.mkdir(parents=True, exist_ok=True)
-            persist.write_text(json.dumps(self._config_cache, ensure_ascii=False, indent=2), encoding="utf-8")
+            persist.write_text(json.dumps(doc, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def load_persisted_config(self, src: Path) -> None:
-        if src.exists():
-            try:
-                self._config_cache = json.loads(src.read_text(encoding="utf-8"))
-            except Exception:
-                self._config_cache = {}
+        """读 --persist 文件。新格式 {"version":2,"entries":{k:{value,is_secret,updated_at}}}；
+        兼容旧的扁平 {k: v}（全部当普通项）。"""
+        if not src.exists():
+            return
+        try:
+            raw = json.loads(src.read_text(encoding="utf-8"))
+        except Exception:
+            raw = {}
+        cache: Dict[str, str] = {}
+        meta: Dict[str, Dict[str, Any]] = {}
+        if isinstance(raw, dict) and raw.get("version") == 2 and isinstance(raw.get("entries"), dict):
+            for k, e in raw["entries"].items():
+                if not isinstance(e, dict):
+                    continue
+                cache[k] = "" if e.get("value") is None else str(e.get("value"))
+                meta[k] = {
+                    "is_secret": bool(e.get("is_secret")),
+                    "updated_at": e.get("updated_at") or _now_iso(),
+                }
+        elif isinstance(raw, dict):
+            for k, v in raw.items():
+                cache[k] = "" if v is None else str(v)
+                meta[k] = {"is_secret": False, "updated_at": _now_iso()}
+        with self._config_lock:
+            self._config_cache = cache
+            self._config_meta = meta
 
     def subscribe_logs(self) -> Queue:
         q: Queue = Queue()
@@ -342,9 +523,17 @@ class NodeSandbox:
                 except Exception:
                     pass
         elif ev == "config":
+            # 插件后端 config.set：同生产 PluginConfigStore.Set——新 key is_secret=false，
+            # 已有 key 保留原 is_secret
             key, value = msg.get("key"), msg.get("value")
             if key is not None:
-                self._config_cache[key] = value
+                with self._config_lock:
+                    self._config_cache[key] = value
+                    meta = self._config_meta.get(key)
+                    self._config_meta[key] = {
+                        "is_secret": bool(meta and meta.get("is_secret")),
+                        "updated_at": _now_iso(),
+                    }
 
     def _stderr_drain(self) -> None:
         if not self._proc or not self._proc.stderr:
@@ -363,6 +552,16 @@ def build_app(sandbox: NodeSandbox, persist_path: Optional[Path]) -> FastAPI:
     app = FastAPI(title="followcat-plugin-devrt")
 
     plugin_dir = sandbox.plugin_dir
+
+    # /plugin-ui 下的一切响应（含 404）带与生产 ServeUI 完全相同的 CSP / 安全头。
+    # 只挂在 UI 路由上：host.html 自己要 fetch /api/*，不能被 connect-src 'none' 波及。
+    @app.middleware("http")
+    async def plugin_ui_security_headers(request: Request, call_next):
+        response = await call_next(request)
+        if request.url.path == "/plugin-ui" or request.url.path.startswith("/plugin-ui/"):
+            for name, value in PLUGIN_UI_HEADERS.items():
+                response.headers[name] = value
+        return response
 
     @app.get("/", response_class=HTMLResponse)
     def index() -> HTMLResponse:
@@ -396,6 +595,7 @@ def build_app(sandbox: NodeSandbox, persist_path: Optional[Path]) -> FastAPI:
             "load_error": sandbox.state.load_error,
             "hook_samples": HOOK_SAMPLES,
             "config": sandbox.get_config(),
+            "config_secrets": sandbox.get_config_secrets(),
             "ui_available": ui_dir.exists(),
             "allow_http": sandbox.allow_http,
         }
@@ -418,7 +618,9 @@ def build_app(sandbox: NodeSandbox, persist_path: Optional[Path]) -> FastAPI:
                     if await request.is_disconnected():
                         break
                     try:
-                        entry = q.get(timeout=1.0)
+                        # 阻塞等待放线程里：直接 q.get(timeout=1.0) 会卡住事件循环，日志面板一开，
+                        # 其它请求（iframe 桥的 /api/sandbox/*）每个都要排队数秒
+                        entry = await asyncio.to_thread(q.get, True, 1.0)
                         yield f"data: {json.dumps(entry)}\n\n"
                     except Empty:
                         yield ": keepalive\n\n"
@@ -464,9 +666,147 @@ def build_app(sandbox: NodeSandbox, persist_path: Optional[Path]) -> FastAPI:
         entries = payload.get("entries") or {}
         if not isinstance(entries, dict):
             raise HTTPException(400, "entries must be an object")
+        secrets = payload.get("secrets") or []
+        if not isinstance(secrets, list):
+            raise HTTPException(400, "secrets must be an array of keys")
         clean: Dict[str, str] = {k: ("" if v is None else str(v)) for k, v in entries.items()}
-        sandbox.set_config_entries(clean, persist=persist_path)
+        await asyncio.to_thread(
+            sandbox.set_config_entries, clean, persist_path, [str(k) for k in secrets]
+        )
         return {"ok": True, "saved": list(clean.keys())}
+
+    # ─── iframe 桥专用：复刻生产 /api/plugins/:id/sandbox/* ───
+    # host.html 的 postMessage 桥照 PluginIframeHost.vue 调这组端点；响应是生产的统一信封
+    # {code, data, message}，错误码 / HTTP 状态 / 文案按 plugin_handler.go 对齐。
+
+    def envelope_ok(data: Any) -> JSONResponse:
+        return JSONResponse({"code": 0, "data": data, "message": "ok"})
+
+    def envelope_fail(status: int, code: int, message: str) -> JSONResponse:
+        return JSONResponse({"code": code, "data": None, "message": message}, status_code=status)
+
+    @app.api_route(
+        "/api/sandbox/api/{action:path}",
+        methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
+    )
+    async def sandbox_dispatch(action: str, request: Request) -> JSONResponse:
+        # SandboxDispatch：gin 的 *action 带前导 "/"，Starlette 的 path 参数不带
+        action = "/" + action
+        if action.strip() == "" or action == "/":
+            return envelope_fail(400, ERR_INVALID_PARAM, "plugin api action is required")
+        # buildPluginAPIRequest：{method, body: 原始请求体字符串, query: 每个 key 取第一个值}
+        raw_body = await request.body()
+        query: Dict[str, str] = {}
+        for k, v in request.query_params.multi_items():
+            query.setdefault(k, v)
+        req = {"method": request.method, "body": raw_body.decode("utf-8", errors="replace"), "query": query}
+        # Manager.CallAPI：canonicalAPIPath 归一化后查注册表
+        try:
+            clean = canonical_api_path(action)
+        except ValueError as e:
+            return envelope_fail(400, ERR_INVALID_PARAM, str(e))
+        registered = {}
+        for p in sandbox.state.apis_registered:
+            try:
+                registered.setdefault(canonical_api_path(p), p)
+            except ValueError:
+                continue
+        target = registered.get(clean)
+        if target is None:
+            return envelope_fail(
+                404, ERR_NOT_FOUND,
+                f"plugin {sandbox.state.plugin_id} api {json.dumps(clean)} not registered",
+            )
+        try:
+            result = await asyncio.to_thread(sandbox.call_api, target, req)
+        except Exception as e:
+            full = str(e)
+            if full and full != plugin_error_message(full):
+                # 完整 Node 栈只进日志面板，回给 UI 的文案对齐生产（去栈帧）
+                sandbox._dispatch_event({"event": "log", "level": "error", "args": [f"[api {target}] " + full]})
+            return envelope_fail(500, ERR_INTERNAL, plugin_error_message(full) or "plugin api call failed")
+        return envelope_ok(result.get("result"))
+
+    @app.get("/api/sandbox/config")
+    def sandbox_get_config() -> JSONResponse:
+        return envelope_ok(sandbox.sandbox_config_list())
+
+    @app.put("/api/sandbox/config")
+    async def sandbox_put_config(request: Request) -> JSONResponse:
+        # SandboxPutConfig：ShouldBindJSON(PluginConfigPutReq) → 逐条 ValidateConfigKey/Value → 批量写
+        try:
+            payload = json.loads(await request.body() or b"null")
+        except Exception as e:
+            return envelope_fail(400, ERR_INVALID_PARAM, f"invalid JSON body: {e}")
+        if not isinstance(payload, dict):
+            return envelope_fail(400, ERR_INVALID_PARAM, "request body must be a JSON object")
+
+        def json_kind(v: Any) -> str:
+            # Go encoding/json UnmarshalTypeError 的 Value 用词
+            if isinstance(v, bool):
+                return "bool"
+            if isinstance(v, (int, float)):
+                return "number"
+            if isinstance(v, dict):
+                return "object"
+            if isinstance(v, list):
+                return "array"
+            return "string"
+
+        def as_str(v: Any, field_name: str) -> str:
+            if v is None:
+                return ""  # Go：JSON null / 缺字段 → 零值
+            if not isinstance(v, str):
+                raise ValueError(
+                    f"json: cannot unmarshal {json_kind(v)} into Go struct field "
+                    f"PluginConfigEntry.{field_name} of type string"
+                )
+            return v
+
+        def as_bool(v: Any, field_name: str) -> bool:
+            if v is None:
+                return False
+            if not isinstance(v, bool):
+                raise ValueError(
+                    f"json: cannot unmarshal {json_kind(v)} into Go struct field "
+                    f"PluginConfigEntry.{field_name} of type bool"
+                )
+            return v
+
+        try:
+            raw_entries = payload.get("entries")
+            if raw_entries is not None and not isinstance(raw_entries, list):
+                raise ValueError("json: cannot unmarshal entries into Go struct field PluginConfigPutReq.entries")
+            entries: List[Dict[str, Any]] = []
+            for e in raw_entries or []:
+                if not isinstance(e, dict):
+                    raise ValueError("json: cannot unmarshal entry into Go struct field PluginConfigPutReq.entries")
+                entries.append({
+                    "key": as_str(e.get("key"), "entries.key"),
+                    "value": as_str(e.get("value"), "entries.value"),
+                    "is_secret": as_bool(e.get("is_secret"), "entries.is_secret"),
+                })
+            if not entries:
+                key = as_str(payload.get("key"), "key")
+                if key == "":
+                    return envelope_fail(400, ERR_INVALID_PARAM, "either 'key' or 'entries' is required")
+                entries = [{
+                    "key": key,
+                    "value": as_str(payload.get("value"), "value"),
+                    "is_secret": as_bool(payload.get("is_secret"), "is_secret"),
+                }]
+        except ValueError as e:
+            return envelope_fail(400, ERR_INVALID_PARAM, str(e))
+
+        for e in entries:
+            if e["key"] == "":
+                return envelope_fail(400, ERR_INVALID_PARAM, "entry key cannot be empty")
+            err = validate_config_key(e["key"]) or validate_config_value(e["value"])
+            if err:
+                return envelope_fail(400, ERR_INVALID_PARAM, err)
+
+        await asyncio.to_thread(sandbox.put_config_entries, entries, persist_path)
+        return envelope_ok({"updated": len(entries)})
 
     return app
 

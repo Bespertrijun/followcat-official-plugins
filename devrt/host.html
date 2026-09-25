@@ -30,11 +30,14 @@
   .sidebar .hookbtn{display:flex;align-items:center;gap:6px;font-family:ui-monospace,monospace;font-size:11px}
   .sidebar .small{color:#7c8497;font-size:11px;margin-bottom:6px}
   .sidebar .config-pair{display:grid;grid-template-columns:120px 1fr auto;gap:6px;margin-bottom:6px;align-items:center}
+  .sidebar .config-pair input{min-width:0;width:100%}
+  .sidebar .secret-flag{font-size:10px;color:#ffd070;white-space:nowrap}
 
-  .stage{position:relative;background:#0f1115;display:flex;align-items:center;justify-content:center;padding:18px;overflow:auto}
-  .frame-wrap{background:#1a1d27;border:1px solid #232733;border-radius:8px;width:min(720px,100%);height:100%;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 4px 20px rgba(0,0,0,.4)}
-  .frame-wrap .frame-bar{padding:6px 12px;font-size:11px;color:#8a93a6;border-bottom:1px solid #232733;display:flex;justify-content:space-between;align-items:center}
-  .frame-wrap iframe{flex:1;border:0;width:100%;background:#fff}
+  .stage{position:relative;background:#0f1115;display:flex;align-items:flex-start;justify-content:center;padding:18px;overflow:auto}
+  .frame-wrap{background:#1a1d27;border:1px solid #232733;border-radius:8px;width:min(720px,100%);display:flex;flex-direction:column;overflow:hidden;box-shadow:0 4px 20px rgba(0,0,0,.4);flex:none}
+  .frame-wrap .frame-bar{padding:6px 12px;font-size:11px;color:#8a93a6;border-bottom:1px solid #232733;display:flex;justify-content:space-between;align-items:center;gap:10px}
+  /* 高度由 host.resize 决定（同生产 PluginIframeHost：初始 400，clamp 200–1500） */
+  .frame-wrap iframe{flex:none;border:0;width:100%;height:400px;display:block;background:#fff}
   .no-ui{color:#8a93a6;text-align:center;padding:30px;font-size:13px}
 
   footer{background:#13161e;border-top:1px solid #232733;display:flex;flex-direction:column}
@@ -90,13 +93,14 @@
 
     <section>
       <h3>Config (mock)</h3>
-      <div class="small">在管理页对应的 config.get/set 数据</div>
+      <div class="small">对应管理页的插件配置（此处明文显示；标 secret 的项经 iframe 桥回读为 ""，插件后端 config.get 仍拿明文）</div>
       <div id="config-list"></div>
       <div class="config-pair">
         <input type="text" id="cfg-new-key" placeholder="key">
         <input type="text" id="cfg-new-value" placeholder="value">
         <button onclick="addConfig()">+</button>
       </div>
+      <label class="small" style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="cfg-new-secret"> 新增项标记为 secret</label>
       <button class="primary" style="margin-top:6px;width:100%" onclick="saveConfig()">保存配置</button>
     </section>
 
@@ -105,10 +109,11 @@
   <div class="stage">
     <div class="frame-wrap" id="frame-wrap">
       <div class="frame-bar">
-        <span>plugin UI / iframe sandbox</span>
+        <span>plugin UI / iframe sandbox="allow-scripts"</span>
+        <span id="frame-height">400px</span>
         <span id="frame-url">…</span>
       </div>
-      <iframe id="plugin-iframe" sandbox="allow-scripts allow-forms" src="about:blank"></iframe>
+      <iframe id="plugin-iframe" sandbox="allow-scripts" referrerpolicy="no-referrer" src="about:blank"></iframe>
     </div>
   </div>
 </main>
@@ -163,7 +168,7 @@ function renderHooks() {
   var listed = state.hooks_registered || [];
   $('hooks-summary').textContent = listed.length ? listed.length + ' registered' : '插件未注册任何 hook';
   var html = listed.map(function (h) {
-    return '<div class="row"><button class="hookbtn" onclick="triggerHook(' + JSON.stringify(h) + ')">▶ ' + esc(h) + '</button></div>';
+    return '<div class="row"><button class="hookbtn" onclick="triggerHook(' + esc(JSON.stringify(h)) + ')">▶ ' + esc(h) + '</button></div>';
   }).join('');
   $('hooks-list').innerHTML = html;
 
@@ -182,20 +187,34 @@ function renderApis() {
   var listed = state.apis_registered || [];
   $('apis-summary').textContent = listed.length ? listed.length + ' registered' : '插件未注册自定义 API';
   $('apis-list').innerHTML = listed.map(function (p) {
-    return '<div class="row"><button onclick="callApi(' + JSON.stringify(p) + ')">GET ' + esc(p) + '</button></div>';
+    return '<div class="row"><button onclick="callApi(' + esc(JSON.stringify(p)) + ')">GET ' + esc(p) + '</button></div>';
   }).join('');
 }
 
 function renderConfig() {
   var cfg = state.config || {};
+  var secrets = state.config_secrets || [];
   var keys = Object.keys(cfg).sort();
   $('config-list').innerHTML = keys.map(function (k) {
+    var flag = secrets.indexOf(k) >= 0 ? '<span class="secret-flag" title="is_secret：iframe 桥回读为 &quot;&quot;">secret</span>' : '';
     return '<div class="config-pair">' +
-      '<input type="text" value="' + esc(k) + '" data-cfg-key="' + esc(k) + '" disabled>' +
+      '<input type="text" value="' + esc(k) + '" data-cfg-key="' + esc(k) + '" disabled title="' + esc(k) + '">' +
       '<input type="text" value="' + esc(cfg[k]) + '" data-cfg-value="' + esc(k) + '">' +
-      '<button onclick="removeConfig(' + JSON.stringify(k) + ')">×</button>' +
+      '<span style="display:flex;gap:4px;align-items:center">' + flag +
+      '<button onclick="removeConfig(' + esc(JSON.stringify(k)) + ')">×</button></span>' +
       '</div>';
   }).join('');
+}
+
+// 从 server 重新拉 config（iframe 桥 config.put / 插件后端 config.set 之后刷新侧栏）
+async function refreshConfig() {
+  try {
+    var res = await fetch('/api/state');
+    var s = await res.json();
+    state.config = s.config;
+    state.config_secrets = s.config_secrets;
+    renderConfig();
+  } catch (e) { /* 侧栏刷新失败不影响桥 */ }
 }
 
 // ─── actions ───
@@ -253,12 +272,15 @@ async function saveConfig() {
   try {
     await fetch('/api/config', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({entries: entries})
+      body: JSON.stringify({entries: entries, secrets: pendingSecrets})
     });
     toast('success', '已保存 ' + Object.keys(entries).length + ' 项');
-    state.config = entries;
+    pendingSecrets = [];
+    await refreshConfig();
   } catch (e) { toast('error', String(e)); }
 }
+
+var pendingSecrets = [];
 
 function addConfig() {
   var k = $('cfg-new-key').value.trim();
@@ -266,7 +288,11 @@ function addConfig() {
   if (!k) return;
   state.config = state.config || {};
   state.config[k] = v;
-  $('cfg-new-key').value = ''; $('cfg-new-value').value = '';
+  if ($('cfg-new-secret').checked) {
+    pendingSecrets.push(k);
+    state.config_secrets = (state.config_secrets || []).concat([k]);
+  }
+  $('cfg-new-key').value = ''; $('cfg-new-value').value = ''; $('cfg-new-secret').checked = false;
   renderConfig();
 }
 
@@ -276,6 +302,23 @@ function removeConfig(k) {
 }
 
 // ─── plugin iframe + postMessage bridge ───
+//
+// 逐项复刻生产宿主 FollowCat frontend/src/components/PluginIframeHost.vue（及其调用的
+// api/plugins.ts sandboxApiCall / sandboxGetConfig / sandboxPutConfig、utils/pluginBridge.ts）。
+// 改生产宿主时同步这里；/plugin-sdk.js 是主仓 internal/api/sdk/plugin-sdk.js 的逐字节拷贝。
+// 差异只在传输层：生产走 /api/plugins/<id>/sandbox/*（pluginToken 鉴权），这里走本地
+// server.py 的 /api/sandbox/*（同形统一信封，无鉴权）。
+
+var PLUGIN_SLOT = 'plugin.settings';   // manifest ui.slots 目前只支持这一个
+var SANDBOX_TIMEOUT_MS = 15000;        // 生产 sandboxRequest = axios.create({ timeout: 15000 })
+var iframeHeight = 400;                // 生产 iframeHeight 初值
+
+function setIframeHeight(h) {
+  iframeHeight = h;
+  var iframe = $('plugin-iframe');
+  if (iframe) iframe.style.height = h + 'px';
+  $('frame-height').textContent = h + 'px';
+}
 
 function initFrame() {
   if (!state.ui_available) {
@@ -283,81 +326,155 @@ function initFrame() {
     return;
   }
   var iframe = $('plugin-iframe');
-  iframe.src = '/plugin-ui/index.html';
-  $('frame-url').textContent = '/plugin-ui/index.html';
-  iframe.onload = function () {
-    iframe.contentWindow.postMessage({
-      protocol: 'followcat.plugin.v1',
-      type: 'host.init',
-      payload: {
-        plugin_id: state.plugin_id,
-        permissions: state.manifest && state.manifest.permissions || [],
-        theme: 'light',
-      }
-    }, '*');
-  };
+  setIframeHeight(400);
+  // 同生产：manifest.entry 形如 "ui/index.html"，剥掉前导 "/" 与 "ui/"；src 带 ?fcSlot=<slot>
+  var entry = (state.manifest && state.manifest.ui && state.manifest.ui.entry) || 'ui/index.html';
+  var file = entry.replace(/^\/+/, '').replace(/^ui\//i, '');
+  var src = '/plugin-ui/' + file + '?fcSlot=' + encodeURIComponent(PLUGIN_SLOT);
+  iframe.src = src;
+  $('frame-url').textContent = src;
 }
 
 function reloadFrame() { initFrame(); }
 
-window.addEventListener('message', async function (ev) {
-  var msg = ev.data;
-  if (!msg || msg.protocol !== 'followcat.plugin.v1') return;
-  var iframe = $('plugin-iframe');
-  function reply(result, error) {
-    iframe.contentWindow.postMessage({
-      protocol: 'followcat.plugin.v1', id: msg.id,
-      result: result, error: error
-    }, '*');
+// 复刻 sandboxRequest（axios 实例）+ 其响应拦截器：
+//   - 非 2xx → 形如 AxiosError：message "Request failed with status code N"，带 response.{status,data}
+//   - 2xx 但信封 code != 0 → Error(message || 'Error')
+//   - 否则解封返回 data
+async function sandboxRequest(method, url, body, jsonBody) {
+  var ctrl = new AbortController();
+  var timer = setTimeout(function () { ctrl.abort(); }, SANDBOX_TIMEOUT_MS);
+  var init = { method: method, signal: ctrl.signal, headers: {} };
+  if (body !== null && body !== undefined) {
+    init.body = body;
+    if (jsonBody) init.headers['Content-Type'] = 'application/json';
   }
+  var res;
+  try {
+    res = await fetch(url, init);
+  } catch (e) {
+    if (ctrl.signal.aborted) throw new Error('timeout of ' + SANDBOX_TIMEOUT_MS + 'ms exceeded');
+    throw new Error('Network Error');
+  } finally {
+    clearTimeout(timer);
+  }
+  var text = await res.text();
+  var data;
+  try { data = JSON.parse(text); } catch (e) { data = text; }
+  if (res.status < 200 || res.status >= 300) {
+    var err = new Error('Request failed with status code ' + res.status);
+    err.response = { status: res.status, data: data };
+    throw err;
+  }
+  if (data && typeof data.code !== 'undefined' && data.code !== 0) {
+    throw new Error(data.message || 'Error');
+  }
+  return data && data.data !== undefined ? data.data : data;
+}
+
+// 复刻 axios 默认 transformRequest + XHR send(requestData || null) 对 body 的处理：
+// 普通对象/数组 → JSON.stringify（Content-Type: application/json）；Blob/ArrayBuffer 原样、
+// TypedArray 取 .buffer；其余原值，且假值（null / '' / 0 / false / NaN）不发请求体（req.body 为 ""）。
+function axiosRequestBody(data) {
+  if (data instanceof Blob || data instanceof ArrayBuffer) return { body: data, json: false };
+  if (ArrayBuffer.isView(data)) return { body: data.buffer, json: false };
+  if (data !== null && typeof data === 'object') return { body: JSON.stringify(data), json: true };
+  if (!data) return { body: null, json: false };
+  return { body: typeof data === 'string' ? data : String(data), json: false };
+}
+
+// 复刻 sandboxApiCall：body 为 undefined → GET 且不带请求体；否则 POST。
+// path 原样拼进 URL（含 ?query），由服务端按 buildPluginAPIRequest 拆 req.query。
+function sandboxApiCall(action, body) {
+  var url = '/api/sandbox/api' + (action.startsWith('/') ? action : '/' + action);
+  if (body === undefined) return sandboxRequest('GET', url, null, false);
+  var b = axiosRequestBody(body);
+  return sandboxRequest('POST', url, b.body, b.json);
+}
+
+function sandboxGetConfig() {
+  return sandboxRequest('GET', '/api/sandbox/config', null, false);
+}
+
+function sandboxPutConfig(entries) {
+  return sandboxRequest('PUT', '/api/sandbox/config', JSON.stringify({ entries: entries }), true);
+}
+
+// 复刻 utils/pluginBridge.ts pluginBridgeErrorMessage：信封 message 优先，没有才退回 err.message
+function pluginBridgeErrorMessage(err) {
+  var envelopeMsg = err && err.response && err.response.data && err.response.data.message;
+  if (typeof envelopeMsg === 'string' && envelopeMsg !== '') return envelopeMsg;
+  return (err && err.message !== undefined && err.message !== null) ? err.message : String(err);
+}
+
+// 复刻 utils/pluginBridge.ts pluginConfigValue：设过 → 字符串（secret 脱敏为 ""），没设过 → null
+function pluginConfigValue(entries, key) {
+  var entry = entries.find(function (e) { return e.key === key; });
+  return entry ? (entry.value !== undefined && entry.value !== null ? entry.value : '') : null;
+}
+
+window.addEventListener('message', async function (e) {
+  var iframeEl = $('plugin-iframe');
+  // 同生产：按 source window 引用做身份校验（sandbox iframe 的 origin 是 'null'，不能靠 origin）
+  if (!iframeEl || e.source !== iframeEl.contentWindow) return;
+  var msg = e.data;
+  if (!msg || typeof msg !== 'object' || !msg.id || !msg.type) return;
+
+  function reply(data, errMsg) {
+    if (iframeEl.contentWindow) {
+      iframeEl.contentWindow.postMessage(
+        errMsg
+          ? { id: msg.id, error: { message: errMsg } }
+          : { id: msg.id, result: data },
+        '*'
+      );
+    }
+  }
+
   try {
     switch (msg.type) {
-      case 'plugin.api': {
-        var path = (msg.payload && msg.payload.path) || '';
-        var body = (msg.payload && msg.payload.body) || null;
-        // 真实宿主把 FC.api 的 body 原样作为请求体字符串交给 req.body（string 直通，
-        // 不自动 JSON.stringify）。这里对 string 直通，与生产保持一致，避免二次编码。
-        var reqBody = (typeof body === 'string') ? body : JSON.stringify(body == null ? {} : body);
-        var res = await fetch('/api/call-api', {
-          method: 'POST', headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({ path: path, req: { method: 'POST', body: reqBody, query: {} } })
-        });
-        var data = await res.json();
-        if (!res.ok) reply(null, data.detail || ('HTTP ' + res.status));
-        else reply(data.result);
+      case 'fc.init':
+        reply({ pluginId: state.plugin_id, slot: PLUGIN_SLOT });
         break;
-      }
-      case 'plugin.config.get': {
+      case 'api.call':
+        reply(await sandboxApiCall(msg.payload.path, msg.payload.body));
+        break;
+      case 'config.get': {
+        var all = await sandboxGetConfig();
         var key = msg.payload && msg.payload.key;
-        var cfg = state.config || {};
-        reply(cfg[key] === undefined ? null : cfg[key]);
+        if (key) {
+          reply(pluginConfigValue(all, key));
+        } else {
+          reply(all);
+        }
         break;
       }
-      case 'plugin.config.put': {
-        var p = msg.payload || {};
-        state.config = state.config || {};
-        state.config[p.key] = p.value;
-        await fetch('/api/config', {
-          method: 'POST', headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({ entries: state.config })
-        });
-        renderConfig();
-        reply(null);
+      case 'config.put':
+        reply(await sandboxPutConfig([{
+          key: msg.payload.key,
+          value: msg.payload.value,
+          is_secret: msg.payload.is_secret,
+        }]));
+        refreshConfig();
+        break;
+      case 'host.notify': {
+        var level = (msg.payload && msg.payload.level) === 'error' ? 'error' : 'success';
+        var text = msg.payload && msg.payload.message;
+        toast(level, text !== undefined && text !== null ? text : '');
+        reply({ ok: true });
         break;
       }
-      case 'plugin.notify':
-        toast(msg.payload && msg.payload.level, msg.payload && msg.payload.message);
-        reply(null);
+      case 'host.resize': {
+        var h = Math.max(200, Math.min(1500, Number(msg.payload && msg.payload.height) || 400));
+        setIframeHeight(h);
+        reply({ ok: true, applied: h });
         break;
-      case 'plugin.resize':
-        // dev shell: keep iframe size flexible; ignore actual height for simplicity
-        reply(null);
-        break;
+      }
       default:
-        reply(null, 'unknown type: ' + msg.type);
+        reply(undefined, 'unknown message type: ' + msg.type);
     }
-  } catch (e) {
-    reply(null, String(e));
+  } catch (err) {
+    reply(undefined, pluginBridgeErrorMessage(err));
   }
 });
 

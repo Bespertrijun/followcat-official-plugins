@@ -264,7 +264,7 @@ log.error(...args)
 | `config.set(key, value)` | 写；`value` 必须是 string |
 | `config.list() → string[]` | **v3.4+** 列出当前插件全部 keys，按字典序排序，仅 keys 不含 values |
 
-**所有 Value 在 store 层无条件 AES-256-GCM 加密落库。** `is_secret` 标记不是加密开关，仅控制 API 回读时是否返回明文（前端 `is_secret=true` 时回传空字符串，UI 显示「已设置」占位）。`config.set` 默认写入的项 `is_secret=false`；要标记 secret 需走管理页 UI 或 admin REST `PUT /api/plugins/:id/config` 显式传 `is_secret:true`。
+**所有 Value 在 store 层无条件 AES-256-GCM 加密落库。** `is_secret` 标记不是加密开关，仅控制 API 回读时是否返回明文（前端 `is_secret=true` 时回传空字符串，UI 显示「已设置」占位）。`config.set` 默认写入的项 `is_secret=false`（更新已有 key 时保留原标记）；要标记 secret 需走管理页 UI、admin REST `PUT /api/plugins/:id/config` 显式传 `is_secret:true`，或插件 UI 里 `FC.config.put(key, value, true)`。插件后端的 `config.get` 始终拿明文，脱敏只发生在 API / iframe 回读。
 
 **约束（v3.4）：**
 
@@ -615,11 +615,22 @@ function compareCodePoints(a, b) {
 | 方法 | 返回 | 说明 |
 |------|------|------|
 | `FC.ready()` | `Promise<ctx>` | 等待宿主初始化；`ctx = { pluginId, slot }`（当前**不提供** theme / permissions） |
-| `FC.api(path, body)` | `Promise<any>` | 调用插件自身注册的 API（`plugin.registerAPI`），宿主用 pluginToken 代理鉴权 |
-| `FC.config.get(key)` | `Promise<string\|null>` | 读取插件配置，透明解密 |
-| `FC.config.put(key, value, isSecret)` | `Promise<void>` | 写入插件配置；`isSecret=true` 仅控制回读脱敏（加密一直开） |
-| `FC.notify(level, msg)` | `Promise<void>` | 在宿主界面显示 Toast，`level` ∈ `"info"\|"success"\|"warning"\|"error"`（宿主把 `info`/`success` 当成功提示、其余按错误） |
-| `FC.resize(height)` | `Promise<void>` | 请求宿主调整 iframe 高度（像素，宿主 clamp 到 200–1500） |
+| `FC.api(path, body)` | `Promise<any>` | 调用插件自身注册的 API（`plugin.registerAPI`），宿主用 pluginToken 代理鉴权；resolve 为回调的返回值。请求形态见下方「`FC.api` 请求规则」 |
+| `FC.config.get(key)` | `Promise<string\|null>` | 读取插件配置：设置过的 key 返回字符串——**secret 项回读 `""`**（脱敏，拿不到明文），普通项原样返回（存的是空串就是 `""`）；**没设置过返回 `null`**。判断「是否已设置」请用 `!== null`，别用 `!== ''`。不传 key 返回整个列表 `[{key, value?, is_secret, updated_at}]`（secret 项和值为空串的项没有 `value` 字段） |
+| `FC.config.put(key, value, isSecret)` | `Promise<{updated: 1}>` | 写入插件配置；每次写都按 `isSecret` 覆盖 secret 标记，`isSecret=true` 仅控制回读脱敏（加密一直开）。key 须匹配 `^[a-zA-Z0-9_.\-]{1,128}$`（且不能是 `__proto__` / `constructor` / `prototype`），value 须是字符串（不传 / `null` 按 `""` 存）、≤ 64 KiB，否则 reject |
+| `FC.notify(level, msg)` | `Promise<{ok: true}>` | 在宿主界面显示 Toast：`level === "error"` 显示错误样式，**其余任何值都按成功提示** |
+| `FC.resize(height)` | `Promise<{ok: true, applied}>` | 请求宿主调整 iframe 高度（像素，宿主 clamp 到 200–1500，非数字按 400；`applied` 是实际生效的高度） |
+
+**`FC.api` 请求规则**（宿主把调用转成一次 HTTP 请求，插件回调收到的 `req` 由它决定）：
+
+- **不传 `body`**（`FC.api("/stats")`）→ `GET`，`req.body` 为 `""`。
+- **传了 `body`** → `POST`：
+  - `null` → `req.body` 为 `""`（`""`、`0`、`false` 同样不发请求体，也是 `""`）；
+  - 字符串 → 原样作为 `req.body`，**不会**再 JSON 编码；
+  - 对象 / 数组 → `JSON.stringify` 后作为 `req.body`（插件侧自己 `JSON.parse`）；
+  - 其它原始值（非 0 数字、`true`）→ 转成字符串。
+- `path` 可以带 query：`FC.api("/check?tmdb_id=1&season=2")` 的 `?` 前面部分是端点，query 进 `req.query`（`Record<string, string>`，同名 key 取第一个值）。
+- **失败**时 Promise reject 的 `Error.message` 是宿主回的真实原因：回调 `throw` / reject 的内容（如 `Error: boom`；同步 throw 时 goja 会在后面附上出错位置）、`plugin <id> api "/x" not registered`、超时等，而不是笼统的 `Request failed with status code 500`。
 
 > **iframe 桥就这 6 类消息**（`fc.init` / `api.call` / `config.get` / `config.put` / `host.notify` / `host.resize`）。`data.*` 加密 blob、`config.list`、`http.*`、`crypto.*`、`anime`/`task`/`ruleflow`/`ptsite`/`douban` 等**都不在 iframe 桥里**——它们只活在 `index.js` 的 goja 运行时。
 >
@@ -639,7 +650,7 @@ function compareCodePoints(a, b) {
 > </script>
 > ```
 >
-> `FC.api` 的 body 会被 JSON 序列化进请求体，传二进制需自己先 base64。
+> `FC.api` 的 body：字符串原样进 `req.body`，对象 / 数组会被 JSON 序列化（规则见上方「`FC.api` 请求规则」）；传二进制需自己先 base64 成字符串。
 
 ### 安全模型
 
@@ -653,8 +664,8 @@ function compareCodePoints(a, b) {
 
 完整参考实现：[`cookiecloud/ui/index.html` @ followcat/plugin-registry](https://github.com/followcat/plugin-registry/tree/main/cookiecloud/ui/index.html)
 
-- 用 `FC.ready()` 初始化，读取现有配置填充表单
-- 用 `FC.api('/save-config', {...})` 批量写入（含 `is_secret` 标记）
+- 用 `FC.ready()` 初始化，用 `FC.config.get(key)` 读取现有配置填充表单（secret 项回读 `""`，只用来判断「已设置」）
+- 用 `FC.config.put(key, value, isSecret)` 逐项写入（secret 字段留空 = 不修改）
 - 用 `FC.api('/sync', null)` 触发同步并显示结果
 - 用 `FC.api('/status', null)` 拉取状态并渲染
 - 用 `FC.resize(height)` 在内容变化后自动调整高度

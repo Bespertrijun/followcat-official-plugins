@@ -141,7 +141,7 @@ FC.ready().then(async function () {
 </script>
 ```
 
-> `FC.ready()` 的 ctx 只含 `{ pluginId, slot }`（驼峰，不是 `plugin_id`）；`FC.api` 的 body 会被 JSON 序列化进请求体，传二进制要先 base64。若主仓后续把 `FC.data.*` 接进 SDK，会更新本文；在那之前一律走上面的 `registerAPI` + `FC.api` 模式。
+> `FC.ready()` 的 ctx 只含 `{ pluginId, slot }`（驼峰，不是 `plugin_id`）；`FC.api` 的 body：字符串原样作为 `req.body`，对象 / 数组 `JSON.stringify` 后传入，不传 body 走 `GET` 且 `req.body` 为 `""`（完整规则见 sdk.md「`FC.api` 请求规则」）；传二进制要先 base64。若主仓后续把 `FC.data.*` 接进 SDK，会更新本文；在那之前一律走上面的 `registerAPI` + `FC.api` 模式。
 
 ---
 

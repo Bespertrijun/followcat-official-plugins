@@ -381,7 +381,7 @@ FC.ready().then(async function () {
 </script>
 ```
 
-> `FC.api` 的 body 会被 JSON 序列化进请求体，传二进制要先 base64，别把 `Uint8Array`/`ArrayBuffer` 直接塞进去。
+> `FC.api` 的 body：字符串原样进 `req.body`，对象 / 数组会被 JSON 序列化；不传 body 则是 `GET`、`req.body` 为 `""`（完整规则见 sdk.md「`FC.api` 请求规则」）。传二进制要先 base64 成字符串，别把 `Uint8Array`/`ArrayBuffer` 直接塞进去。
 
 ---
 
@@ -480,7 +480,9 @@ plugin.registerAPI("/test-webhook", async function (req) {
 **`req` 对象**目前提供：
 - `req.method` —— `"GET"` / `"POST"` / 等
 - `req.body` —— 原始字节 string（不自动 JSON parse）
-- `req.query` —— `Record<string, string>`，URL query 参数
+- `req.query` —— `Record<string, string>`，URL query 参数（同名 key 取第一个值）
+
+从 iframe UI 经 `FC.api(path, body)` 调用时：不传 `body` → `GET`、`req.body` 为 `""`；传 `null` → `POST`、`req.body` 为 `""`；传字符串 → `POST`、原样；传对象 / 数组 → `POST`、JSON 字符串；`path` 里的 `?a=1` 进 `req.query`。回调 throw / reject 的内容会作为 `FC.api` reject 的 `Error.message` 透到 UI。详见 sdk.md「`FC.api` 请求规则」。
 
 **用途**：
 - 暴露插件自己的统计/调试端点（前端 UI 需要数据时）
