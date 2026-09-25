@@ -219,12 +219,14 @@ plugin.registerAPI("/sync", async function (req) {
 
 最小可用：
 - 4 个表单字段：host / cloud_uuid / cloud_pwd / site_map (textarea, JSON)
-- 「保存」按钮 → 调 plugin SDK 写 config（`is_secret` 标记需 admin REST 单独设一次）
+- 「保存」按钮 → `FC.config.put(key, value, isSecret)` 写 config（cloud_uuid / cloud_pwd 传 `isSecret=true`）
 - 「立即同步」按钮 → POST `/api/plugins/<id>/api/sync`
 - 状态条：上次同步时间、是否成功、累计次数
 - 错误展示
 
 UI 框架可选，原生 HTML+JS 即可（参考 dashboard-stats 插件的 UI 写法）。
+
+**必修（2026-09-25 记）：secret「已设置」判断改成 `!== null`。** 主仓 98ab93e 起 `FC.config.get` 的返回值统一为：设过的 secret 回读 `""`，没设过回读 `null`（devrt 同步对齐，见 sdk.md FC 表）。现有 `ui/index.html` 判断写成 `cfg[k] !== null && cfg[k] !== ''`，以前设过的 secret 回读是 `undefined` 碰巧判成已设置，现在回读 `""` 会被判成未设置 → UUID / 密码明明设过仍显示「请输入」（纯显示问题，留空保存不会覆盖）。改法：`cloud_uuid` / `cloud_pwd` 两处去掉 `&& cfg[k] !== ''`，与 media-library-filter 一致。
 
 ---
 
@@ -249,6 +251,7 @@ UI 框架可选，原生 HTML+JS 即可（参考 dashboard-stats 插件的 UI �
 - [ ] 所有写并发发出（`Promise.all`），豆瓣验活慢（≤8s）时 PT 站写入不被拖住
 - [ ] `is_secret` 字段实际加密落库（admin REST 设过之后）
 - [ ] UI 在配置缺失时显式提示，不让用户以为「没事」
+- [ ] UUID / 密码已设置时显示「（已设置，留空不修改）」，未设置时显示「请输入」（判断用 `!== null`，见 §7）
 
 ---
 
