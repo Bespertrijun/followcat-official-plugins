@@ -1,0 +1,3 @@
+{"name":"devrt-round2","version":"0.0.1","source_url":"https://example.com/devrt-round2",
+ "permissions":["api.http","api.ptsite.read","api.task.read","api.anime.read","api.ruleflow.read","api.douban.cookie.read","hook.download.read","hook.download.write"],
+ "hooks":["should_download","on_download_done"]}

@@ -30,7 +30,9 @@
         api:   function(path, body) { return rpc('api.call', { path: path, body: body }); },
         config: {
             get: function(key)                  { return rpc('config.get', { key: key }); },
-            put: function(key, value, isSecret) { return rpc('config.put', { key: key, value: value, is_secret: !!isSecret }); }
+            put: function(key, value, isSecret) { return rpc('config.put', { key: key, value: value, is_secret: !!isSecret }); },
+            // resolves { deleted: bool } — whether a stored key was actually removed
+            delete: function(key)               { return rpc('config.delete', { key: key }); }
         },
         notify: function(level, msg)  { return rpc('host.notify', { level: level, message: msg }); },
         resize: function(height)      { return rpc('host.resize', { height: height }); }

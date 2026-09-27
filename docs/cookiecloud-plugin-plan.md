@@ -7,9 +7,31 @@
 
 ---
 
+## 0. 2026-09-25 拍板（本轮实现以此为准；下文与本节冲突时以本节为准）
+
+1. **从零重写**：`plugins/cookiecloud` 现有草稿（`index.js` 910 行，内嵌 CryptoJS、写旧 KV 落点）整体删掉重写，不复用。版本 `1.0.0`，去掉 `draft`，按仓库规则补 `index.json` 正式条目与 README 表。
+2. **自动同步**：插件自己用 `setInterval` 定时（宿主本轮开放定时器，见主仓 `plugin-permission-expansion-plan.md` §5.5）。间隔由用户填（配置 `sync_interval_min`，单位分钟），UI 标注「推荐 30 分钟」；`0` 或留空 = 不自动同步。保存后立即按新间隔重排，不需要重启插件。插件启动时不立刻同步，等满一个周期再跑（手动同步用「立即同步」）。UI 提示 CookieCloud 官方服务端限流：同一 IP 15 分钟 100 次。
+3. **同步入口统一、不等结果**：唯一入口 `startSync(trigger)`；已有同步在跑就跳过（不排队、不并发）。`/sync` 调它后**立即返回** `{started: true}` 或 `{started: false, reason: "already_running"}`；定时器调同一个入口。`/status` 返回 `{running, started_at, last_synced_at, last_trigger, results, last_error, interval_min, next_run_at}`，UI 在同步中每 2 秒轮询一次直到 `running=false`。这样手动 / 定时同一条路，也不再撞 registerAPI 10s 墙钟。
+4. **两种加密都解**（CookieCloud 浏览器扩展可选，服务端 `/get/:uuid` 返回里带 `crypto_type`，缺省 `legacy`）：
+   - `legacy`：base64 → `Salted__` + 8B salt + 密文 → `evpBytesToKey(md5(uuid+"-"+pwd) 前 16 字符, salt, 32, 16)` → `aesDecryptCBC`。
+   - `aes-128-cbc-fixed`：密钥 = `md5(uuid+"-"+pwd)` 前 16 个字符的字节（16B，AES-128），IV = 16 个 0 字节，base64 解出来直接是密文（无 `Salted__`）。
+   - 其它值：报错「不支持的加密方式 xxx」。
+   - 只 GET 密文、本地解密；**不用**服务端的「POST 带 password 由服务端解密」模式（密码不出 FollowCat）。
+5. **按 cookie 自己的 `domain` 匹配，不看分组 key**：`cookie_data` 的 key 取决于用户扩展设置（填了「同步域名关键词」就是关键词，没填就是浏览器原始域名，同一站会被拆到 `.x.com` / `www.x.com` 多组，同一条 cookie 也可能出现在多组），所以插件把所有分组里的 cookie 对象展平，逐条按浏览器规则判断能否发给目标主机：`d = domain 去掉前导点`，`host === d` 或 `host` 以 `"." + d` 结尾即命中；按 `(name, domain, path)` 去重；跳过已过期的（`expirationDate` 秒级时间戳早于当前）；拼成 `name=value; ...`。
+   - **PT 站目标主机** = `ptsite.list()` 返回的 `hosts`（宿主新加的只读字段 = 该站 RSS 链接的主机名；宿主 PT 适配器正是把 cookie 发给 RSS 链接与同站详情页），多个主机取并集。`hosts` 为空 → 跳过，结果写「该站没配 RSS，无法匹配」。
+   - **豆瓣目标主机**固定 `m.douban.com`（宿主豆瓣网页通道请求 `m.douban.com`）。
+   - 一条都没匹配到 → 不写，结果写「CookieCloud 里没有该站的 cookie（检查浏览器扩展的同步设置）」。
+   - 用户不再手填域名映射（旧 `site_map` 作废），也不提供手动覆盖域名（等真遇到对不上的站再加）。
+6. **同步哪些站由用户勾选**：UI 列出 `ptsite.list()` 里 `auth_kind === "cookie"` 的站，逐个勾选（配置 `sites` = 站点 id 的 JSON 数组），**默认不勾**——避免把浏览器里的旧 cookie 覆盖掉用户手动配好的 cookie。apikey 站（如 mteam）不列出。豆瓣单独一个开关 `sync_douban`（默认关）。已勾选但站点被删的 id：结果里提示并跳过。
+7. 只写变了的（指纹比对，照 §5）、所有写并发（`Promise.all`，照 §6）、错误按站收集，均不变。
+8. UI secret「已设置」判断用 `!== null`（见 §7 必修）。
+9. **2026-09-25 审核修复**：解码提速、UI 加载失败保护、状态机、若干边角等修复项见主仓 `docs/plugin-review-fixes-2026-09-25.md` 第三节「cookiecloud」（I1/I2/I3/I6；I4/I5 不修）；插件只同步 cookie（宿主删除 `ptsite.setAPIKey`）。
+
+---
+
 ## 1. 目标与集成模型
 
-**做什么**：从用户自托管的 [CookieCloud](https://github.com/easychen/CookieCloud) server 手动拉取浏览器同步过来的 cookies → 解密 → 按用户配置的「域名 → PT 站 id」映射 → 经宿主 facade 写入 FollowCat 的 PT 站凭据（`ptsite.setCookie/setAPIKey`）与豆瓣 Cookie（`douban.setCookie`）。
+**做什么**：从用户自托管的 [CookieCloud](https://github.com/easychen/CookieCloud) server 手动拉取浏览器同步过来的 cookies → 解密 → 按用户配置的「域名 → PT 站 id」映射 → 经宿主 facade 写入 FollowCat 的 PT 站凭据（`ptsite.setCookie`）与豆瓣 Cookie（`douban.setCookie`）。
 
 **集成点（主仓批次 1 已提供）**：
 - PT 站凭据存于 `site_configs.Cookie/APIKey`（AES-256-GCM 加密列）；豆瓣 Cookie 存于 `app_settings.douban_cookie`（同算法）。插件只能经 facade 写，宿主负责校验 / 加密 / 热加载 / 审计，明文不出宿主（读侧只有「已配置」+ 打码 + 指纹）。
@@ -55,13 +77,14 @@
 | `host` | false | CookieCloud server 根 URL，如 `https://cc.example.com` |
 | `cloud_uuid` | true | CookieCloud 用户 UUID（Decrypt 的 key 派生原料） |
 | `cloud_pwd` | true | CookieCloud 端到端密码（前端浏览器扩展里设的那个） |
-| `site_map` | false | JSON 字符串：`{"hhan.example.com": "<ptsite id>", ...}` — domain → PT 站行 id（`ptsite.list()` 的 `id`，UUID；不是 adapter 名） |
-| `sync_douban` | false | `"true"` 时同步 `.douban.com` 的 cookie 到豆瓣 Cookie（`douban.setCookie`，带验活） |
+| `sites` | false | JSON 数组：要同步的 PT 站行 id（`ptsite.list()` 的 `id`）；默认空（§0.6）。取代旧 `site_map` |
+| `sync_douban` | false | `"true"` 时同步豆瓣 Cookie（匹配 `m.douban.com`，`douban.setCookie` 带验活）；默认关 |
+| `sync_interval_min` | false | 自动同步间隔（分钟），UI 推荐 30；`0`/空 = 不自动同步（§0.2） |
 | `last_synced_at` | false | RFC3339 时间，最近成功同步时间，UI 展示用 |
 | `last_error` | false | 最近一次失败原因，UI 展示用 |
 | `synced_count` | false | 历史成功同步次数 |
 
-> `is_secret=true` 通过 admin REST `PUT /api/plugins/:id/config` 设（manifest 里没法声明）。或者用户首次保存时调一次。详见 sdk.md §config。
+> `cloud_uuid` / `cloud_pwd` 由 UI 用 `FC.config.put(key, value, true)` 写入即标记为 secret（回读 `""`）。
 
 ---
 
@@ -128,7 +151,6 @@ crypto.base64Decode(str) → Uint8Array
 | 目标 | 方法 | 权限 | 说明 |
 |---|---|---|---|
 | PT 站 Cookie | `await ptsite.setCookie(siteId, ck)` | `api.ptsite.write` | 单列更新、加密落库；cookie 站才收，apikey / none 站拒绝（reject） |
-| PT 站 API Key | `await ptsite.setAPIKey(siteId, key)` | `api.ptsite.write` | 目前只有 mteam 是 apikey 站；CookieCloud 同步的是 cookie，通常用不到 |
 | 豆瓣 Cookie | `await douban.setCookie(ck, {validate: true})` | `api.douban.cookie.write` | 加密落库 + 立即热加载；验活上限 8s，回 `validation` 五态（到点未完 = `rate_limited`，已写入） |
 | 比对用指纹 | `ptsite.getCookieMeta(siteId)` / `douban.getCookie()` | `api.ptsite.read` / `api.douban.cookie.read` | `{configured, sha256}`（2026-09-24 去掉 masked：明文不出宿主，只需判「是否相同」），`sha256` 按 sdk.md「Cookie 归一化契约」计算 |
 
@@ -144,7 +166,7 @@ crypto.base64Decode(str) → Uint8Array
 
 ## 6. JS 主流程
 
-**同步流程写死（2026-09-23 拍板）**：先拉 CookieCloud（数据依赖，必须在前）→ 解密 → 所有 `ptsite.setCookie/setAPIKey` 与 `douban.setCookie` **并发发出**（`Promise.all`，不逐个 `await`）→ 汇总。总耗时 ≈ 拉取 + 最慢一枪（豆瓣验活 ≤ 8s）；registerAPI 墙钟 10s，所以拉 CookieCloud 要尽量快（它本身有 `http` 的 10s 上限，但超过约 2s 就可能让整次 `/sync` 超时——超时后已发出的写照常完成，只是 UI 拿不到汇总）。
+**同步流程写死（2026-09-23 拍板）**：先拉 CookieCloud（数据依赖，必须在前）→ 解密 → 所有 `ptsite.setCookie` 与 `douban.setCookie` **并发发出**（`Promise.all`，不逐个 `await`）→ 汇总。总耗时 ≈ 拉取 + 最慢一枪（豆瓣验活 ≤ 8s）；registerAPI 墙钟 10s，所以拉 CookieCloud 要尽量快（它本身有 `http` 的 10s 上限，但超过约 2s 就可能让整次 `/sync` 超时——超时后已发出的写照常完成，只是 UI 拿不到汇总）。
 
 ```js
 // index.js（伪代码，async 版；normalizeCookie 照抄 sdk.md 参考实现，utf8Decode 为插件内联的 UTF-8 解码函数，宿主不提供）
@@ -230,14 +252,9 @@ UI 框架可选，原生 HTML+JS 即可（参考 dashboard-stats 插件的 UI �
 
 ---
 
-## 8. 周期同步问题
+## 8. 周期同步
 
-**当前 plugin runtime 没有 cron hook**。三种应对：
-- **v1**：只支持手动同步（UI 按钮）。用户用系统 cron `curl -X POST` 打 plugin API 端点实现自动化。文档里写清楚。
-- **v1.5**：等主仓加 `on_cron_tick` 或 `on_minute_tick` hook（独立任务，不在本插件 scope）。
-- **替代**：复用现有 hook，比如 `on_episode_found` 触发 syncOnce(throttled by last_synced_at)。**hack，不推荐**。
-
-→ v1 出 manual + curl 文档 即可。
+~~旧方案：v1 只手动 + 系统 cron curl。~~ 2026-09-25 改为插件内 `setInterval` 自动同步，见 §0.2 / §0.3。
 
 ---
 
@@ -266,6 +283,7 @@ UI 框架可选，原生 HTML+JS 即可（参考 dashboard-stats 插件的 UI �
 - [x] 方法级注入、写审计（`audit/plugin/<id>`）、插件详情页日志显示审计行
 - [x] 安装 / 升级 UI：敏感权限标红 + 二次确认，升级展示「本次升级新增权限」
 - [x] sdk.md / dev-guide.md 权限表与同步/异步一览、Cookie 归一化契约 + 测试向量；devrt `crypto`/`ptsite`/`douban` mock
+- [ ] **本轮宿主补充（2026-09-25，主仓 §5.5）**：开放 `setTimeout/setInterval` 等定时器；`ptsite.list/get` 加只读 `hosts`（RSS 主机名）
 - [ ] **下一轮（插件侧）**：按 §2/§5/§6 改 `plugins/cookiecloud`——删内嵌 CryptoJS、写入改 facade、`/sync` 并发写、UI 用 `ptsite.list()` 选站；宿主部署须与此版插件一起上（旧插件写的 KV 早已没人读）
 
 ---

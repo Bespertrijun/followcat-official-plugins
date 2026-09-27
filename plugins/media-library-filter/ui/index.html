@@ -569,7 +569,7 @@
     // 用宿主一等公民的 config.put 桥逐项写（与 cookiecloud 一致、真实宿主已验证），
     // 不再把 JSON blob 经 FC.api('/save-config', …) → req.body 往返——那条链路
     // 在真实宿主上会把 body 变成非对象，正是「保存失败：body must be a JSON object」
-    // 的根因。config.put 是文档 6 条 iframe 桥之一，字符串键值直达，无编码歧义。
+    // 的根因。config.put 是 sdk.md 列出的 iframe 桥消息之一，字符串键值直达，无编码歧义。
     var writes = [];
 
     // 全局配置（非 secret）

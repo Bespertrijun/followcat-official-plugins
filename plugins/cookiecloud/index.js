@@ -1,910 +1,473 @@
-// cookiecloud —— FollowCat CookieCloud 同步插件
+// cookiecloud —— 从自建 CookieCloud 同步浏览器 cookie 到 FollowCat 的 PT 站凭据与豆瓣 Cookie
 //
-// 从用户自托管的 CookieCloud server 周期/手动拉取浏览器同步过来的 cookies
-// → 解密（CryptoJS.AES + OpenSSL EVP_BytesToKey + MD5）
-// → 按 site_map 把每个 domain 的 cookies 写入 site_cookie_<site_id>（host KV）
+// 一次同步：GET <host>/get/<uuid> 拿密文 → 本地解密（密码不出 FollowCat，不用服务端解密模式）→
+// 把所有分组里的 cookie 展平，按每条 cookie 自己的 domain 用浏览器规则匹配目标主机（PT 站 = 该站
+// RSS 链接的主机名，豆瓣 = m.douban.com）→ 指纹比对，只写变了的 → 所有写并发发出（Promise.all）→
+// 按站汇总结果。
 //
-// === 配置 key（在管理页 → 插件 → 详情 → 配置写入） ===
-//
-//   host             CookieCloud server 根 URL（如 https://cc.example.com）
-//   cloud_uuid       CookieCloud 用户 UUID（is_secret=true，由管理页设置）
-//   cloud_pwd        CookieCloud 端到端密码（is_secret=true，由管理页设置）
-//   site_map         JSON 字符串：{"hhan.example.com":"hhan", ...}
-//   last_synced_at   RFC3339 时间，最近成功同步时间（UI 展示用）
-//   last_error       最近一次失败原因
-//   synced_count     历史成功同步次数
-//
-// === 自定义 API ===
-//
-//   POST /api/plugins/<id>/api/sync          手动触发一次同步
-//   GET  /api/plugins/<id>/api/status        当前状态
-//   POST /api/plugins/<id>/api/save-config   批量写入 host/cloud_uuid/cloud_pwd/site_map
-//   POST /api/plugins/<id>/api/test-decrypt  自检 CryptoJS-mini（用固定向量）
-//
-// === 设计要点 ===
-//
-//   1. 内嵌 CryptoJS-mini（MD5 + AES-CBC + EVP_BytesToKey-MD5 + base64 + PKCS7）
-//   2. 写 host KV 通过 hostkv.setSiteCookie facade（v1 主仓 PR 提供），
-//      若 facade 暂未注入则降级为「干跑」并在状态里说明
-//   3. 所有外部 IO 都包 try/catch，状态写入 config 便于 UI 展示
+// 入口唯一：startSync(trigger)。「立即同步」（/sync）与定时器都调它；已有同步在跑就跳过（不排队、
+// 不并发）。/sync 不等同步结束就返回，UI 轮询 /status 看进度与每站结果。
 
-// ====== CryptoJS-mini（内嵌子集） =====================================
-//
-// 抄自 crypto-js@4.2.0（MIT），仅保留：
-//   core, enc-base64, md5, cipher-core, aes, mode-cbc, pad-pkcs7, kdf-openssl
-// 已去除模块包装，整体 IIFE。算法对照 cipher.go 的 BytesToKeyAES256CBCMD5。
+var DOUBAN_HOST = "m.douban.com"; // 宿主豆瓣网页通道请求的主机
+var MAX_TIMER_MS = 2147483647;    // 定时器上限（2^31-1 ms，约 24.8 天）；超出会被当成 1ms，必须截住
 
-var CryptoJS = (function () {
-    var C = {};
-    var C_lib = C.lib = {};
+// ─── 纯函数 ──────────────────────────────────────────────────────────────────
 
-    // ---- WordArray ------------------------------------------------------
-    // 32-bit big-endian word 数组；len 是字节数。
-    var WordArray = C_lib.WordArray = (function () {
-        function W(words, sigBytes) {
-            words = this.words = words || [];
-            this.sigBytes = sigBytes !== undefined ? sigBytes : words.length * 4;
-        }
-        W.prototype.concat = function (wordArray) {
-            var thisWords = this.words;
-            var thatWords = wordArray.words;
-            var thisSigBytes = this.sigBytes;
-            var thatSigBytes = wordArray.sigBytes;
-            this.clamp();
-            if (thisSigBytes % 4) {
-                for (var i = 0; i < thatSigBytes; i++) {
-                    var thatByte = (thatWords[i >>> 2] >>> (24 - (i % 4) * 8)) & 0xff;
-                    thisWords[(thisSigBytes + i) >>> 2] |= thatByte << (24 - ((thisSigBytes + i) % 4) * 8);
-                }
-            } else {
-                for (var j = 0; j < thatSigBytes; j += 4) {
-                    thisWords[(thisSigBytes + j) >>> 2] = thatWords[j >>> 2];
-                }
-            }
-            this.sigBytes = thisSigBytes + thatSigBytes;
-            return this;
-        };
-        W.prototype.clamp = function () {
-            var words = this.words;
-            var sigBytes = this.sigBytes;
-            words[sigBytes >>> 2] &= 0xffffffff << (32 - (sigBytes % 4) * 8);
-            words.length = Math.ceil(sigBytes / 4);
-        };
-        W.prototype.clone = function () {
-            return new W(this.words.slice(0), this.sigBytes);
-        };
-        W.create = function (words, sigBytes) { return new W(words, sigBytes); };
-        return W;
-    })();
-
-    // ---- enc.Latin1 / enc.Utf8 / enc.Hex / enc.Base64 -------------------
-    var C_enc = C.enc = {};
-
-    var Latin1 = C_enc.Latin1 = {
-        stringify: function (wordArray) {
-            var words = wordArray.words;
-            var sigBytes = wordArray.sigBytes;
-            var out = [];
-            for (var i = 0; i < sigBytes; i++) {
-                var b = (words[i >>> 2] >>> (24 - (i % 4) * 8)) & 0xff;
-                out.push(String.fromCharCode(b));
-            }
-            return out.join('');
-        },
-        parse: function (latin1Str) {
-            var len = latin1Str.length;
-            var words = [];
-            for (var i = 0; i < len; i++) {
-                words[i >>> 2] |= (latin1Str.charCodeAt(i) & 0xff) << (24 - (i % 4) * 8);
-            }
-            return WordArray.create(words, len);
-        }
-    };
-
-    C_enc.Utf8 = {
-        stringify: function (wordArray) {
-            // 拿到 latin1，再 decodeURIComponent(escape(...)) 还原 UTF-8
-            try {
-                return decodeURIComponent(escape(Latin1.stringify(wordArray)));
-            } catch (e) {
-                throw new Error('Malformed UTF-8 data');
-            }
-        },
-        parse: function (utf8Str) {
-            return Latin1.parse(unescape(encodeURIComponent(utf8Str)));
-        }
-    };
-
-    C_enc.Hex = {
-        stringify: function (wordArray) {
-            var words = wordArray.words;
-            var sigBytes = wordArray.sigBytes;
-            var hexChars = [];
-            for (var i = 0; i < sigBytes; i++) {
-                var b = (words[i >>> 2] >>> (24 - (i % 4) * 8)) & 0xff;
-                hexChars.push((b >>> 4).toString(16));
-                hexChars.push((b & 0x0f).toString(16));
-            }
-            return hexChars.join('');
-        },
-        parse: function (hexStr) {
-            var len = hexStr.length;
-            var words = [];
-            for (var i = 0; i < len; i += 2) {
-                words[i >>> 3] |= parseInt(hexStr.substr(i, 2), 16) << (24 - (i % 8) * 4);
-            }
-            return WordArray.create(words, len / 2);
-        }
-    };
-
-    var B64_MAP = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
-    var B64_REV = (function () {
-        var m = {};
-        for (var i = 0; i < B64_MAP.length; i++) m[B64_MAP.charAt(i)] = i;
-        return m;
-    })();
-
-    C_enc.Base64 = {
-        stringify: function (wordArray) {
-            var words = wordArray.words;
-            var sigBytes = wordArray.sigBytes;
-            wordArray.clamp();
-            var out = [];
-            for (var i = 0; i < sigBytes; i += 3) {
-                var b1 = (words[i >>> 2] >>> (24 - (i % 4) * 8)) & 0xff;
-                var b2 = (words[(i + 1) >>> 2] >>> (24 - ((i + 1) % 4) * 8)) & 0xff;
-                var b3 = (words[(i + 2) >>> 2] >>> (24 - ((i + 2) % 4) * 8)) & 0xff;
-                var triplet = (b1 << 16) | (b2 << 8) | b3;
-                for (var j = 0; (j < 4) && (i * 8 + j * 6 < sigBytes * 8); j++) {
-                    out.push(B64_MAP.charAt((triplet >>> (6 * (3 - j))) & 0x3f));
-                }
-            }
-            while (out.length % 4) out.push('=');
-            return out.join('');
-        },
-        parse: function (base64Str) {
-            var len = base64Str.length;
-            // strip padding
-            var paddingChar = base64Str.charAt(len - 1);
-            if (paddingChar === '=') {
-                len--;
-                if (base64Str.charAt(len - 1) === '=') len--;
-            }
-            // 反查 — 仍要遍历整个有效区间
-            var words = [];
-            var nBytes = 0;
-            for (var i = 0; i < len; i++) {
-                if ((i % 4) === 0) continue; // 每 4 chars 一组在下面整体处理
-            }
-            // 一次扫一组
-            words = [];
-            nBytes = 0;
-            for (var k = 0; k < len; k++) {
-                var c = base64Str.charAt(k);
-                var v = B64_REV[c];
-                if (v === undefined) continue;
-                var bitsCombined = v << (18 - 6 * (k % 4));
-                words[nBytes >>> 2] |= bitsCombined << (24 - (nBytes % 4) * 8 - 16); // placeholder
-            }
-            // 上面那段太绕。重写为按 4 chars 一组：
-            words = [];
-            var byteIndex = 0;
-            for (var p = 0; p + 1 < len; p += 4) {
-                var n0 = B64_REV[base64Str.charAt(p)];
-                var n1 = B64_REV[base64Str.charAt(p + 1)];
-                var n2 = (p + 2 < len) ? B64_REV[base64Str.charAt(p + 2)] : 0;
-                var n3 = (p + 3 < len) ? B64_REV[base64Str.charAt(p + 3)] : 0;
-                if (n0 === undefined || n1 === undefined) continue;
-                var t = (n0 << 18) | (n1 << 12) | ((n2 || 0) << 6) | (n3 || 0);
-                var bb = [(t >>> 16) & 0xff, (t >>> 8) & 0xff, t & 0xff];
-                var avail = (p + 2 >= len) ? 1 : (p + 3 >= len ? 2 : 3);
-                for (var bi = 0; bi < avail; bi++) {
-                    words[byteIndex >>> 2] |= bb[bi] << (24 - (byteIndex % 4) * 8);
-                    byteIndex++;
-                }
-            }
-            return WordArray.create(words, byteIndex);
-        }
-    };
-
-    // ---- MD5 ------------------------------------------------------------
-    // 标准 MD5（RFC 1321）— 直接抄 crypto-js 的 word-based 实现
-    var T = [];
-    (function () {
-        for (var i = 0; i < 64; i++) {
-            T[i] = (Math.abs(Math.sin(i + 1)) * 0x100000000) | 0;
-        }
-    })();
-
-    function md5_FF(a, b, c, d, x, s, t) {
-        var n = a + ((b & c) | (~b & d)) + (x >>> 0) + t;
-        return ((n << s) | (n >>> (32 - s))) + b;
-    }
-    function md5_GG(a, b, c, d, x, s, t) {
-        var n = a + ((b & d) | (c & ~d)) + (x >>> 0) + t;
-        return ((n << s) | (n >>> (32 - s))) + b;
-    }
-    function md5_HH(a, b, c, d, x, s, t) {
-        var n = a + (b ^ c ^ d) + (x >>> 0) + t;
-        return ((n << s) | (n >>> (32 - s))) + b;
-    }
-    function md5_II(a, b, c, d, x, s, t) {
-        var n = a + (c ^ (b | ~d)) + (x >>> 0) + t;
-        return ((n << s) | (n >>> (32 - s))) + b;
-    }
-
-    function md5Compute(words, sigBytes) {
-        // 给 words 末端 padding（追加 0x80 + 0... + 8B little-endian 长度）
-        var nBitsTotal = sigBytes * 8;
-        var nBitsLeft = sigBytes * 8;
-        // 先把 sigBytes 字节后塞 0x80
-        words[nBitsLeft >>> 5] |= 0x80 << (24 - (nBitsLeft % 32));
-        // 每 block = 16 words = 64 字节；总长度（低 32 位 / 高 32 位）放在最后两个 word
-        var nWordsPlusPad = Math.ceil((nBitsLeft + 1 + 64) / 512) * 16;
-        // MD5 长度字段：低位字节序（little-endian），写在 [nWordsPlusPad-2] 高位 / [nWordsPlusPad-1] 低位
-        // crypto-js 是把它存为 swapped 32-bit 值
-        var nBitsTotalH = Math.floor(nBitsTotal / 0x100000000);
-        var nBitsTotalL = nBitsTotal >>> 0;
-        words[nWordsPlusPad - 2] = ( ((nBitsTotalL << 8) | (nBitsTotalL >>> 24)) & 0x00ff00ff )
-                                 | ( ((nBitsTotalL << 24) | (nBitsTotalL >>> 8)) & 0xff00ff00 );
-        words[nWordsPlusPad - 1] = ( ((nBitsTotalH << 8) | (nBitsTotalH >>> 24)) & 0x00ff00ff )
-                                 | ( ((nBitsTotalH << 24) | (nBitsTotalH >>> 8)) & 0xff00ff00 );
-
-        var a = 0x67452301, b = 0xefcdab89, c = 0x98badcfe, d = 0x10325476;
-        for (var off = 0; off < nWordsPlusPad; off += 16) {
-            // crypto-js 把 big-endian word 转成 little-endian 后做 MD5
-            var M = [];
-            for (var i = 0; i < 16; i++) {
-                var w = words[off + i] | 0;
-                M[i] = ( ((w << 8) | (w >>> 24)) & 0x00ff00ff )
-                     | ( ((w << 24) | (w >>> 8)) & 0xff00ff00 );
-            }
-            var aa = a, bb = b, cc = c, dd = d;
-
-            // round 1
-            a = md5_FF(a, b, c, d, M[0],  7,  T[0]);
-            d = md5_FF(d, a, b, c, M[1],  12, T[1]);
-            c = md5_FF(c, d, a, b, M[2],  17, T[2]);
-            b = md5_FF(b, c, d, a, M[3],  22, T[3]);
-            a = md5_FF(a, b, c, d, M[4],  7,  T[4]);
-            d = md5_FF(d, a, b, c, M[5],  12, T[5]);
-            c = md5_FF(c, d, a, b, M[6],  17, T[6]);
-            b = md5_FF(b, c, d, a, M[7],  22, T[7]);
-            a = md5_FF(a, b, c, d, M[8],  7,  T[8]);
-            d = md5_FF(d, a, b, c, M[9],  12, T[9]);
-            c = md5_FF(c, d, a, b, M[10], 17, T[10]);
-            b = md5_FF(b, c, d, a, M[11], 22, T[11]);
-            a = md5_FF(a, b, c, d, M[12], 7,  T[12]);
-            d = md5_FF(d, a, b, c, M[13], 12, T[13]);
-            c = md5_FF(c, d, a, b, M[14], 17, T[14]);
-            b = md5_FF(b, c, d, a, M[15], 22, T[15]);
-
-            // round 2
-            a = md5_GG(a, b, c, d, M[1],  5,  T[16]);
-            d = md5_GG(d, a, b, c, M[6],  9,  T[17]);
-            c = md5_GG(c, d, a, b, M[11], 14, T[18]);
-            b = md5_GG(b, c, d, a, M[0],  20, T[19]);
-            a = md5_GG(a, b, c, d, M[5],  5,  T[20]);
-            d = md5_GG(d, a, b, c, M[10], 9,  T[21]);
-            c = md5_GG(c, d, a, b, M[15], 14, T[22]);
-            b = md5_GG(b, c, d, a, M[4],  20, T[23]);
-            a = md5_GG(a, b, c, d, M[9],  5,  T[24]);
-            d = md5_GG(d, a, b, c, M[14], 9,  T[25]);
-            c = md5_GG(c, d, a, b, M[3],  14, T[26]);
-            b = md5_GG(b, c, d, a, M[8],  20, T[27]);
-            a = md5_GG(a, b, c, d, M[13], 5,  T[28]);
-            d = md5_GG(d, a, b, c, M[2],  9,  T[29]);
-            c = md5_GG(c, d, a, b, M[7],  14, T[30]);
-            b = md5_GG(b, c, d, a, M[12], 20, T[31]);
-
-            // round 3
-            a = md5_HH(a, b, c, d, M[5],  4,  T[32]);
-            d = md5_HH(d, a, b, c, M[8],  11, T[33]);
-            c = md5_HH(c, d, a, b, M[11], 16, T[34]);
-            b = md5_HH(b, c, d, a, M[14], 23, T[35]);
-            a = md5_HH(a, b, c, d, M[1],  4,  T[36]);
-            d = md5_HH(d, a, b, c, M[4],  11, T[37]);
-            c = md5_HH(c, d, a, b, M[7],  16, T[38]);
-            b = md5_HH(b, c, d, a, M[10], 23, T[39]);
-            a = md5_HH(a, b, c, d, M[13], 4,  T[40]);
-            d = md5_HH(d, a, b, c, M[0],  11, T[41]);
-            c = md5_HH(c, d, a, b, M[3],  16, T[42]);
-            b = md5_HH(b, c, d, a, M[6],  23, T[43]);
-            a = md5_HH(a, b, c, d, M[9],  4,  T[44]);
-            d = md5_HH(d, a, b, c, M[12], 11, T[45]);
-            c = md5_HH(c, d, a, b, M[15], 16, T[46]);
-            b = md5_HH(b, c, d, a, M[2],  23, T[47]);
-
-            // round 4
-            a = md5_II(a, b, c, d, M[0],  6,  T[48]);
-            d = md5_II(d, a, b, c, M[7],  10, T[49]);
-            c = md5_II(c, d, a, b, M[14], 15, T[50]);
-            b = md5_II(b, c, d, a, M[5],  21, T[51]);
-            a = md5_II(a, b, c, d, M[12], 6,  T[52]);
-            d = md5_II(d, a, b, c, M[3],  10, T[53]);
-            c = md5_II(c, d, a, b, M[10], 15, T[54]);
-            b = md5_II(b, c, d, a, M[1],  21, T[55]);
-            a = md5_II(a, b, c, d, M[8],  6,  T[56]);
-            d = md5_II(d, a, b, c, M[15], 10, T[57]);
-            c = md5_II(c, d, a, b, M[6],  15, T[58]);
-            b = md5_II(b, c, d, a, M[13], 21, T[59]);
-            a = md5_II(a, b, c, d, M[4],  6,  T[60]);
-            d = md5_II(d, a, b, c, M[11], 10, T[61]);
-            c = md5_II(c, d, a, b, M[2],  15, T[62]);
-            b = md5_II(b, c, d, a, M[9],  21, T[63]);
-
-            a = (a + aa) | 0;
-            b = (b + bb) | 0;
-            c = (c + cc) | 0;
-            d = (d + dd) | 0;
-        }
-
-        // 输出：a,b,c,d 每个 32-bit 转 little-endian 字节序
-        function swap(w) {
-            return ( ((w << 8) | (w >>> 24)) & 0x00ff00ff )
-                 | ( ((w << 24) | (w >>> 8)) & 0xff00ff00 );
-        }
-        return WordArray.create([swap(a), swap(b), swap(c), swap(d)], 16);
-    }
-
-    function md5Of(input) {
-        // input 可以是 string 或 WordArray
-        var wa;
-        if (typeof input === 'string') {
-            wa = C_enc.Utf8.parse(input);
-        } else {
-            wa = input.clone();
-        }
-        return md5Compute(wa.words.slice(0), wa.sigBytes);
-    }
-
-    // 同 crypto-js：CryptoJS.MD5(msg) 返回 WordArray，可 .toString() 取 hex
-    C.MD5 = function (input) {
-        var wa = md5Of(input);
-        wa.toString = function () { return C_enc.Hex.stringify(wa); };
-        return wa;
-    };
-
-    // ---- AES-CBC --------------------------------------------------------
-    // 基于 AES SBox + 4-table T-box 实现，PKCS7 解 pad
-
-    var SBOX = [];
-    var INV_SBOX = [];
-    var SUB_MIX_0 = [];
-    var SUB_MIX_1 = [];
-    var SUB_MIX_2 = [];
-    var SUB_MIX_3 = [];
-    var INV_SUB_MIX_0 = [];
-    var INV_SUB_MIX_1 = [];
-    var INV_SUB_MIX_2 = [];
-    var INV_SUB_MIX_3 = [];
-    (function () {
-        var d = [];
-        for (var i = 0; i < 256; i++) {
-            d[i] = i < 128 ? (i << 1) : ((i << 1) ^ 0x11b);
-        }
-        var x = 0, xi = 0;
-        for (var j = 0; j < 256; j++) {
-            var sx = xi ^ (xi << 1) ^ (xi << 2) ^ (xi << 3) ^ (xi << 4);
-            sx = (sx >>> 8) ^ (sx & 0xff) ^ 0x63;
-            SBOX[x] = sx;
-            INV_SBOX[sx] = x;
-
-            var x2 = d[x];
-            var x4 = d[x2];
-            var x8 = d[x4];
-            var t = (d[sx] * 0x101) ^ (sx * 0x1010100);
-            SUB_MIX_0[x] = ((t << 24) | (t >>> 8)) >>> 0;
-            SUB_MIX_1[x] = ((t << 16) | (t >>> 16)) >>> 0;
-            SUB_MIX_2[x] = ((t << 8) | (t >>> 24)) >>> 0;
-            SUB_MIX_3[x] = t >>> 0;
-            var t2 = (x8 * 0x1010101) ^ (x4 * 0x10001) ^ (x2 * 0x101) ^ (x * 0x1010100);
-            INV_SUB_MIX_0[sx] = ((t2 << 24) | (t2 >>> 8)) >>> 0;
-            INV_SUB_MIX_1[sx] = ((t2 << 16) | (t2 >>> 16)) >>> 0;
-            INV_SUB_MIX_2[sx] = ((t2 << 8) | (t2 >>> 24)) >>> 0;
-            INV_SUB_MIX_3[sx] = t2 >>> 0;
-
-            if (!x) {
-                x = xi = 1;
-            } else {
-                x = x2 ^ d[d[d[x8 ^ x2]]];
-                xi ^= d[d[xi]];
-            }
-        }
-    })();
-
-    var RCON = [0x00, 0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0x1b, 0x36];
-
-    function aesKeySchedule(keyWords, keySize) {
-        // keySize 是 32-bit word 数：4=128b, 6=192b, 8=256b
-        var ksRows = (keySize + 6 + 1) * 4;
-        var keySchedule = [];
-        for (var i = 0; i < ksRows; i++) {
-            if (i < keySize) {
-                keySchedule[i] = keyWords[i] | 0;
-            } else {
-                var t = keySchedule[i - 1];
-                if (!(i % keySize)) {
-                    t = (t << 8) | (t >>> 24);
-                    t = (SBOX[(t >>> 24) & 0xff] << 24) |
-                        (SBOX[(t >>> 16) & 0xff] << 16) |
-                        (SBOX[(t >>> 8) & 0xff] << 8) |
-                        SBOX[t & 0xff];
-                    t ^= RCON[(i / keySize) | 0] << 24;
-                } else if (keySize > 6 && i % keySize === 4) {
-                    t = (SBOX[(t >>> 24) & 0xff] << 24) |
-                        (SBOX[(t >>> 16) & 0xff] << 16) |
-                        (SBOX[(t >>> 8) & 0xff] << 8) |
-                        SBOX[t & 0xff];
-                }
-                keySchedule[i] = (keySchedule[i - keySize] ^ t) | 0;
-            }
-        }
-        // 反向 key schedule（用于解密）
-        var invKeySchedule = [];
-        for (var ii = 0; ii < ksRows; ii++) {
-            var idx = ksRows - ii;
-            var u;
-            if (ii % 4) {
-                u = keySchedule[idx];
-            } else {
-                u = keySchedule[idx - 4];
-            }
-            if (ii < 4 || idx <= 4) {
-                invKeySchedule[ii] = u;
-            } else {
-                invKeySchedule[ii] = INV_SUB_MIX_0[SBOX[(u >>> 24) & 0xff]] ^
-                                     INV_SUB_MIX_1[SBOX[(u >>> 16) & 0xff]] ^
-                                     INV_SUB_MIX_2[SBOX[(u >>> 8) & 0xff]] ^
-                                     INV_SUB_MIX_3[SBOX[u & 0xff]];
-            }
-        }
-        return { keySchedule: keySchedule, invKeySchedule: invKeySchedule, nRounds: keySize + 6 };
-    }
-
-    function aesDecryptBlock(words, offset, ks) {
-        var invKeySchedule = ks.invKeySchedule;
-        var nRounds = ks.nRounds;
-
-        var s0 = words[offset]     ^ invKeySchedule[0];
-        var s1 = words[offset + 3] ^ invKeySchedule[1];
-        var s2 = words[offset + 2] ^ invKeySchedule[2];
-        var s3 = words[offset + 1] ^ invKeySchedule[3];
-
-        var ksRow = 4;
-        for (var round = 1; round < nRounds; round++) {
-            var t0 = INV_SUB_MIX_0[(s0 >>> 24) & 0xff] ^
-                     INV_SUB_MIX_1[(s1 >>> 16) & 0xff] ^
-                     INV_SUB_MIX_2[(s2 >>> 8) & 0xff] ^
-                     INV_SUB_MIX_3[s3 & 0xff] ^
-                     invKeySchedule[ksRow++];
-            var t1 = INV_SUB_MIX_0[(s1 >>> 24) & 0xff] ^
-                     INV_SUB_MIX_1[(s2 >>> 16) & 0xff] ^
-                     INV_SUB_MIX_2[(s3 >>> 8) & 0xff] ^
-                     INV_SUB_MIX_3[s0 & 0xff] ^
-                     invKeySchedule[ksRow++];
-            var t2 = INV_SUB_MIX_0[(s2 >>> 24) & 0xff] ^
-                     INV_SUB_MIX_1[(s3 >>> 16) & 0xff] ^
-                     INV_SUB_MIX_2[(s0 >>> 8) & 0xff] ^
-                     INV_SUB_MIX_3[s1 & 0xff] ^
-                     invKeySchedule[ksRow++];
-            var t3 = INV_SUB_MIX_0[(s3 >>> 24) & 0xff] ^
-                     INV_SUB_MIX_1[(s0 >>> 16) & 0xff] ^
-                     INV_SUB_MIX_2[(s1 >>> 8) & 0xff] ^
-                     INV_SUB_MIX_3[s2 & 0xff] ^
-                     invKeySchedule[ksRow++];
-            s0 = t0; s1 = t1; s2 = t2; s3 = t3;
-        }
-
-        // final round
-        var f0 = ((INV_SBOX[(s0 >>> 24) & 0xff] << 24) |
-                  (INV_SBOX[(s1 >>> 16) & 0xff] << 16) |
-                  (INV_SBOX[(s2 >>> 8) & 0xff] << 8) |
-                  INV_SBOX[s3 & 0xff]) ^ invKeySchedule[ksRow++];
-        var f1 = ((INV_SBOX[(s1 >>> 24) & 0xff] << 24) |
-                  (INV_SBOX[(s2 >>> 16) & 0xff] << 16) |
-                  (INV_SBOX[(s3 >>> 8) & 0xff] << 8) |
-                  INV_SBOX[s0 & 0xff]) ^ invKeySchedule[ksRow++];
-        var f2 = ((INV_SBOX[(s2 >>> 24) & 0xff] << 24) |
-                  (INV_SBOX[(s3 >>> 16) & 0xff] << 16) |
-                  (INV_SBOX[(s0 >>> 8) & 0xff] << 8) |
-                  INV_SBOX[s1 & 0xff]) ^ invKeySchedule[ksRow++];
-        var f3 = ((INV_SBOX[(s3 >>> 24) & 0xff] << 24) |
-                  (INV_SBOX[(s0 >>> 16) & 0xff] << 16) |
-                  (INV_SBOX[(s1 >>> 8) & 0xff] << 8) |
-                  INV_SBOX[s2 & 0xff]) ^ invKeySchedule[ksRow++];
-
-        words[offset]     = f0 | 0;
-        words[offset + 1] = f3 | 0;
-        words[offset + 2] = f2 | 0;
-        words[offset + 3] = f1 | 0;
-    }
-
-    // CBC 解密 + PKCS7 strip
-    function aesCbcDecrypt(ciphertextWA, keyWA, ivWA) {
-        // keyWA.sigBytes 必须是 16/24/32
-        var keySize = keyWA.sigBytes / 4;
-        if (keySize !== 4 && keySize !== 6 && keySize !== 8) {
-            throw new Error('AES key length must be 16/24/32 bytes');
-        }
-        var ks = aesKeySchedule(keyWA.words, keySize);
-
-        var inWords = ciphertextWA.words.slice(0);
-        var sigBytes = ciphertextWA.sigBytes;
-        if (sigBytes % 16) throw new Error('ciphertext not block-aligned');
-        var nBlocks = sigBytes / 16;
-
-        var prevIv = [ivWA.words[0] | 0, ivWA.words[1] | 0, ivWA.words[2] | 0, ivWA.words[3] | 0];
-
-        var outWords = [];
-        for (var b = 0; b < nBlocks; b++) {
-            var off = b * 4;
-            var c0 = inWords[off] | 0, c1 = inWords[off + 1] | 0, c2 = inWords[off + 2] | 0, c3 = inWords[off + 3] | 0;
-            // decrypt block in place into a temp
-            var blk = [c0, c1, c2, c3];
-            aesDecryptBlock(blk, 0, ks);
-            outWords[off]     = blk[0] ^ prevIv[0];
-            outWords[off + 1] = blk[1] ^ prevIv[1];
-            outWords[off + 2] = blk[2] ^ prevIv[2];
-            outWords[off + 3] = blk[3] ^ prevIv[3];
-            prevIv = [c0, c1, c2, c3];
-        }
-
-        // PKCS7 strip
-        var rawWA = WordArray.create(outWords, sigBytes);
-        var lastByte = (rawWA.words[(sigBytes - 1) >>> 2] >>> (24 - ((sigBytes - 1) % 4) * 8)) & 0xff;
-        if (lastByte === 0 || lastByte > 16) {
-            throw new Error('Invalid PKCS7 padding (password may be incorrect)');
-        }
-        rawWA.sigBytes = sigBytes - lastByte;
-        rawWA.clamp();
-        return rawWA;
-    }
-
-    // ---- OpenSSL EVP_BytesToKey + AES.decrypt(b64String, password) -----
-    //
-    // 输入 base64 字符串（"Salted__" + 8B salt + ciphertext）+ password 字符串
-    // 输出 plaintext WordArray，可 .toString(C.enc.Utf8)
-
-    function evpBytesToKey(passwordBytes, saltBytes, keyLen, ivLen) {
-        // MD5(password || salt) 反复迭代，concat 到长度足够
-        var totalLen = keyLen + ivLen;
-        var derived = [];
-        var lastBlock = null;
-        while (derived.length < totalLen) {
-            var input;
-            if (lastBlock) {
-                input = lastBlock.concat(passwordBytes).concat(saltBytes);
-            } else {
-                input = passwordBytes.concat(saltBytes);
-            }
-            // 使用 byte 数组 → 转 WordArray → MD5
-            var bytesToWA = bytesToWordArray(input);
-            var md5wa = md5Of(bytesToWA);
-            lastBlock = wordArrayToBytes(md5wa);
-            for (var i = 0; i < lastBlock.length; i++) {
-                derived.push(lastBlock[i]);
-            }
-        }
-        var keyBytes = derived.slice(0, keyLen);
-        var ivBytes = derived.slice(keyLen, keyLen + ivLen);
-        return { key: keyBytes, iv: ivBytes };
-    }
-
-    function bytesToWordArray(bytes) {
-        var words = [];
-        for (var i = 0; i < bytes.length; i++) {
-            words[i >>> 2] |= (bytes[i] & 0xff) << (24 - (i % 4) * 8);
-        }
-        return WordArray.create(words, bytes.length);
-    }
-    function wordArrayToBytes(wa) {
-        var out = [];
-        for (var i = 0; i < wa.sigBytes; i++) {
-            out.push((wa.words[i >>> 2] >>> (24 - (i % 4) * 8)) & 0xff);
-        }
-        return out;
-    }
-    function strToBytes(s) {
-        // 与 OpenSSL/CryptoJS 行为一致：UTF-8 编码后再当字节
-        var utf = unescape(encodeURIComponent(s));
-        var out = [];
-        for (var i = 0; i < utf.length; i++) out.push(utf.charCodeAt(i) & 0xff);
-        return out;
-    }
-
-    C.AES = {
-        // 参数：base64 ciphertext 字符串（含 Salted__ 前缀）+ password 字符串
-        decrypt: function (base64Ciphertext, password) {
-            var raw = wordArrayToBytes(C_enc.Base64.parse(base64Ciphertext));
-            if (raw.length < 17 || (raw.length % 16) !== 0) {
-                throw new Error('Invalid ciphertext length');
-            }
-            // Salted__ 前缀检查
-            var sig = String.fromCharCode(raw[0], raw[1], raw[2], raw[3], raw[4], raw[5], raw[6], raw[7]);
-            if (sig !== 'Salted__') {
-                throw new Error('Missing Salted__ header');
-            }
-            var salt = raw.slice(8, 16);
-            var ciphertext = raw.slice(16);
-
-            var derived = evpBytesToKey(strToBytes(password), salt, 32, 16);
-            var keyWA = bytesToWordArray(derived.key);
-            var ivWA = bytesToWordArray(derived.iv);
-            var cipherWA = bytesToWordArray(ciphertext);
-
-            var plainWA = aesCbcDecrypt(cipherWA, keyWA, ivWA);
-            // 让 .toString(C.enc.Utf8) 工作
-            plainWA.toString = function (encoder) {
-                if (!encoder) encoder = C_enc.Hex;
-                return encoder.stringify(plainWA);
-            };
-            return plainWA;
-        }
-    };
-
-    C.enc = C_enc;
-    return C;
-})();
-
-// ====== 业务工具 ======================================================
-
-function isString(v) { return typeof v === 'string'; }
-function nonEmpty(v) { return isString(v) && v.length > 0; }
-
-function safeJsonParse(raw, fallback) {
-    if (raw === null || raw === undefined || raw === '') return fallback;
-    try {
-        return JSON.parse(raw);
-    } catch (e) {
-        return null;
-    }
+// Cookie 归一化契约（与宿主 getCookieMeta / douban.getCookie 的 sha256 同一规则，照抄 sdk.md 参考实现）
+function normalizeCookie(s) {
+  var parts = String(s).split(";");
+  var out = [];
+  for (var i = 0; i < parts.length; i++) {
+    var p = parts[i].replace(/^[ \t\n\r]+|[ \t\n\r]+$/g, "");
+    if (p !== "") out.push(p);
+  }
+  out.sort(compareCodePoints);
+  return out.join("; ");
 }
 
-function getStatus() {
-    return {
-        configured: nonEmpty(config.get('host')) &&
-                    nonEmpty(config.get('cloud_uuid')) &&
-                    nonEmpty(config.get('cloud_pwd')),
-        host: config.get('host') || '',
-        site_map: config.get('site_map') || '',
-        last_synced_at: config.get('last_synced_at') || '',
-        last_error: config.get('last_error') || '',
-        synced_count: parseInt(config.get('synced_count') || '0', 10) || 0,
-        hostkv_available: typeof hostkv === 'object' && hostkv && typeof hostkv.setSiteCookie === 'function'
-    };
+// 按 Unicode 码点比较（== UTF-8 字节序）。不能用默认 sort()：它按 UTF-16 码元比较，
+// 对 BMP 之外的字符（emoji 等）与 U+E000–U+FFFF 之间的顺序和宿主不一致。
+function compareCodePoints(a, b) {
+  var i = 0, j = 0;
+  while (i < a.length && j < b.length) {
+    var ca = a.codePointAt(i), cb = b.codePointAt(j);
+    if (ca !== cb) return ca < cb ? -1 : 1;
+    i += ca > 0xffff ? 2 : 1;
+    j += cb > 0xffff ? 2 : 1;
+  }
+  return (a.length - i) - (b.length - j);
 }
 
-function rememberError(msg) {
-    try {
-        config.set('last_error', String(msg || ''));
-    } catch (e) { /* ignore */ }
+// UTF-8 解码（沙箱没有 TextDecoder；照抄 dev-guide「UTF-8 编解码」的参考实现）。
+// 逐字节循环 + `+=` 拼接在 goja 里是平方级的（1.3 MB 要几分钟），这里全交给内置函数：
+// 每 8192 字节一块 String.fromCharCode.apply 成「字节串」，join 后 escape → decodeURIComponent
+// 完成真正的 UTF-8 解码。非法 UTF-8 序列 → decodeURIComponent 抛 URIError。
+function decodeUtf8(u8) {
+  var parts = [];
+  for (var i = 0; i < u8.length; i += 8192) {
+    parts.push(String.fromCharCode.apply(null, u8.subarray(i, i + 8192)));
+  }
+  return decodeURIComponent(escape(parts.join("")));
 }
 
-function clearError() {
-    try { config.set('last_error', ''); } catch (e) { /* ignore */ }
+// 字节开头是否为给定 ASCII 串（按字节比，不做 UTF-8 解码——密文是随机字节）
+function bytesStartWith(u8, ascii) {
+  if (u8.length < ascii.length) return false;
+  for (var i = 0; i < ascii.length; i++) {
+    if (u8[i] !== ascii.charCodeAt(i)) return false;
+  }
+  return true;
 }
 
-function bumpSyncedCount() {
-    var n = parseInt(config.get('synced_count') || '0', 10);
-    if (isNaN(n)) n = 0;
-    try { config.set('synced_count', String(n + 1)); } catch (e) { /* ignore */ }
+// 纯 ASCII 字符串 → 字节（aes-128-cbc-fixed 的密钥是 16 个十六进制字符本身的字节）
+function asciiBytes(s) {
+  var out = new Uint8Array(s.length);
+  for (var i = 0; i < s.length; i++) out[i] = s.charCodeAt(i) & 0xff;
+  return out;
 }
 
-// ====== 主流程：syncOnce ==============================================
-
-async function syncOnce() {
-    var host = config.get('host');
-    var uuid = config.get('cloud_uuid');
-    var pwd  = config.get('cloud_pwd');
-    var siteMapRaw = config.get('site_map') || '{}';
-
-    if (!nonEmpty(host) || !nonEmpty(uuid) || !nonEmpty(pwd)) {
-        return { ok: false, error: 'missing config: host/cloud_uuid/cloud_pwd' };
-    }
-
-    var siteMap = safeJsonParse(siteMapRaw, {});
-    if (siteMap === null || typeof siteMap !== 'object') {
-        return { ok: false, error: 'site_map JSON invalid' };
-    }
-
-    // 拼 URL：host 可能带 / 后缀
-    var url = host.replace(/\/+$/, '') + '/get/' + encodeURIComponent(uuid);
-
-    var resp;
-    try {
-        resp = await http.get(url, { 'Accept': 'application/json' });
-    } catch (e) {
-        return { ok: false, error: 'http get failed: ' + (e && e.message ? e.message : e) };
-    }
-
-    if (!resp || typeof resp.status !== 'number') {
-        return { ok: false, error: 'http get returned malformed response' };
-    }
-    if (resp.status !== 200) {
-        return { ok: false, error: 'server returned status ' + resp.status };
-    }
-
-    var payload = safeJsonParse(resp.body, null);
-    if (!payload || typeof payload !== 'object' || !nonEmpty(payload.encrypted)) {
-        return { ok: false, error: 'server response missing encrypted field' };
-    }
-
-    // 派生 password = MD5(uuid + "-" + pwd) hex 前 16 位
-    var derivedPwd;
-    try {
-        derivedPwd = CryptoJS.MD5(uuid + '-' + pwd).toString().substring(0, 16);
-    } catch (e) {
-        return { ok: false, error: 'md5 derive failed: ' + (e && e.message ? e.message : e) };
-    }
-
-    var plaintext;
-    try {
-        var wa = CryptoJS.AES.decrypt(payload.encrypted, derivedPwd);
-        plaintext = wa.toString(CryptoJS.enc.Utf8);
-    } catch (e) {
-        return { ok: false, error: 'decrypt failed: ' + (e && e.message ? e.message : e) };
-    }
-
-    var data = safeJsonParse(plaintext, null);
-    if (!data || typeof data !== 'object' || !data.cookie_data || typeof data.cookie_data !== 'object') {
-        return { ok: false, error: 'decrypted payload missing cookie_data' };
-    }
-
-    // 把每个 domain 的 cookies 拼成 "k=v; k2=v2; ..." 写到 host KV
-    var hostkvAvailable = (typeof hostkv === 'object' && hostkv && typeof hostkv.setSiteCookie === 'function');
-    var written = 0;
-    var skipped = 0;
-    var domainsMissing = [];
-
-    for (var domain in siteMap) {
-        if (!siteMap.hasOwnProperty(domain)) continue;
-        var siteID = siteMap[domain];
-        if (!nonEmpty(siteID)) { skipped++; continue; }
-
-        var cookies = data.cookie_data[domain];
-        if (!cookies || cookies.length === 0) {
-            domainsMissing.push(domain);
-            skipped++;
-            continue;
-        }
-
-        var parts = [];
-        for (var i = 0; i < cookies.length; i++) {
-            var ck = cookies[i];
-            if (ck && nonEmpty(ck.name)) {
-                parts.push(ck.name + '=' + (ck.value || ''));
-            }
-        }
-        var cookieStr = parts.join('; ');
-
-        if (hostkvAvailable) {
-            try {
-                hostkv.setSiteCookie(siteID, cookieStr);
-                written++;
-            } catch (e) {
-                log.warn('hostkv.setSiteCookie failed for site_id=' + siteID + ': ' + (e && e.message ? e.message : e));
-                skipped++;
-            }
-        } else {
-            // host 暂未注入 facade（预期 v1 主仓 PR 提供）：dry-run，仅日志
-            log.warn('hostkv facade unavailable; dry-run for site_id=' + siteID + ' cookies_len=' + cookieStr.length);
-            skipped++;
-        }
-    }
-
-    try { config.set('last_synced_at', new Date().toISOString()); } catch (e) { /* ignore */ }
-    clearError();
-    bumpSyncedCount();
-
-    return {
-        ok: true,
-        written: written,
-        skipped: skipped,
-        domains_missing: domainsMissing,
-        hostkv_available: hostkvAvailable
-    };
+function errText(e) {
+  if (e && e.message) return String(e.message);
+  return String(e);
 }
 
-// ====== 自检：CryptoJS-mini test vector =================================
-//
-// 不依赖外部网络。固定 password / plaintext，加密结果由参考实现
-// （crypto-js@4.2.0 + 同 password "secret"）预先算好；这里仅校验解密能还原原文。
-
-function testDecrypt() {
-    var checks = [];
-
-    // 1. MD5 known vector: MD5("hello") = 5d41402abc4b2a76b9719d911017c592
-    var md5Hex = CryptoJS.MD5('hello').toString();
-    checks.push({
-        name: 'md5(hello)',
-        ok: md5Hex === '5d41402abc4b2a76b9719d911017c592',
-        got: md5Hex
-    });
-
-    // 2. AES decrypt round-trip: 这个向量由参考 crypto-js@4.2.0 预先生成
-    //    plaintext = "hello world"
-    //    password = "secret"
-    //    CryptoJS.AES.encrypt("hello world", "secret").toString()
-    //    → 一个固定 base64（含 Salted__）。下面值由参考实现产出。
-    var b64 = 'U2FsdGVkX1+vupppZksvRZ6ekvz9IexIvTRvnfa4lCc=';
-    var plain = '';
-    var aesOk = false;
-    try {
-        var wa = CryptoJS.AES.decrypt(b64, 'secret');
-        plain = wa.toString(CryptoJS.enc.Utf8);
-        aesOk = (plain === 'hello world');
-    } catch (e) {
-        plain = 'error: ' + (e && e.message ? e.message : e);
-    }
-    checks.push({ name: 'aes decrypt(hello world)', ok: aesOk, got: plain });
-
-    var allOk = true;
-    for (var i = 0; i < checks.length; i++) if (!checks[i].ok) { allOk = false; break; }
-
-    return { ok: allOk, checks: checks };
+function trimStr(v) {
+  return v === null || v === undefined ? "" : String(v).replace(/^\s+|\s+$/g, "");
 }
 
-// ====== API 注册 =======================================================
+// sync_interval_min：非负整数分钟；空 / 0 / 非法 = 不自动同步
+function parseIntervalMin(v) {
+  var s = trimStr(v);
+  if (!/^\d+$/.test(s)) return 0;
+  return parseInt(s, 10);
+}
 
-plugin.registerAPI('/sync', async function (req) {
-    var result;
-    try {
-        result = await syncOnce();
-    } catch (e) {
-        result = { ok: false, error: 'sync exception: ' + (e && e.message ? e.message : e) };
+// sites：PT 站行 id 的 JSON 数组；空 = 没勾选。非法 → 抛错（让用户看到，而不是静默当成没勾）
+function parseSelectedSites(raw) {
+  var s = trimStr(raw);
+  if (s === "") return [];
+  var v;
+  try { v = JSON.parse(s); } catch (e) { throw new Error("配置 sites 不是合法的 JSON 数组"); }
+  if (!Array.isArray(v)) throw new Error("配置 sites 不是 JSON 数组");
+  var out = [], seen = {};
+  for (var i = 0; i < v.length; i++) {
+    var id = typeof v[i] === "string" ? v[i] : "";
+    if (id === "" || seen[id]) continue;
+    seen[id] = true;
+    out.push(id);
+  }
+  return out;
+}
+
+// cookie_data 的分组 key 取决于扩展设置（关键词 / 原始域名），同一条 cookie 可能出现在多组——不看 key，
+// 全部展平，交给 buildCookieHeader 按 cookie 自己的 domain 匹配 + 去重
+function flattenCookies(cookieData) {
+  var out = [];
+  if (!cookieData || typeof cookieData !== "object") return out;
+  var keys = Object.keys(cookieData);
+  for (var i = 0; i < keys.length; i++) {
+    var group = cookieData[keys[i]];
+    if (!Array.isArray(group)) continue;
+    for (var j = 0; j < group.length; j++) {
+      var c = group[j];
+      if (!c || typeof c !== "object" || typeof c.name !== "string" || typeof c.domain !== "string") continue;
+      if (c.value === undefined || c.value === null) continue;
+      out.push(c);
     }
-    if (!result.ok) {
-        rememberError(result.error);
-        log.error('cookiecloud sync failed: ' + result.error);
+  }
+  return out;
+}
+
+// 浏览器规则：d = domain 去掉前导点；host === d 必中；否则 host 以 "." + d 结尾即中——
+// 除非浏览器标了 hostOnly（没带 Domain 属性的 cookie 只发回设置它的那个主机，不跨子域）
+function cookieMatchesHost(c, host) {
+  var d = String(c.domain).toLowerCase();
+  if (d.charAt(0) === ".") d = d.substring(1);
+  if (d === "") return false;
+  host = String(host).toLowerCase();
+  if (host === d) return true;
+  if (c.hostOnly === true) return false;
+  return host.length > d.length + 1 && host.substring(host.length - d.length - 1) === "." + d;
+}
+
+function cookieExpired(c, nowSec) {
+  return typeof c.expirationDate === "number" && c.expirationDate < nowSec;
+}
+
+// 把能发给 hosts 里任一主机的 cookie 拼成 "name=value; ..."：跳过已过期的，按 (name, domain, path) 去重，
+// 保持首次出现顺序
+function buildCookieHeader(cookies, hosts, nowSec) {
+  var seen = Object.create(null);
+  var parts = [];
+  for (var i = 0; i < cookies.length; i++) {
+    var c = cookies[i];
+    if (cookieExpired(c, nowSec)) continue;
+    var hit = false;
+    for (var h = 0; h < hosts.length; h++) {
+      if (cookieMatchesHost(c, hosts[h])) { hit = true; break; }
+    }
+    if (!hit) continue;
+    var key = c.name + "\u0000" + String(c.domain).toLowerCase() + "\u0000" + (c.path || "");
+    if (seen[key]) continue;
+    seen[key] = true;
+    var value = String(c.value);
+    parts.push(c.name === "" ? value : c.name + "=" + value);
+  }
+  return { header: parts.join("; "), count: parts.length };
+}
+
+// 解密 /get/<uuid> 返回的 {encrypted, crypto_type}。两种都是 CookieCloud 浏览器扩展的官方算法：
+//   legacy：base64 → "Salted__" + 8B salt + 密文 → EVP_BytesToKey(md5(uuid-pwd) 前 16 字符, salt) → AES-256-CBC
+//   aes-128-cbc-fixed：密钥 = md5(uuid-pwd) 前 16 个字符的字节（AES-128），IV = 16 个 0，base64 解出来直接是密文
+// 服务端没返回 crypto_type（老版本服务端）时按密文判断：以 "Salted__" 开头是 legacy，否则是 aes-128-cbc-fixed。
+function decryptPayload(payload, uuid, pwd) {
+  var raw;
+  try {
+    raw = crypto.base64Decode(String(payload.encrypted));
+  } catch (e) {
+    throw new Error("解密失败，密文不是合法的 base64（" + errText(e) + "）");
+  }
+  var type = payload.crypto_type ? String(payload.crypto_type) : (bytesStartWith(raw, "Salted__") ? "legacy" : "aes-128-cbc-fixed");
+  if (type !== "legacy" && type !== "aes-128-cbc-fixed") {
+    throw new Error("不支持的加密方式 " + type);
+  }
+  var pass = crypto.md5(uuid + "-" + pwd).substring(0, 16);
+  var plain;
+  try {
+    if (type === "legacy") {
+      if (raw.length < 32 || !bytesStartWith(raw, "Salted__")) {
+        throw new Error("密文不是 CryptoJS 的 Salted__ 格式（扩展里选的加密方式和服务端记录的不一致？）");
+      }
+      var kv = crypto.evpBytesToKey(pass, raw.subarray(8, 16), 32, 16);
+      plain = crypto.aesDecryptCBC(kv.key, kv.iv, raw.subarray(16));
     } else {
-        log.info('cookiecloud sync ok: written=' + result.written + ' skipped=' + result.skipped);
+      plain = crypto.aesDecryptCBC(asciiBytes(pass), new Uint8Array(16), raw);
     }
-    return result;
+  } catch (e) {
+    throw new Error("解密失败，UUID 或密码不对（" + errText(e) + "）");
+  }
+  var text;
+  try { text = decodeUtf8(plain); } catch (e) {
+    throw new Error("解密失败，UUID 或密码不对（解密结果不是合法的 UTF-8）");
+  }
+  var data;
+  try { data = JSON.parse(text); } catch (e) {
+    throw new Error("解密结果不是 JSON，UUID 或密码不对");
+  }
+  if (!data || typeof data !== "object" || !data.cookie_data || typeof data.cookie_data !== "object") {
+    throw new Error("解密后的数据里没有 cookie_data");
+  }
+  return data;
+}
+
+// ─── 每站结果 ────────────────────────────────────────────────────────────────
+
+var STATUS_TEXT = {
+  written: "已写入",
+  unchanged: "cookie 没变，跳过写入",
+  no_rss: "该站没配 RSS，无法匹配（先在 PT 站设置里填好 RSS 链接）",
+  no_cookie: "CookieCloud 里没有该站的 cookie（检查浏览器扩展的同步设置）",
+  site_missing: "站点已删除，已跳过（可在设置里取消勾选）",
+  not_cookie_site: "该站不是 Cookie 鉴权，不同步（已跳过）",
+  failed: "写入失败",
+};
+
+var VALIDATION_TEXT = {
+  ok: "验活通过",
+  cookie_invalid: "但豆瓣认为这份 Cookie 未登录或已失效",
+  rate_limited: "豆瓣通道忙，没来得及验活（已写入，稍后可在豆瓣设置里再验）",
+  unreachable: "连不上豆瓣，没能验活（网络 / 代理）",
+};
+
+function setStatus(r, status, detail) {
+  r.status = status;
+  var msg = STATUS_TEXT[status] || status;
+  if (status === "written" && r.cookies) msg += "（" + r.cookies + " 条 cookie）";
+  if (status === "written" && r.validation) msg += "，" + (VALIDATION_TEXT[r.validation] || ("验活结果 " + r.validation));
+  if (detail) msg += "：" + detail;
+  r.message = msg;
+}
+
+// ─── 同步 ────────────────────────────────────────────────────────────────────
+
+var state = {
+  running: false,
+  started_at: null,
+  finished_at: null,
+  last_trigger: null, // "manual" | "timer"
+  results: [],
+};
+
+// 去掉文本里 URL 的账号密码（http://user:pass@host → http://host）：地址里可以带 Basic 认证，
+// 出错时宿主的错误文案会原样带上 URL，不能让它进 last_error / 日志。
+// 账号密码的范围 =「://」之后、第一个「/」之前的**最后一个** @ 为止：密码里可能有 ? # 空格甚至 @（宁可多删，
+// 不能漏删）；路径里的 @ 不动
+function stripUrlUserinfo(s) {
+  return String(s).replace(/([a-z][a-z0-9+.\-]*:\/\/)[^\/]*@/gi, "$1");
+}
+
+async function fetchPayload(host, uuid) {
+  var url = host + "/get/" + encodeURIComponent(uuid);
+  var redact = function (s) {
+    return stripUrlUserinfo(String(s).split(encodeURIComponent(uuid)).join("<UUID>").split(uuid).join("<UUID>"));
+  };
+  var resp;
+  try {
+    resp = await http.get(url, { "Accept": "application/json" });
+  } catch (e) {
+    throw new Error("连不上 CookieCloud：" + redact(errText(e)));
+  }
+  if (resp.status === 404) {
+    throw new Error("CookieCloud 返回 404：找不到这个 UUID 的数据（UUID 填错了，或浏览器扩展还没上传过）；" +
+      "也可能是地址少了服务端的路径前缀——服务端设置了 API_ROOT 时，地址要带上这个前缀（例如 https://cc.example.com/cookie）");
+  }
+  if (resp.status === 429) throw new Error("CookieCloud 限流了（官方服务端同一 IP 15 分钟最多 100 次），稍后再试或调大同步间隔");
+  if (resp.status !== 200) throw new Error("CookieCloud 返回 HTTP " + resp.status);
+  if (resp.truncated) throw new Error("CookieCloud 返回的数据超过 5 MiB，被截断了");
+  var payload;
+  try { payload = JSON.parse(resp.body); } catch (e) {
+    throw new Error("CookieCloud 返回的不是 JSON（地址填的是 CookieCloud 服务端的根地址吗？）");
+  }
+  if (!payload || typeof payload.encrypted !== "string" || payload.encrypted === "") {
+    throw new Error("CookieCloud 返回里没有密文（encrypted）");
+  }
+  return payload;
+}
+
+// 发出一次写：成功 / 失败都记进 r，永不 reject（错误按站收集，不影响其它站）
+function settleWrite(r, promiseFn, onOk) {
+  var p;
+  try { p = promiseFn(); } catch (e) { setStatus(r, "failed", errText(e)); return Promise.resolve(); }
+  return p.then(function (res) {
+    if (onOk) onOk(res);
+    setStatus(r, "written");
+  }, function (e) {
+    setStatus(r, "failed", errText(e));
+  });
+}
+
+async function runSync() {
+  var host = trimStr(config.get("host")).replace(/\/+$/, "");
+  var uuid = trimStr(config.get("cloud_uuid"));
+  var pwd = config.get("cloud_pwd") || "";
+  var missing = [];
+  if (!host) missing.push("CookieCloud 地址");
+  if (!uuid) missing.push("UUID");
+  if (!pwd) missing.push("密码");
+  if (missing.length) throw new Error("还没配置：" + missing.join("、"));
+  if (!/^https?:\/\/[^\/]/i.test(host)) throw new Error("CookieCloud 地址要以 http:// 或 https:// 开头");
+  var siteIds = parseSelectedSites(config.get("sites"));
+  var syncDouban = config.get("sync_douban") === "true";
+
+  // 1. 拉密文（数据依赖，必须在所有写之前）→ 2. 本地解密
+  var payload = await fetchPayload(host, uuid);
+  var data = decryptPayload(payload, uuid, pwd);
+  var cookies = flattenCookies(data.cookie_data);
+  var nowSec = Date.now() / 1000;
+
+  // 3. 逐站判定；要写的并发发出
+  var results = [];
+  var jobs = [];
+  siteIds.forEach(function (id) {
+    var site = ptsite.get(id);
+    var r = { target: id, kind: "ptsite", name: site ? site.name : id };
+    results.push(r);
+    if (!site) return setStatus(r, "site_missing");
+    if (site.auth_kind !== "cookie") return setStatus(r, "not_cookie_site");
+    var hosts = site.hosts || [];
+    r.hosts = hosts;
+    if (hosts.length === 0) return setStatus(r, "no_rss");
+    var ck = buildCookieHeader(cookies, hosts, nowSec);
+    if (ck.count === 0) return setStatus(r, "no_cookie");
+    r.cookies = ck.count;
+    var meta = ptsite.getCookieMeta(id);
+    if (meta && meta.configured && meta.sha256 === crypto.sha256(normalizeCookie(ck.header))) {
+      return setStatus(r, "unchanged");
+    }
+    jobs.push(settleWrite(r, function () { return ptsite.setCookie(id, ck.header); }));
+  });
+
+  if (syncDouban) {
+    var dr = { target: "douban", kind: "douban", name: "豆瓣", hosts: [DOUBAN_HOST] };
+    results.push(dr);
+    var dck = buildCookieHeader(cookies, [DOUBAN_HOST], nowSec);
+    if (dck.count === 0) {
+      setStatus(dr, "no_cookie");
+    } else {
+      dr.cookies = dck.count;
+      var dmeta = douban.getCookie();
+      if (dmeta && dmeta.configured && dmeta.sha256 === crypto.sha256(normalizeCookie(dck.header))) {
+        setStatus(dr, "unchanged");
+      } else {
+        jobs.push(settleWrite(dr, function () { return douban.setCookie(dck.header, { validate: true }); },
+          function (res) { dr.validation = (res && res.validation) || ""; }));
+      }
+    }
+  }
+
+  await Promise.all(jobs); // 总耗时 ≈ 最慢一枪（豆瓣验活 ≤ 8s）
+  return results;
+}
+
+function nowISO() {
+  return new Date().toISOString();
+}
+
+function safeSet(key, value) {
+  try { config.set(key, value); } catch (e) { log.warn("写配置 " + key + " 失败：" + errText(e)); }
+}
+
+async function syncTask(trigger) {
+  try {
+    var results = await runSync();
+    state.results = results;
+    var failed = results.filter(function (r) { return r.status === "failed"; });
+    var written = results.filter(function (r) { return r.status === "written"; });
+    safeSet("last_synced_at", nowISO());
+    safeSet("last_error", failed.map(function (r) { return r.name + "：" + r.message; }).join("；"));
+    safeSet("synced_count", String((parseInt(config.get("synced_count") || "0", 10) || 0) + 1));
+    var summary = "同步完成：写入 " + written.length + " 个，失败 " + failed.length + " 个，共 " + results.length + " 个目标";
+    if (failed.length) log.warn(summary + "；" + config.get("last_error"));
+    else log.info(summary);
+  } catch (e) {
+    state.results = [];
+    var msg = errText(e);
+    safeSet("last_error", msg);
+    log.error("同步失败：" + msg);
+  } finally {
+    state.running = false;
+    state.finished_at = nowISO();
+  }
+}
+
+// 唯一入口：已在跑就跳过；否则起一次同步并立即返回（不等结果）
+function startSync(trigger) {
+  if (state.running) {
+    log.info("已有同步在进行，跳过这次" + (trigger === "timer" ? "定时" : "手动") + "触发");
+    return { started: false, reason: "already_running" };
+  }
+  state.running = true;
+  state.started_at = nowISO();
+  state.finished_at = null;
+  state.last_trigger = trigger;
+  log.info("开始同步（" + (trigger === "timer" ? "定时" : "手动") + "）");
+  syncTask(trigger);
+  return { started: true };
+}
+
+// ─── 定时 ────────────────────────────────────────────────────────────────────
+
+var schedule = { timer: null, intervalMin: 0, nextRunAt: null };
+
+// 按配置 sync_interval_min 重排：间隔没变就不动（别把下一次往后推）；0 / 空 = 关。
+// 启动时也走这里：不立刻同步，等满一个周期。
+function reschedule() {
+  var min = parseIntervalMin(config.get("sync_interval_min"));
+  if (schedule.timer !== null && min === schedule.intervalMin) return;
+  if (schedule.timer !== null) {
+    clearInterval(schedule.timer);
+    schedule.timer = null;
+  }
+  schedule.intervalMin = min;
+  schedule.nextRunAt = null;
+  if (min <= 0) return;
+  var ms = Math.min(min * 60000, MAX_TIMER_MS);
+  schedule.nextRunAt = new Date(Date.now() + ms).toISOString();
+  schedule.timer = setInterval(function () {
+    schedule.nextRunAt = new Date(Date.now() + ms).toISOString();
+    startSync("timer");
+  }, ms);
+  log.info("自动同步：每 " + min + " 分钟一次，下次 " + schedule.nextRunAt);
+}
+
+function statusView() {
+  return {
+    running: state.running,
+    started_at: state.started_at,
+    finished_at: state.finished_at,
+    last_synced_at: config.get("last_synced_at"),
+    last_trigger: state.last_trigger,
+    results: state.results,
+    last_error: config.get("last_error") || "",
+    synced_count: parseInt(config.get("synced_count") || "0", 10) || 0,
+    interval_min: schedule.intervalMin,
+    next_run_at: schedule.nextRunAt,
+  };
+}
+
+// ─── API（给 ui/index.html 用）────────────────────────────────────────────────
+
+plugin.registerAPI("/status", function () {
+  return statusView();
 });
 
-plugin.registerAPI('/status', function (req) {
-    return getStatus();
+plugin.registerAPI("/sync", function () {
+  return startSync("manual");
 });
 
-plugin.registerAPI('/save-config', function (req) {
-    // req.body 是 string（JSON）或 object（依 host 实现而异）
-    var body = req && req.body;
-    var obj = null;
-    if (body && typeof body === 'object') {
-        obj = body;
-    } else if (isString(body) && body.length > 0) {
-        obj = safeJsonParse(body, null);
-    }
-    if (!obj || typeof obj !== 'object') {
-        return { ok: false, error: 'body must be a JSON object' };
-    }
-
-    var allowed = ['host', 'cloud_uuid', 'cloud_pwd', 'site_map'];
-    var written = [];
-    for (var i = 0; i < allowed.length; i++) {
-        var k = allowed[i];
-        if (Object.prototype.hasOwnProperty.call(obj, k)) {
-            var v = obj[k];
-            if (v === null || v === undefined) v = '';
-            if (typeof v !== 'string') v = String(v);
-            try {
-                config.set(k, v);
-                written.push(k);
-            } catch (e) {
-                return { ok: false, error: 'config.set failed for ' + k + ': ' + (e && e.message ? e.message : e), written: written };
-            }
-        }
-    }
-    return { ok: true, written: written };
+// 保存设置后调用：按新间隔立即重排
+plugin.registerAPI("/reschedule", function () {
+  reschedule();
+  return statusView();
 });
 
-plugin.registerAPI('/test-decrypt', function (req) {
-    try {
-        return testDecrypt();
-    } catch (e) {
-        return { ok: false, error: 'test-decrypt exception: ' + (e && e.message ? e.message : e) };
-    }
+// 可勾选的站 = auth_kind 为 cookie 的 PT 站（apikey / passkey 站不列）；已勾选但找不到的单列出来
+plugin.registerAPI("/sites", function () {
+  var sites = ptsite.list()
+    .filter(function (s) { return s.auth_kind === "cookie"; })
+    .map(function (s) {
+      return { id: s.id, name: s.name, adapter: s.adapter, enabled: s.enabled, has_cookie: s.has_cookie, hosts: s.hosts || [] };
+    });
+  var selected = [];
+  var sitesError = "";
+  try { selected = parseSelectedSites(config.get("sites")); } catch (e) { sitesError = errText(e); }
+  var known = {};
+  sites.forEach(function (s) { known[s.id] = true; });
+  var missing = selected.filter(function (id) { return !known[id]; }).map(function (id) {
+    var s = ptsite.get(id);
+    return { id: id, name: s ? s.name : "", reason: s ? "not_cookie_site" : "site_missing" };
+  });
+  return { sites: sites, selected: selected, missing: missing, sites_error: sitesError };
 });
 
-log.info('cookiecloud plugin loaded');
+reschedule();

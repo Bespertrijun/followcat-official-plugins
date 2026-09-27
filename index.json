@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated_at": "2026-05-12T00:00:00Z",
+  "updated_at": "2026-09-25T00:00:00Z",
   "entries": [
     {
       "name": "dashboard-stats",
@@ -8,7 +8,7 @@
       "author": "FollowCat",
       "description": "聚合追番大盘的快捷统计端点（headless，无 UI）",
       "source_url": "https://plugins.followcat.io/dashboard-stats",
-      "homepage_url": "https://github.com/followcat/plugin-registry/tree/main/plugins/dashboard-stats",
+      "homepage_url": "https://github.com/Bespertrijun/followcat-official-plugins/tree/main/plugins/dashboard-stats",
       "icon": "📊",
       "zip_url": "https://github.com/followcat/plugin-registry/releases/download/dashboard-stats-1.0.0/dashboard-stats-1.0.0.zip",
       "zip_size": 0,
@@ -23,7 +23,7 @@
       "author": "FollowCat",
       "description": "下载去重器：在 ruleflow 推种前拿种子 tags 与 Emby / Plex 库内副本按用户选定的维度+操作符逐副本比对，库内已有同规格副本则跳过下载（fail-open）",
       "source_url": "https://plugins.followcat.io/media-library-filter",
-      "homepage_url": "https://github.com/followcat/plugin-registry/tree/main/plugins/media-library-filter",
+      "homepage_url": "https://github.com/Bespertrijun/followcat-official-plugins/tree/main/plugins/media-library-filter",
       "icon": "🎬",
       "zip_url": "https://github.com/followcat/plugin-registry/releases/download/media-library-filter-0.1.0/media-library-filter-0.1.0.zip",
       "zip_size": 0,
@@ -33,6 +33,21 @@
         "should_download"
       ],
       "published_at": "2026-05-12T00:00:00Z"
+    },
+    {
+      "name": "cookiecloud",
+      "version": "1.0.0",
+      "author": "FollowCat",
+      "description": "从自建 CookieCloud 同步浏览器 cookie 到 PT 站凭据与豆瓣 Cookie：按 RSS 域名匹配，只写变了的，可定时自动同步",
+      "source_url": "https://plugins.followcat.io/cookiecloud",
+      "homepage_url": "https://github.com/Bespertrijun/followcat-official-plugins/tree/main/plugins/cookiecloud",
+      "icon": "🍪",
+      "zip_url": "https://github.com/followcat/plugin-registry/releases/download/cookiecloud-1.0.0/cookiecloud-1.0.0.zip",
+      "zip_size": 0,
+      "zip_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "permissions": ["api.http", "ui.embed", "api.ptsite.read", "api.ptsite.write", "api.douban.cookie.read", "api.douban.cookie.write"],
+      "hooks": [],
+      "published_at": "2026-09-25T00:00:00Z"
     }
   ]
 }

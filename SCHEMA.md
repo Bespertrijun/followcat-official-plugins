@@ -36,7 +36,7 @@
 |------|------|------|------|
 | `version` | `int` | ✅ | Schema 版本，M0 固定为 `1` |
 | `updated_at` | `string` | ✅ | RFC3339 时间戳，表示本次 index 更新时间 |
-| `entries` | `array` | ✅ | 插件条目列表，最多 500 条 |
+| `entries` | `array` | ✅ | 插件条目列表，最多 500 条；**一个插件（按 `name`）只能有一条**（见下） |
 
 ### entry 字段
 
@@ -55,6 +55,16 @@
 | `icon` | `string` | 可选 | emoji 或 HTTPS 图片 URL |
 | `zip_size` | `int64` | 可选 | 预估字节数（advisory），实际以 Content-Length 为准 |
 | `published_at` | `string` | 可选 | RFC3339 时间戳 |
+
+### 一个插件只能有一条 entry
+
+index 只描述每个插件**当前发布的那一个版本**：同一个 `name` 在 `entries` 里出现多次，FollowCat 解析这个源时**整个源失败**（与其它字段校验一样严格），报错点名重复的插件：
+
+```
+duplicate plugin "media-library-filter": entry[0] and entry[3] (a plugin may appear only once per index)
+```
+
+要发新版本就改那一条 entry 的 `version` / `zip_url` / `zip_sha256`，不要追加一条。本仓的 `python scripts/build.py --check` 也会检查根目录 `index.json` 有没有重复 entry（`[dup]`，失败）；CI 生成的 `dist/index.json` 本来就每个插件一条（取最新 tag）。
 
 ---
 
@@ -78,7 +88,7 @@ sha256sum notify-1.1.0.zip | awk '{print $1}'
 
 ## 发布流程（PR 模板）
 
-以 followcat/plugin-registry 为例：
+手工维护一个 registry 时的流程（本仓 `Bespertrijun/followcat-official-plugins` 不走这套：推 `<插件>/v<版本>` tag 后由 CI 自动打包、算 sha256、生成并发布 `index.json`，见根目录 README「发布新版本」）：
 
 1. **打包 zip**（zip 根目录直接是 `manifest.json` 和 `index.js`；带 UI 的插件请保留 `ui/` 子路径，不要用 `-j`）：
    ```bash

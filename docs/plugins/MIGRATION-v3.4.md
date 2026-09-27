@@ -44,11 +44,12 @@ function ensureRequiredConfig() {
 ### `data.*` — 加密 BLOB 存储（新）
 
 ```js
-// 写入 ArrayBuffer 或 Uint8Array（不能是 string，会抛 TypeError）
+// 写入 ArrayBuffer 或 Uint8Array（不能是 string，会抛 TypeError）。
+// encodeUtf8 在 goja 里约 1 秒 / MB（见 dev-guide「UTF-8 编解码」），MB 级数据要算进调用的墙钟
 var buf = encodeUtf8(JSON.stringify(largeObject)).buffer;
 data.put("cache.json", buf);
 
-// 读取（返回 ArrayBuffer 或 null）
+// 读取（返回字节数组——元素是 0–255 的数字，不是 ArrayBuffer——或 null）
 var back = data.get("cache.json");
 if (back) {
   var decoded = decodeUtf8(new Uint8Array(back));
@@ -70,8 +71,10 @@ data["delete"]("cache.json");
 **类型严格**：
 
 ```js
-data.put("x", "string");                       // ❌ TypeError: data.put requires ArrayBuffer or Uint8Array
+data.put("x", "string");                       // ❌ TypeError: data.put requires ArrayBuffer or Uint8Array, got string
 data.put("x", { foo: 1 });                     // ❌ TypeError
+data.put("x", [1, 2, 3]);                      // ❌ TypeError（数组字面量不行）
+data.put("x", data.get("y"));                  // ✅ data.get 拿到的字节数组可以原样写回
 data.put("x", new Uint8Array([1,2,3]));        // ✅
 data.put("x", new ArrayBuffer(8));             // ✅
 data.put("x", new Uint8Array([1,2,3]).buffer); // ✅
@@ -122,7 +125,9 @@ try {
 ```js
 // index.js（goja 侧，data.* 可用）
 plugin.registerAPI("/save-cover", function (req) {
-  data.put("cover.jpg", encodeUtf8(req.body).buffer); // req.body 是原始字节 string
+  // req.body 是请求体按 UTF-8 解出的字符串，不是原始字节：直接发二进制、再 encodeUtf8(req.body) 存，
+  // 数据会损坏（非法 UTF-8 字节在解码时变成 U+FFFD）。二进制一律让 UI 先 base64，这里还原：
+  data.put("cover.jpg", crypto.base64Decode(req.body));
   return { ok: true };
 });
 plugin.registerAPI("/list-blobs", function () {
@@ -135,7 +140,7 @@ plugin.registerAPI("/list-blobs", function () {
 <script src="/plugin-sdk.js"></script>
 <script>
 FC.ready().then(async function () {
-  await FC.api("/save-cover", "...");            // 写 blob
+  await FC.api("/save-cover", coverBase64);      // 写 blob（body 是 base64 字符串）
   const { names } = await FC.api("/list-blobs"); // 列 blob name
 });
 </script>
@@ -201,5 +206,5 @@ PUT /api/admin/settings
 ## 参考实现
 
 - [`sdk.md`「`data` —— 加密 blob 存储」](./sdk.md) 与 [dev-guide §4.5](./dev-guide.md) — `data.*` 用法与示例代码
-- [`cookiecloud/`](../../cookiecloud/) — iframe UI + 内嵌 CryptoJS + 自定义 API 的综合示例（v3.4 不需要改，原文档里的 `notify/` 已在 v3.5 移入主仓 `internal/notify`）
-- [`dashboard-stats/`](../../dashboard-stats/) — 现有 headless 插件（v3.4 不需要改）
+- [`plugins/cookiecloud/`](../../plugins/cookiecloud/) — iframe UI + 宿主 `crypto.*` 本地解密（不再内嵌 CryptoJS）+ `ptsite` / `douban` 凭据写入 + 定时器的综合示例（原文档里的 `notify/` 已在 v3.5 移入主仓 `internal/notify`）
+- [`plugins/dashboard-stats/`](../../plugins/dashboard-stats/) — 现有 headless 插件（v3.4 不需要改）

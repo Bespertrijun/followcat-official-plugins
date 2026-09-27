@@ -1,0 +1,3 @@
+{"name":"devrt-globals","version":"0.0.1","source_url":"https://example.com/devrt-globals",
+ "permissions":["api.http","api.ptsite.read","api.ptsite.write","api.douban.cookie.write","hook.download.write"],
+ "hooks":["should_download"]}

@@ -1,0 +1,2 @@
+{"name":"devrt-badperm","version":"0.0.1","source_url":"https://example.com/devrt-badperm",
+ "permissions":["api.http","hook.download","api.nope"],"hooks":[]}

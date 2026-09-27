@@ -1,189 +1,116 @@
-# cookiecloud —— FollowCat Cookie 同步插件
+# cookiecloud —— 把浏览器里的 cookie 同步给 FollowCat
 
-从自托管的 [CookieCloud](https://github.com/easychen/CookieCloud) 服务器定期拉取浏览器同步的 cookies，解密后按域名映射规则写入 PT 站凭据。
+[CookieCloud](https://github.com/easychen/CookieCloud) 是一个浏览器扩展 + 自建服务端：扩展把浏览器里的 cookie 加密后上传到你自己的服务端。本插件从这个服务端取回密文，在 FollowCat 本地解密，然后把对应站点的 cookie 写进：
 
-## 能力
+- **PT 站的 Cookie**（FollowCat「PT 站」设置里那一栏）
+- **豆瓣 Cookie**（可选）
 
-- ✅ 从 CookieCloud 服务器拉取加密的浏览器 cookie 数据
-- ✅ 使用 AES-256-CBC 解密（内嵌 CryptoJS）
-- ✅ 按配置的域名→site_id 映射规则分配 cookie
-- ✅ 写入 FollowCat 的 `site_cookie_<site_id>` 以供 PT 框架使用
-- ✅ 手动同步触发 + 外部 cron 自动化支持
-- ✅ 完整同步统计（最后同步时间、成功/失败次数、错误日志）
-- ✅ 敏感凭据自动加密存储（cloud_uuid、cloud_pwd）
+这样浏览器里重新登录过的站，FollowCat 不用你手动复制 cookie 也能跟上。
 
-## 安装
+## 前提
 
-1. 把 `manifest.json` + `index.js` + `ui/` 打包成 zip（zip 根直接包含这三项）
-2. 管理页 → 插件 → 上传 zip → 启用
+1. 自建好 CookieCloud 服务端，浏览器里装好 CookieCloud 扩展并能正常上传。
+2. FollowCat 里要同步的 PT 站**已经配好 RSS 链接**——插件是按 RSS 链接的域名去找 cookie 的（见下文「怎么匹配」）。
+3. FollowCat 版本需包含插件定时器与 `ptsite` 的 `hosts` 字段（2026-09-25 之后的宿主）。用 Tailscale 地址访问 CookieCloud 还需要宿主放行 `100.64.0.0/10`（同样是 2026-09-25 之后的宿主）。
 
-## 配置
+## 安装后要确认的权限
 
-在管理页插件详情页的「配置」区写入。**敏感字段必须勾选 `is_secret`**（cloud_uuid、cloud_pwd）。
+| 权限 | 用来做什么 |
+|------|-----------|
+| `api.http` ⚠️ | 访问你的 CookieCloud 服务端（只 GET 密文） |
+| `ui.embed` | 插件详情页里的设置页面 |
+| `api.ptsite.read` | 列出 PT 站、读 RSS 域名、读「已配置 cookie 的指纹」（读不到 cookie 明文） |
+| `api.ptsite.write` ⚠️ | 写 PT 站 Cookie |
+| `api.douban.cookie.read` | 读豆瓣 Cookie 的指纹，判断有没有变 |
+| `api.douban.cookie.write` ⚠️ | 写豆瓣 Cookie（写完自动验活） |
 
-| key | 是否必填 | 是否 secret | 说明 |
-|-----|---------|------------|------|
-| `host` | ✅ | 否 | CookieCloud 服务器根 URL（如 `https://cc.example.com`） |
-| `cloud_uuid` | ✅ | ✅ | CookieCloud 用户 UUID（解密密钥派生原料） |
-| `cloud_pwd` | ✅ | ✅ | CookieCloud 端到端密码（浏览器扩展中设置的密码） |
-| `site_map` | ✅ | 否 | JSON 字符串：`{"domain.com": "site_id", ...}` — 域名到 FollowCat site_id 的映射 |
-| `last_synced_at` | 否 | 否 | RFC3339 格式时间戳，最后成功同步的时间（自动更新）|
-| `last_error` | 否 | 否 | 最后一次失败的错误信息（自动更新） |
-| `synced_count` | 否 | 否 | 历史成功同步总次数（自动更新） |
+每次写入，宿主都会在插件日志里记一条「[审计]」（只记写了哪个站，不记 cookie 内容）。
 
-## 工作流程
+## CookieCloud 这边怎么配
 
-### 第一次配置
+在浏览器扩展里：
 
-1. 访问 CookieCloud 官网或自托管实例获取个人的 UUID 和端到端密码
-2. 在插件配置页填写 host、cloud_uuid、cloud_pwd 和 site_map
-3. 保存配置（注意标记敏感字段）
-4. 点击「立即同步」按钮测试连接
+- **服务器地址**、**用户 KEY（UUID）**、**端对端加密密码**：插件里要填同样的三项。
+- **同步域名关键词**：可以不填（同步全部 cookie），也可以填关键词（每行一个）。填的话，要把**所有要同步的 PT 站和豆瓣**都覆盖到，例如：
 
-### 日常使用
+  ```
+  hhanclub
+  ourbits
+  douban
+  ```
 
-**手动同步**：任何时刻可在插件详情页点「立即同步」按钮，拉取最新 cookies
+  关键词按「cookie 的域名里包含这个词」来挑，填站点主域名里的一段即可。
+- **加密算法**：`legacy`（默认）和 `aes-128-cbc-fixed` 两种都支持，插件按服务端记录的方式自动识别，不用在插件里选（老版本服务端不返回加密方式时，按密文是否以 `Salted__` 开头自动判断）。
+- 扩展要定期上传（扩展里的「同步时间间隔」），插件才能拿到新 cookie。
 
-**自动同步**：使用系统 cron 定期触发 plugin API 端点（参考下文 API 文档）
+## 插件这边怎么配
 
-### site_map 配置示例
+打开 FollowCat → 插件 → cookiecloud → 设置：
 
-```json
-{
-  "hhub.example.com": "hhub",
-  "u2.example.com": "ubits",
-  "pt.tracker.com": "mypts"
-}
-```
+1. **CookieCloud 地址**：服务端根地址，和扩展里填的一样，例如 `https://cc.example.com`（服务端设了 `API_ROOT` 路径前缀的，把前缀一起填上，如 `https://cc.example.com/cookie`——少了前缀会 404）。
+   - ⚠️ **不要填 `127.0.0.1` / `localhost`**：插件出网有 SSRF 防护，会拦截本机回环地址。CookieCloud 和 FollowCat 装在同一台机器上时，填这台机器的局域网地址（如 `http://192.168.1.10:8088`）或域名——局域网地址（192.168.x.x / 10.x.x.x / 172.16–31.x.x）是放行的。
+   - **Tailscale 地址可以用**：`100.64.0.0/10` 段（Tailscale 分配的 `100.x.y.z`）是放行的，CookieCloud 在另一台 Tailscale 机器上时直接填它的 Tailscale IP 即可（FollowCat 所在机器要能连到它）。
+   - 地址里可以带 Basic 认证（`https://user:pass@cc.example.com`）；出错时错误信息与日志里会去掉 `user:pass@`。
+2. **UUID** 和 **密码**：保存后只显示「已设置」，之后留空保存 = 不修改。密码只在 FollowCat 本地用来解密，**不会发给 CookieCloud 服务端**（插件不用服务端的「带密码解密」接口）。
+3. **同步哪些站**：列出所有用 Cookie 鉴权的 PT 站，勾选要同步的。**默认一个都不勾**——勾上的站，现有 Cookie 会被浏览器里的覆盖。用 API Key（如馒头）或 passkey 鉴权的站不会出现在列表里。
+4. **同步豆瓣 Cookie**：默认关。打开后写入豆瓣 Cookie 并自动验活。
+5. **同步间隔（分钟）**：推荐 **30**。`0` 或留空 = 不自动同步，只在点「立即同步」时同步。填了不是数字的内容保存时会报错（不会当成「关闭」）。
+   - CookieCloud 官方服务端有限流：**同一 IP 15 分钟最多 100 次**。一次同步只请求一次服务端，所以正常间隔不会碰到，但别设成 1 分钟这种。
+   - 在本设置页保存后立即按新间隔生效；第一次自动同步在满一个间隔之后（插件启用 / FollowCat 重启后也是这样）。
+   - ⚠️ 如果不在本设置页、而是在管理端的**通用配置表**里直接改 `sync_interval_min`，插件不会知道，要**停用再启用插件**（或重启 FollowCat）才按新间隔排。
+   - ⚠️ 定时器不跨重启：每次启用 / FollowCat 重启都从头计时。间隔设得很长、而 FollowCat 又经常重启时，可能一直等不到自动同步——这种情况把间隔调短，或手动点「立即同步」。
+6. 点 **保存设置**，再点 **立即同步** 看一次结果。
 
-CookieCloud 中若存在这些域名的 cookies，同步时会被写入对应的 `site_cookie_hhub`、`site_cookie_ubits` 等 FollowCat AppSetting 键。
+设置页的「保存设置」「立即同步」要等页面把现有配置加载完才能点（加载失败会显示原因和「重试」，避免用空表单覆盖已有设置）。勾选的两个站 RSS 域名相同时页面会提示：它们会被写入同一份 cookie。
 
-## API 端点
+## 怎么匹配（为什么要先配 RSS）
 
-### 手动同步
+FollowCat 拿 PT 站 Cookie 去请求的，是这个站的 **RSS 链接**和 RSS 里的同站详情页。所以插件用 **RSS 链接的域名**当目标，按浏览器的规则挑 cookie：
 
-```bash
-curl -X POST -H "Authorization: Bearer <jwt>" \
-  http://localhost:1009/api/plugins/<plugin-id>/api/sync
-```
+- cookie 的域名是 `.example.org`（带点）→ `example.org` 和它的所有子域（如 `rss.example.org`）都能用；
+- cookie 只属于某一个主机（浏览器标了 host-only）→ 只有这个主机能用，子域不行；
+- 已过期的 cookie 跳过；同一条 cookie 在 CookieCloud 数据里出现多次只算一次。
 
-响应：
-```json
-{
-  "ok": true,
-  "written": 3
-}
-```
+站点有多个 RSS 链接、域名不同时，几个域名能用的 cookie 合在一起。豆瓣固定按 `m.douban.com` 匹配（FollowCat 访问豆瓣用的主机）。
 
-或失败时：
-```json
-{
-  "ok": false,
-  "error": "decrypt failed: ..."
-}
-```
+扩展里「同步域名关键词」填没填、怎么分组都不影响结果——插件看的是每条 cookie 自己的域名。
 
-### 查看状态
+## 同步结果怎么看
 
-```bash
-curl -H "Authorization: Bearer <jwt>" \
-  http://localhost:1009/api/plugins/<plugin-id>/api/status
-```
+「同步状态」里每个目标一行：
 
-响应：
-```json
-{
-  "configured": true,
-  "last_synced_at": "2026-05-08T10:30:00Z",
-  "last_error": "",
-  "synced_count": 5
-}
-```
+| 结果 | 意思 | 怎么办 |
+|------|------|--------|
+| 已写入 | 找到了 cookie 且和现有的不同，已写入（豆瓣附验活结果） | — |
+| 未变化 | 找到的 cookie 和现有的一样，没有写 | — |
+| 没配 RSS | 这个站没有 RSS 链接，没法匹配 | 先在 PT 站设置里填 RSS |
+| 没有 cookie | CookieCloud 数据里没有能发给这个站的 cookie | 检查扩展的「同步域名关键词」有没有覆盖这个站、浏览器里是否登录着 |
+| 站点已删 | 勾选过的站在 FollowCat 里已经删了，已跳过 | 在设置里取消勾选后保存 |
+| 非 Cookie 站 | 这个站现在不是 Cookie 鉴权，已跳过 | 取消勾选 |
+| 失败 | 写入被宿主拒绝，后面是原因 | 按原因处理 |
 
-`<plugin-id>` 在管理页插件详情可见，由 `sha1(source_url + "\x00" + name)[:16]` 派生。本插件默认是 `sha1("https://plugins.followcat.io/cookiecloud\x00cookiecloud")[:16]`。
+豆瓣验活结果：「验活通过」= 登录态有效；「未登录或已失效」= 浏览器里的豆瓣登录已过期，重新登录后等扩展上传；「通道忙」= 已写入，只是没来得及验，稍后在豆瓣设置里再验。
 
-## 外部 Cron 自动同步
+整次同步失败（连不上服务端、UUID 不对、密码不对等）会显示在「最近一次的问题」里；详细过程在插件日志里。CookieCloud 返回 404 时，要么 UUID 不对 / 扩展还没上传过，要么地址少了服务端的 `API_ROOT` 路径前缀。
 
-若要在系统级定期自动同步，可用 cron 或任务计划程序调用 API 端点。
+「上次完成同步」是最近一次**跑完**的同步时间——个别站写入失败也算跑完（失败原因看每站结果与「最近一次的问题」）；整次同步出错（没拿到数据）不更新它。
 
-**Linux/macOS cron 示例**：
+同步进行中页面每 2 秒刷新一次状态；连续几次读不到状态、或插件被停用时停止刷新，给出提示与「重试」按钮。
 
-```bash
-# 每小时整点同步一次
-0 * * * * curl -X POST -H "Authorization: Bearer ${FC_TOKEN}" \
-  http://localhost:1009/api/plugins/<plugin-id>/api/sync
-```
+## 配置项（高级）
 
-**Windows 任务计划程序示例**：
+一般用设置页面即可，下表供排查：
 
-创建一个批处理脚本（如 `sync-cookies.bat`）：
+| key | secret | 说明 |
+|-----|--------|------|
+| `host` | 否 | CookieCloud 服务端根地址 |
+| `cloud_uuid` | 是 | 用户 KEY（UUID） |
+| `cloud_pwd` | 是 | 端对端加密密码 |
+| `sites` | 否 | 要同步的 PT 站 id，JSON 数组，默认 `[]` |
+| `sync_douban` | 否 | `"true"` 时同步豆瓣 Cookie |
+| `sync_interval_min` | 否 | 自动同步间隔（分钟），`0` / 空 = 关；在这里直接改要停用再启用插件才生效 |
+| `last_synced_at` | 否 | 最近一次完成同步的时间（插件写；有站写入失败也算完成） |
+| `last_error` | 否 | 最近一次的问题（插件写；没问题时为空） |
+| `synced_count` | 否 | 累计完成同步次数（插件写） |
 
-```batch
-@echo off
-curl -X POST -H "Authorization: Bearer <jwt>" ^
-  http://localhost:1009/api/plugins/<plugin-id>/api/sync
-```
-
-然后在「任务计划程序」中新建计划任务，设置周期（如每小时）执行该脚本。
-
-## 排错
-
-| 现象 | 可能原因 | 修法 |
-|------|---------|------|
-| 「配置缺失」或无法保存 | host / cloud_uuid / cloud_pwd 未填全 | 检查所有必填项 |
-| 同步失败 - 「server 4xx」 | host URL 错 / 服务器拒绝连接 | 确认 CookieCloud 服务器地址、网络连接 |
-| 同步失败 - 「decrypt failed」 | cloud_uuid 或 cloud_pwd 错误 | 重新确认 CookieCloud 用户凭据 |
-| 同步失败 - 「site_map JSON 无效」 | site_map 字段不是合法 JSON | 检查 JSON 格式（可用 JSON 验证工具）|
-| 同步成功但没有写入任何 site | site_map 中的域名不在 CookieCloud 数据里 | 确认浏览器扩展已在这些网站同步 cookie |
-| 状态页无反应 | 插件未启用或 JWT token 过期 | 刷新页面，或用 `/api/status` 端点手动检查 |
-
-## 开发者说明
-
-### 内嵌 CryptoJS
-
-plugin runtime 不暴露任何加密 API，因此本插件在 `index.js` 顶部内嵌了 CryptoJS 的子集（MD5 + AES-256-CBC + EVP_BytesToKey），约 1000 行代码。这使得解密逻辑完全自洽，无需宿主依赖。
-
-### 权限声明
-
-```json
-"permissions": ["api.http", "ui.embed"]
-```
-
-- `api.http`：用于向 CookieCloud 服务器发起 HTTP 请求
-- `ui.embed`：用于在插件详情页嵌入配置 UI
-
-### 数据流
-
-```
-CookieCloud Server
-        ↓ (HTTP GET)
-    加密 payload
-        ↓ (内嵌 CryptoJS 解密)
-    明文 JSON
-        ↓ (按 site_map 映射)
-site_cookie_<site_id> (写入 AppSetting)
-        ↓
-  PT 框架读取并使用
-```
-
-## 常见问题
-
-**Q：支持周期同步吗？**
-
-A：v1 不支持 plugin runtime 内的 cron hook。请用系统 cron 或任务计划程序定期调用 `/api/sync` 端点，或改为手动在需要时点击「同步」按钮。
-
-**Q：CookieCloud 密码会被加密吗？**
-
-A：会。在保存配置时，标记为 `is_secret=true` 的字段（`cloud_uuid` 和 `cloud_pwd`）会被 FollowCat 使用 AES-256-GCM 加密后存储在数据库中。
-
-**Q：多个 FollowCat 实例可以共享同一个 CookieCloud 账户吗？**
-
-A：可以。每个实例都有独立的 plugin config，可以指向同一个 CookieCloud server，只要凭据相同即可。
-
-**Q：如果 CookieCloud 中的域名被我删除了，之前写入的 cookie 会被清除吗？**
-
-A：不会。本插件仅负责同步写入，不会主动删除。若要清理过期的 site cookie，需要在 FollowCat 管理页手动删除对应的 `site_cookie_<site_id>` 键。
-
-**Q：支持多个 site_map 配置吗？**
-
-A：目前不支持。插件维护单一的 `site_map` JSON。如需为不同用户或不同场景分组，请创建多个 CookieCloud 插件实例，每个配置不同的 site_map。
+插件 API（设置页面在用）：`GET /status`、`POST /sync`（立即返回，不等同步结束）、`POST /reschedule`（按当前配置重排定时）、`GET /sites`。

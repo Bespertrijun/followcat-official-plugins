@@ -135,42 +135,47 @@ def plugin_error_message(raw: str) -> str:
     return "\n".join(lines).rstrip()
 
 # ─── 默认 hook payload，便于点一键触发 ───
+# 字段与类型按宿主真实形态（主仓 internal/domain/event.go、plugin_hooks.go、plugin/event_bridge.go）：
+# anime_id / task_id 是数字，media_id 是字符串，aka 是数组，hdr / dv 是字符串（没识别到是 "无"）。
+# 字段集合与宿主一致：sdk.md 里标 ? 的字段也恒在，没有有效值时是零值（0 / "" / []），不会缺省。
 HOOK_SAMPLES: Dict[str, Dict[str, Any]] = {
     "on_episode_found": {
-        "anime_id": "anime-001",
-        "anime_title": "DevRT Sample Anime",
+        "anime_id": 1,
         "episode": 1,
         "torrent_url": "magnet:?xt=urn:btih:abcdef0123456789",
     },
     "on_download_done": {
-        "anime_id": "anime-001",
+        "anime_id": 1,
         "anime_title": "DevRT Sample Anime",
         "episode": 1,
         "hash": "abcdef0123456789",
+        "files": [{"path": "S01E01.mkv", "size": 524288000}],
         "size": 524288000,
         "save_path": "/data/downloads/DevRT Sample Anime",
         "category": "anime",
-        "files": [{"path": "S01E01.mkv", "size": 524288000}],
     },
     "on_download_failed": {
-        "anime_id": "anime-001",
+        "anime_id": 1,
         "anime_title": "DevRT Sample Anime",
         "episode": 1,
+        "episode_end": 0,
         "hash": "abcdef0123456789",
         "reason": "tracker timeout",
     },
     "on_link_done": {
-        "anime_id": "anime-001",
+        "anime_id": 1,
         "anime_title": "DevRT Sample Anime",
         "episode": 1,
         "dest": "/media/anime/DevRT Sample Anime/S01E01.mkv",
         "tmdb_episode": 1,
     },
     "on_link_failed": {
-        "anime_id": "anime-001",
+        "anime_id": 1,
         "anime_title": "DevRT Sample Anime",
         "episode": 1,
+        "episode_end": 0,
         "reason": "destination occupied",
+        "hash": "abcdef0123456789",
     },
     "on_episode_acquired": {
         "source": "mikan",
@@ -185,14 +190,15 @@ HOOK_SAMPLES: Dict[str, Dict[str, Any]] = {
     "on_task_completed": {
         "source": "mikan",
         "task_id": 1,
+        "media_id": "1",
         "media_title": "DevRT Sample Anime",
         "anime_title": "DevRT Sample Anime",
         "total_ep": 12,
     },
     "on_task_reopened": {
         "source": "mikan",
-        "task_id": "task-001",
-        "media_id": "anime-001",
+        "task_id": 1,
+        "media_id": "1",
         "media_title": "DevRT Sample Anime",
         "old_total_ep": 12,
         "new_total_ep": 13,
@@ -209,23 +215,38 @@ HOOK_SAMPLES: Dict[str, Dict[str, Any]] = {
             "episode_end": 0,
             "title": "DevRT Sample Anime",
             "original_title": "",
-            "aka": "",
+            "aka": ["DevRT 示例动画"],
             "year": 2024,
         },
         "tags": {
             "resolution": "1080p",
-            "video_encode": "hevc",
-            "audio_encode": "aac",
+            "video_encode": "HEVC",
+            "audio_encode": "AAC",
+            "dv": "无",
+            "hdr": "HDR",
             "code_bits": "10bit",
-            "hdr": False,
-            "dv": False,
-            "format": "mkv",
+            "format": "MKV",
+            "language": "",
+            "source": "",
+            "group": "SubGroup",
+            "special_content": "",
+            "part_alias": "",
         },
         "ctx": {
-            "raw_title": "[SubGroup] DevRT Sample Anime - 08 [1080p HEVC AAC]",
+            "raw_title": "[SubGroup] DevRT Sample Anime - 08 [1080p HEVC AAC HDR]",
+            "subtitle": "",
+            "description": "",
+            "tag": "",
+            "anime_id": 1,
+            "task_id": 1,
+            "link_subdir": "",
+            "directory": "",
             "source_site": "mikan",
+            "category": "",
             "size": 524288000,
             "torrent_url": "magnet:?xt=urn:btih:abcdef0123456789",
+            "is_movie": False,
+            "is_show": False,
         },
     },
     "should_download_batch": {
@@ -239,26 +260,45 @@ HOOK_SAMPLES: Dict[str, Dict[str, Any]] = {
             "episode_end": 10,
             "title": "DevRT Sample Anime",
             "original_title": "",
-            "aka": "",
+            "aka": ["DevRT 示例动画"],
             "year": 2024,
         },
         "tags": {
             "resolution": "1080p",
-            "video_encode": "hevc",
-            "audio_encode": "aac",
+            "video_encode": "HEVC",
+            "audio_encode": "AAC",
+            "dv": "无",
+            "hdr": "无",
             "code_bits": "10bit",
-            "hdr": False,
-            "dv": False,
-            "format": "mkv",
+            "format": "MKV",
+            "language": "",
+            "source": "",
+            "group": "SubGroup",
+            "special_content": "",
+            "part_alias": "",
         },
         "ctx": {
             "raw_title": "[SubGroup] DevRT Sample Anime - 09-10 [1080p HEVC AAC]",
+            "subtitle": "",
+            "description": "",
+            "tag": "",
+            "anime_id": 1,
+            "task_id": 1,
+            "link_subdir": "",
+            "directory": "",
             "source_site": "mikan",
+            "category": "",
             "size": 1048576000,
             "torrent_url": "magnet:?xt=urn:btih:abcdef0123456789",
+            "is_movie": False,
+            "is_show": False,
         },
     },
 }
+
+
+class PluginTimeout(RuntimeError):
+    """插件调用超过宿主墙钟（sandbox.js 回 {error, timeout: true}）；生产宿主对应 ErrRuntimeTimeout → HTTP 504。"""
 
 
 # ─── Node 子进程封装 ───────────────────────────────────────────────────────
@@ -358,11 +398,13 @@ class NodeSandbox:
         finally:
             self._pending.pop(msg_id, None)
         if "error" in reply:
+            if reply.get("timeout"):
+                raise PluginTimeout(reply["error"])
             raise RuntimeError(reply["error"])
         return reply.get("result", {})
 
-    def trigger(self, hook: str, data: Dict[str, Any]) -> None:
-        self.call("trigger", {"hook": hook, "data": data})
+    def trigger(self, hook: str, data: Dict[str, Any]) -> Any:
+        return self.call("trigger", {"hook": hook, "data": data})
 
     def call_api(self, path: str, req: Dict[str, Any]) -> Any:
         return self.call("callApi", {"path": path, "req": req})
@@ -405,7 +447,7 @@ class NodeSandbox:
                 for e in entries:
                     self._config_cache[e["key"]] = e["value"]
                     self._config_meta[e["key"]] = {"is_secret": bool(e["is_secret"]), "updated_at": now}
-            self._sync_config(persist)
+            self._sync_config(persist, {e["key"]: e["value"] for e in entries}, [])
 
     def set_config_entries(
         self,
@@ -413,7 +455,8 @@ class NodeSandbox:
         persist: Optional[Path] = None,
         secrets: Optional[List[str]] = None,
     ) -> None:
-        """侧栏（类比管理页）写入：已有 key 保留原 is_secret，除非 secrets 显式点名；值变了才刷 updated_at。"""
+        """侧栏（类比管理页）写入：只写传进来的（改过的）key；已有 key 保留原 is_secret，除非 secrets
+        显式点名；值变了才刷 updated_at。"""
         now = _now_iso()
         with self._sync_lock:
             with self._config_lock:
@@ -428,10 +471,23 @@ class NodeSandbox:
                 for k in secrets or []:
                     if k in self._config_meta:
                         self._config_meta[k]["is_secret"] = True
-            self._sync_config(persist)
+            self._sync_config(persist, dict(entries), [])
 
-    def _sync_config(self, persist: Optional[Path]) -> None:
-        # 调用方持有 _sync_lock、不持有 _config_lock（见 __init__ 注释）
+    def delete_config_keys(self, keys: List[str], persist: Optional[Path] = None) -> List[str]:
+        """侧栏显式删除（管理页的「删除配置项」）：返回真正删掉的 key。"""
+        with self._sync_lock:
+            with self._config_lock:
+                removed = [k for k in keys if k in self._config_cache]
+                for k in removed:
+                    self._config_cache.pop(k, None)
+                    self._config_meta.pop(k, None)
+            self._sync_config(persist, {}, removed)
+        return removed
+
+    def _sync_config(self, persist: Optional[Path], changed: Dict[str, str], deleted: List[str]) -> None:
+        # 调用方持有 _sync_lock、不持有 _config_lock（见 __init__ 注释）。
+        # 只把这次改动（changed / deleted）下发给 sandbox：整表 configReplace 会把插件同时
+        # config.set 的其它 key 冲回旧值（事件还在管道里时）。
         with self._config_lock:
             values = dict(self._config_cache)
             doc = {
@@ -445,8 +501,8 @@ class NodeSandbox:
                     for k in sorted(values.keys())
                 },
             }
-        if self._proc and self._proc.poll() is None:
-            self.call("configReplace", {"entries": values})
+        if self._proc and self._proc.poll() is None and (changed or deleted):
+            self.call("configPatch", {"set": changed, "delete": deleted})
         if persist is not None:
             persist.parent.mkdir(parents=True, exist_ok=True)
             persist.write_text(json.dumps(doc, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -522,6 +578,13 @@ class NodeSandbox:
                     q.put_nowait(entry)
                 except Exception:
                     pass
+        elif ev == "configDelete":
+            # 插件后端 config.delete（宿主 R4）：删键并释放配额行
+            key = msg.get("key")
+            if key is not None:
+                with self._config_lock:
+                    self._config_cache.pop(key, None)
+                    self._config_meta.pop(key, None)
         elif ev == "config":
             # 插件后端 config.set：同生产 PluginConfigStore.Set——新 key is_secret=false，
             # 已有 key 保留原 is_secret
@@ -639,8 +702,16 @@ def build_app(sandbox: NodeSandbox, persist_path: Optional[Path]) -> FastAPI:
         try:
             # 放到线程里等：插件回调可 async（sandbox 侧 await 其 Promise），阻塞等待不能卡住
             # 事件循环，否则一个在 await 的慢 hook 会让其它请求（UI 调 API 等）全部排队
-            await asyncio.to_thread(sandbox.trigger, hook, data)
-            return {"ok": True}
+            res = await asyncio.to_thread(sandbox.trigger, hook, data)
+            out: Dict[str, Any] = {"ok": True}
+            if hook == "should_download" and isinstance(res, dict):
+                # 回显宿主会得出的裁决：verdict ∈ allow / veto / have_bitmap；fail_open = 超时 / 抛错 / reject 放行
+                for k in ("result", "verdict", "fail_open", "error"):
+                    if k in res:
+                        out[k] = res[k]
+            return out
+        except PluginTimeout as e:
+            raise HTTPException(504, str(e))
         except Exception as e:
             raise HTTPException(500, str(e))
 
@@ -653,6 +724,8 @@ def build_app(sandbox: NodeSandbox, persist_path: Optional[Path]) -> FastAPI:
         try:
             result = await asyncio.to_thread(sandbox.call_api, path, req)
             return {"ok": True, "result": result.get("result")}
+        except PluginTimeout as e:
+            raise HTTPException(504, str(e))
         except Exception as e:
             raise HTTPException(500, str(e))
 
@@ -670,10 +743,22 @@ def build_app(sandbox: NodeSandbox, persist_path: Optional[Path]) -> FastAPI:
         if not isinstance(secrets, list):
             raise HTTPException(400, "secrets must be an array of keys")
         clean: Dict[str, str] = {k: ("" if v is None else str(v)) for k, v in entries.items()}
+        for k, v in clean.items():
+            err = validate_config_key(k) or validate_config_value(v)
+            if err:
+                raise HTTPException(400, f"{k}: {err}")
         await asyncio.to_thread(
             sandbox.set_config_entries, clean, persist_path, [str(k) for k in secrets]
         )
         return {"ok": True, "saved": list(clean.keys())}
+
+    @app.delete("/api/config/{key}")
+    async def cfg_delete(key: str) -> Dict[str, Any]:
+        # 显式删除一项（侧栏 ×）：不再靠「保存时少传一个 key」表达删除
+        removed = await asyncio.to_thread(sandbox.delete_config_keys, [key], persist_path)
+        if not removed:
+            raise HTTPException(404, f"config key not found: {key}")
+        return {"ok": True, "deleted": removed}
 
     # ─── iframe 桥专用：复刻生产 /api/plugins/:id/sandbox/* ───
     # host.html 的 postMessage 桥照 PluginIframeHost.vue 调这组端点；响应是生产的统一信封
@@ -719,6 +804,9 @@ def build_app(sandbox: NodeSandbox, persist_path: Optional[Path]) -> FastAPI:
             )
         try:
             result = await asyncio.to_thread(sandbox.call_api, target, req)
+        except PluginTimeout as e:
+            # B1：registerAPI 墙钟超时 → 504（生产 SandboxDispatch 同）
+            return envelope_fail(504, ERR_INTERNAL, str(e))
         except Exception as e:
             full = str(e)
             if full and full != plugin_error_message(full):
@@ -807,6 +895,18 @@ def build_app(sandbox: NodeSandbox, persist_path: Optional[Path]) -> FastAPI:
 
         await asyncio.to_thread(sandbox.put_config_entries, entries, persist_path)
         return envelope_ok({"updated": len(entries)})
+
+    @app.delete("/api/sandbox/config/{key:path}")
+    async def sandbox_delete_config(key: str) -> JSONResponse:
+        # SandboxDeleteConfig（宿主 R4，iframe 桥 FC.config.delete）：键校验同 config.put，
+        # 回 {deleted: bool}——是否真的删到一行（没设过的键 → false，不是 404）
+        if key == "":
+            return envelope_fail(400, ERR_INVALID_PARAM, "entry key cannot be empty")
+        err = validate_config_key(key)
+        if err:
+            return envelope_fail(400, ERR_INVALID_PARAM, err)
+        removed = await asyncio.to_thread(sandbox.delete_config_keys, [key], persist_path)
+        return envelope_ok({"deleted": bool(removed)})
 
     return app
 

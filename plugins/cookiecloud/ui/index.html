@@ -3,364 +3,436 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>CookieCloud 插件设置</title>
+<title>CookieCloud 同步</title>
 <script src="/plugin-sdk.js"></script>
+<!-- 相对路径：UI 从 /api/plugins/<id>/ui/<token>/ 加载，./state.js 继承 token 路径段（CSP script-src 'self'） -->
+<script src="./state.js"></script>
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-
   body {
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    font-size: 14px;
-    color: #1a1a1a;
-    background: #f8f9fa;
-    padding: 20px;
-    line-height: 1.5;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif;
+    font-size: 14px; color: #1a1a1a; background: #f8f9fa; padding: 20px; line-height: 1.5;
   }
-
-  h2 { font-size: 16px; font-weight: 600; margin-bottom: 16px; color: #111; }
-  h3 { font-size: 13px; font-weight: 600; margin-bottom: 12px; color: #444; text-transform: uppercase; letter-spacing: 0.4px; }
-
-  .card {
-    background: #fff;
-    border: 1px solid #e5e7eb;
-    border-radius: 8px;
-    padding: 16px;
-    margin-bottom: 16px;
-  }
-
+  h3 { font-size: 13px; font-weight: 600; margin-bottom: 12px; color: #444; letter-spacing: 0.4px; }
+  .card { background: #fff; border: 1px solid #e5e7eb; border-radius: 8px; padding: 16px; margin-bottom: 16px; }
   .field { margin-bottom: 12px; }
   .field label { display: block; font-weight: 500; margin-bottom: 4px; color: #333; }
-  .field input[type="text"],
-  .field input[type="password"],
-  .field textarea {
-    width: 100%;
-    padding: 7px 10px;
-    border: 1px solid #d1d5db;
-    border-radius: 6px;
-    font-size: 13px;
-    outline: none;
-    transition: border-color 0.15s;
-    font-family: inherit;
+  .field input[type="text"], .field input[type="password"], .field input[type="number"] {
+    width: 100%; padding: 7px 10px; border: 1px solid #d1d5db; border-radius: 6px; font-size: 13px;
+    outline: none; font-family: inherit; background: #fff;
   }
-  .field textarea {
-    resize: vertical;
-    min-height: 80px;
-    font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
-  }
-  .field input:focus,
-  .field textarea:focus { border-color: #6366f1; box-shadow: 0 0 0 2px rgba(99,102,241,0.15); }
-  .field .hint { font-size: 12px; color: #6b7280; margin-top: 3px; }
-
-  .btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    padding: 7px 14px;
-    border-radius: 6px;
-    font-size: 13px;
-    font-weight: 500;
-    cursor: pointer;
-    border: none;
-    transition: opacity 0.15s, background 0.15s;
-  }
+  .field input:focus { border-color: #6366f1; box-shadow: 0 0 0 2px rgba(99,102,241,0.15); }
+  .field input.narrow { width: 120px; }
+  .hint { font-size: 12px; color: #6b7280; margin-top: 3px; }
+  .hint.warn { color: #b45309; }
+  .secret-state { font-size: 12px; color: #15803d; margin-left: 6px; font-weight: normal; }
+  .secret-state.unset { color: #9ca3af; }
+  .btn { display: inline-flex; align-items: center; gap: 6px; padding: 7px 14px; border-radius: 6px; font-size: 13px;
+    font-weight: 500; cursor: pointer; border: none; font-family: inherit; }
   .btn:disabled { opacity: 0.5; cursor: not-allowed; }
   .btn-primary { background: #6366f1; color: #fff; }
   .btn-primary:hover:not(:disabled) { background: #4f46e5; }
   .btn-secondary { background: #f3f4f6; color: #374151; border: 1px solid #d1d5db; }
   .btn-secondary:hover:not(:disabled) { background: #e5e7eb; }
-
-  .actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 4px; }
-
-  .status-bar {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 10px 14px;
-    border-radius: 6px;
-    font-size: 13px;
-    margin-bottom: 16px;
-    min-height: 40px;
-  }
-  .status-bar.idle { display: none; }
-  .status-bar.info { background: #eff6ff; color: #1d4ed8; border: 1px solid #bfdbfe; }
-  .status-bar.success { background: #f0fdf4; color: #15803d; border: 1px solid #bbf7d0; }
-  .status-bar.error { background: #fef2f2; color: #b91c1c; border: 1px solid #fecaca; }
-
-  .stats-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
-    gap: 10px;
-  }
-  .stat-cell { background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 6px; padding: 10px 12px; }
-  .stat-cell .label { font-size: 11px; color: #6b7280; margin-bottom: 2px; }
-  .stat-cell .value { font-size: 15px; font-weight: 700; color: #111; word-break: break-all; }
-  .stat-cell.warn .value { color: #b45309; }
-
-  .last-error {
-    font-size: 12px;
-    color: #b91c1c;
-    background: #fef2f2;
-    border: 1px solid #fecaca;
-    border-radius: 6px;
-    padding: 8px 10px;
-    margin-top: 10px;
-    word-break: break-all;
-  }
-
-  .divider { border: none; border-top: 1px solid #e5e7eb; margin: 14px 0; }
-
-  .warning-box {
-    background: #fffbeb;
-    border: 1px solid #fde68a;
-    color: #92400e;
-    border-radius: 6px;
-    padding: 8px 12px;
-    font-size: 12px;
-    margin-bottom: 14px;
-  }
-
-  @media (max-width: 480px) {
-    body { padding: 12px; }
-    .stats-grid { grid-template-columns: repeat(2, 1fr); }
-  }
+  .actions { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+  .site-row { display: flex; align-items: flex-start; gap: 8px; padding: 8px 0; border-bottom: 1px solid #f1f2f4; }
+  .site-row:last-child { border-bottom: none; }
+  .site-row input[type="checkbox"] { width: 16px; height: 16px; margin-top: 3px; flex-shrink: 0; cursor: pointer; }
+  .site-main { flex: 1; min-width: 0; }
+  .site-name { font-weight: 500; color: #111; cursor: pointer; }
+  .site-meta { font-size: 12px; color: #6b7280; word-break: break-all; }
+  .tag { display: inline-block; font-size: 11px; padding: 0 6px; border-radius: 4px; margin-left: 6px; vertical-align: 1px; }
+  .tag.ok { background: #ecfdf5; color: #047857; }
+  .tag.muted { background: #f3f4f6; color: #6b7280; }
+  .tag.warn { background: #fffbeb; color: #b45309; }
+  .tag.err { background: #fef2f2; color: #b91c1c; }
+  .empty { color: #6b7280; font-size: 13px; padding: 4px 0; }
+  .box { border-radius: 6px; padding: 8px 12px; font-size: 12px; margin-bottom: 12px; }
+  .box.info { background: #f0f9ff; border: 1px solid #bae6fd; color: #0c4a6e; }
+  .box.warn { background: #fffbeb; border: 1px solid #fde68a; color: #92400e; }
+  .box.err { background: #fef2f2; border: 1px solid #fecaca; color: #b91c1c; }
+  .box .btn { margin-top: 6px; padding: 4px 10px; font-size: 12px; }
+  .status-grid { display: grid; grid-template-columns: max-content 1fr; gap: 4px 14px; font-size: 13px; margin-bottom: 12px; }
+  .status-grid dt { color: #6b7280; }
+  .status-grid dd { color: #111; word-break: break-all; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #f1f2f4; vertical-align: top; }
+  th { color: #6b7280; font-weight: 500; font-size: 12px; }
+  td.state { white-space: nowrap; }
+  .spinner { display: inline-block; width: 12px; height: 12px; border: 2px solid #c7d2fe; border-top-color: #6366f1;
+    border-radius: 50%; animation: spin 0.8s linear infinite; vertical-align: -1px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  #toast { min-height: 18px; font-size: 13px; }
+  #toast.ok { color: #15803d; }
+  #toast.err { color: #b91c1c; }
 </style>
 </head>
 <body>
 
-<div id="status-bar" class="status-bar idle"></div>
+<div id="load-error"></div>
 
-<h2>CookieCloud 同步设置</h2>
-
-<!-- Server 配置 -->
 <div class="card">
-  <h3>服务器连接</h3>
-
+  <h3>CookieCloud 连接</h3>
   <div class="field">
-    <label for="host">CookieCloud Server 地址</label>
-    <input type="text" id="host" placeholder="https://cc.example.com">
-    <div class="hint">自托管 CookieCloud server 的根 URL，末尾不加斜杠</div>
+    <label for="host">CookieCloud 地址</label>
+    <input type="text" id="host" placeholder="https://cc.example.com" autocomplete="off">
+    <div class="hint">CookieCloud 服务端的根地址（浏览器扩展里填的那个「服务器地址」；服务端设了 API_ROOT 路径前缀的，前缀也要带上）。别填 127.0.0.1 / localhost——插件出网会拦截本机回环地址；局域网地址（如 192.168.x.x）与 Tailscale 地址（100.64.0.0/10，如 100.101.102.103）可以。</div>
   </div>
-
   <div class="field">
-    <label for="cloud-uuid">UUID <small style="color:#6b7280;font-weight:400">（加密存储）</small></label>
-    <input type="password" id="cloud-uuid" autocomplete="off">
-    <div class="hint">浏览器扩展里显示的用户 UUID</div>
+    <label for="uuid">用户 KEY（UUID）<span id="uuid-state" class="secret-state unset"></span></label>
+    <input type="text" id="uuid" autocomplete="off">
   </div>
-
   <div class="field">
-    <label for="cloud-pwd">端到端密码 <small style="color:#6b7280;font-weight:400">（加密存储）</small></label>
-    <input type="password" id="cloud-pwd" autocomplete="off">
-    <div class="hint">CookieCloud 浏览器扩展里设置的加密密码</div>
+    <label for="pwd">端对端加密密码<span id="pwd-state" class="secret-state unset"></span></label>
+    <input type="password" id="pwd" autocomplete="new-password">
+    <div class="hint">插件只从服务端取密文，在 FollowCat 本地解密，密码不会发给 CookieCloud 服务端。两种加密方式（legacy / aes-128-cbc-fixed）都支持，自动按服务端记录识别。</div>
   </div>
 </div>
 
-<!-- 域名映射 -->
 <div class="card">
-  <h3>域名 → Site ID 映射</h3>
-  <div class="warning-box">
-    格式为 JSON 对象，key 为域名，value 为 FollowCat site_id。保存后下次同步生效。
+  <h3>同步哪些站</h3>
+  <div class="box info">按每个 PT 站 <b>RSS 链接的域名</b>去 CookieCloud 里找 cookie，所以站点要先在 FollowCat 的 PT 站设置里配好 RSS。默认一个都不勾：勾上的站，其现有 Cookie 会被浏览器里的 cookie 覆盖（没变就不写）。API Key / passkey 鉴权的站不在此列。</div>
+  <div id="site-list"><div class="empty">加载中…</div></div>
+  <div id="overlap-warn"></div>
+  <div id="missing-list"></div>
+  <div class="site-row" style="margin-top:6px;border-top:1px solid #f1f2f4;padding-top:10px;">
+    <input type="checkbox" id="sync-douban">
+    <div class="site-main">
+      <label class="site-name" for="sync-douban">同步豆瓣 Cookie</label>
+      <div class="site-meta">匹配 m.douban.com 能用的 cookie，写入后自动验活。</div>
+    </div>
   </div>
+</div>
+
+<div class="card">
+  <h3>自动同步</h3>
   <div class="field">
-    <label for="site-map">site_map（JSON）</label>
-    <textarea id="site-map" placeholder='{
-  "hhan.example.com": "hhan",
-  "u2.example.com": "ubits"
-}'></textarea>
-    <div class="hint">domain 必须与 CookieCloud 里的 cookie 域名完全匹配</div>
+    <label for="interval">同步间隔（分钟）</label>
+    <input type="number" id="interval" class="narrow" min="0" max="35791" step="1" placeholder="30">
+    <div class="hint">推荐 30 分钟。填 0 或留空 = 不自动同步（只在点「立即同步」时同步）。保存后立即按新间隔生效，第一次自动同步在满一个间隔之后。</div>
+    <div class="hint warn">CookieCloud 官方服务端有限流：同一 IP 15 分钟最多 100 次请求，间隔别设太小。</div>
   </div>
+  <div class="actions">
+    <button type="button" class="btn btn-primary" id="save-btn" disabled>保存设置</button>
+    <button type="button" class="btn btn-secondary" id="sync-btn" disabled>立即同步</button>
+    <span id="toast"></span>
+  </div>
+  <div class="hint" style="margin-top:8px;">「立即同步」用的是已保存的设置。</div>
 </div>
 
-<!-- 操作按钮 -->
-<div class="actions" style="margin-bottom:16px">
-  <button class="btn btn-primary" id="btn-save" onclick="saveConfig()">保存配置</button>
-  <button class="btn btn-secondary" id="btn-sync" onclick="syncNow()">立即同步</button>
-  <button class="btn btn-secondary" id="btn-refresh" onclick="loadStatus()">刷新状态</button>
-</div>
-
-<!-- 状态卡片 -->
-<div class="card" id="status-card" style="display:none">
+<div class="card">
   <h3>同步状态</h3>
-  <div class="stats-grid" id="stats-grid"></div>
-  <div id="last-error-box"></div>
+  <dl class="status-grid">
+    <dt>当前</dt><dd id="st-running">—</dd>
+    <dt>上次完成同步</dt><dd id="st-last">—</dd>
+    <dt>累计同步次数</dt><dd id="st-count">0</dd>
+    <dt>自动同步</dt><dd id="st-next">—</dd>
+  </dl>
+  <div id="poll-stopped"></div>
+  <div id="st-error"></div>
+  <div id="st-results"></div>
+  <div class="hint" style="margin-top:8px;">每次写入宿主都会在插件日志里记一条「[审计]」（只记站点，不记 cookie 内容）。</div>
 </div>
 
 <script>
-(function() {
-  var statusBar = document.getElementById('status-bar');
+(function () {
+  var $ = function (id) { return document.getElementById(id); };
+  var sitesData = { sites: [], selected: [], missing: [], sites_error: "" };
+  var selected = {};      // 勾选的站 id（含已删除但还勾着的）
+  var lastStatus = null;
 
-  function showStatus(type, msg) {
-    statusBar.className = 'status-bar ' + type;
-    statusBar.textContent = msg;
-  }
-  function clearStatus() { statusBar.className = 'status-bar idle'; }
+  // 按钮 / 轮询的判定都在 ./state.js（CCState，纯函数，有单元测试）；这里只管 DOM 与调用 FC。
+  // 初始加载（配置 + 站点 + 状态）成功之前，「保存」「立即同步」一直禁用：
+  // 加载失败时表单是空的，这时保存会拿空值覆盖已有配置
+  var loaded = false;
+  var saving = false;
+  var syncing = false;    // 点了「立即同步」、还没拿到 /sync 的回应
 
-  // ── SDK bootstrap ──────────────────────────────────────────────────────────
+  var pollTimer = null;
+  var poll = CCState.initialPoll(); // {fails, stopped, watching}
 
-  FC.ready().then(function() {
-    loadConfig();
-    loadStatus();
-  }).catch(function(e) {
-    showStatus('error', '宿主初始化失败：' + e.message);
-  });
-
-  // ── Config load ────────────────────────────────────────────────────────────
-
-  function loadConfig() {
-    var keys = ['host', 'cloud_uuid', 'cloud_pwd', 'site_map'];
-    var promises = keys.map(function(k) {
-      return FC.config.get(k).then(function(v) { return { k: k, v: v }; });
-    });
-    Promise.all(promises).then(function(results) {
-      var cfg = {};
-      results.forEach(function(r) { cfg[r.k] = r.v; });
-
-      document.getElementById('host').value = cfg['host'] || '';
-
-      // Secret fields: show placeholder if already set
-      var uuidSet = cfg['cloud_uuid'] !== null && cfg['cloud_uuid'] !== '';
-      document.getElementById('cloud-uuid').placeholder = uuidSet ? '（已设置，留空不修改）' : '请输入 UUID';
-
-      var pwdSet = cfg['cloud_pwd'] !== null && cfg['cloud_pwd'] !== '';
-      document.getElementById('cloud-pwd').placeholder = pwdSet ? '（已设置，留空不修改）' : '请输入密码';
-
-      document.getElementById('site-map').value = cfg['site_map'] || '';
-
-      FC.resize(document.body.scrollHeight + 20);
-    }).catch(function(e) {
-      showStatus('error', '读取配置失败：' + e.message);
+  function esc(s) {
+    return String(s === null || s === undefined ? "" : s).replace(/[&<>"']/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
     });
   }
+  function fmtTime(iso) {
+    if (!iso) return "—";
+    var d = new Date(iso);
+    if (isNaN(d.getTime())) return iso;
+    function p(n) { return n < 10 ? "0" + n : "" + n; }
+    return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate()) + " " + p(d.getHours()) + ":" + p(d.getMinutes()) + ":" + p(d.getSeconds());
+  }
+  function errMsg(e) {
+    return e && e.message !== undefined ? String(e.message) : String(e);
+  }
+  function toast(kind, msg) {
+    var t = $("toast");
+    t.className = kind;
+    t.textContent = msg;
+  }
+  function resize() {
+    FC.resize(document.body.scrollHeight + 24);
+  }
+  function setSecretState(id, isSet) {
+    var el = $(id + "-state");
+    var input = $(id);
+    el.className = "secret-state" + (isSet ? "" : " unset");
+    el.textContent = isSet ? "（已设置，留空不修改）" : "（未设置）";
+    input.placeholder = isSet ? "已设置，留空不修改" : "请输入";
+  }
+  function updateButtons() {
+    var b = CCState.buttons({ loaded: loaded, saving: saving, syncing: syncing, running: !!(lastStatus && lastStatus.running) });
+    $("save-btn").disabled = b.saveDisabled;
+    $("sync-btn").disabled = b.syncDisabled;
+  }
 
-  // ── Save config ────────────────────────────────────────────────────────────
-
-  window.saveConfig = function() {
-    var btn = document.getElementById('btn-save');
-
-    // Validate site_map JSON before saving
-    var siteMapVal = document.getElementById('site-map').value.trim();
-    if (siteMapVal) {
-      try { JSON.parse(siteMapVal); }
-      catch (e) {
-        showStatus('error', 'site_map JSON 格式无效：' + e.message);
-        return;
-      }
-    }
-
-    btn.disabled = true;
-    showStatus('info', '保存中…');
-
-    var saves = [];
-
-    var host = document.getElementById('host').value.trim();
-    saves.push(FC.config.put('host', host, false));
-
-    if (siteMapVal) {
-      saves.push(FC.config.put('site_map', siteMapVal, false));
-    }
-
-    var uuid = document.getElementById('cloud-uuid').value.trim();
-    if (uuid) saves.push(FC.config.put('cloud_uuid', uuid, true));
-
-    var pwd = document.getElementById('cloud-pwd').value.trim();
-    if (pwd) saves.push(FC.config.put('cloud_pwd', pwd, true));
-
-    Promise.all(saves).then(function() {
-      btn.disabled = false;
-      showStatus('success', '配置已保存');
-      // Clear secret inputs after save
-      document.getElementById('cloud-uuid').value = '';
-      document.getElementById('cloud-pwd').value = '';
-      loadConfig();
-    }).catch(function(e) {
-      btn.disabled = false;
-      showStatus('error', '保存失败：' + e.message);
+  // 两个勾选的站 RSS 域名有交集 → 同一批 cookie 会写进两个站（多半是同一个站建了两行）
+  function renderOverlap() {
+    var pairs = CCState.overlapPairs(sitesData.sites, selected).map(function (p) {
+      return "「" + p.a + "」和「" + p.b + "」（" + p.shared.join("、") + "）";
     });
+    $("overlap-warn").innerHTML = pairs.length
+      ? '<div class="box warn" style="margin-top:8px;">勾选的站里有 RSS 域名相同的：' + esc(pairs.join("；")) +
+        '。它们会被写入同一份 cookie——如果其实是同一个站建了两行，只勾一个即可。</div>'
+      : "";
+  }
+
+  function renderSites() {
+    var list = $("site-list");
+    var sites = sitesData.sites || [];
+    if (!sites.length) {
+      list.innerHTML = '<div class="empty">还没有 Cookie 鉴权的 PT 站。先在 FollowCat 的 PT 站设置里添加站点并填好 RSS。</div>';
+    } else {
+      list.innerHTML = sites.map(function (s) {
+        var hosts = s.hosts || [];
+        var tags = "";
+        if (!hosts.length) tags += '<span class="tag warn">没配 RSS，无法匹配</span>';
+        tags += s.has_cookie ? '<span class="tag ok">已有 Cookie</span>' : '<span class="tag muted">未配置 Cookie</span>';
+        if (!s.enabled) tags += '<span class="tag muted">已停用</span>';
+        return '<div class="site-row">' +
+          '<input type="checkbox" data-site="' + esc(s.id) + '" id="site-' + esc(s.id) + '"' + (selected[s.id] ? " checked" : "") + '>' +
+          '<div class="site-main"><label class="site-name" for="site-' + esc(s.id) + '">' + esc(s.name) + '</label>' + tags +
+          '<div class="site-meta">' + (hosts.length ? "RSS 域名：" + esc(hosts.join("、")) : "适配器：" + esc(s.adapter)) + '</div></div></div>';
+      }).join("");
+    }
+    var miss = $("missing-list");
+    var missing = sitesData.missing || [];
+    var html = "";
+    if (sitesData.sites_error) html += '<div class="box err">' + esc(sitesData.sites_error) + '（保存一次设置即可修正）</div>';
+    if (missing.length) {
+      html += '<div class="box warn">下面这些勾选过的站现在找不到了（已删除或不再是 Cookie 鉴权），同步时会跳过；取消勾选后保存即可清掉：' +
+        missing.map(function (m) {
+          var label = m.name ? m.name + "（" + m.id + "）" : m.id;
+          var why = m.reason === "not_cookie_site" ? "不再是 Cookie 鉴权" : "站点已删除";
+          return '<div class="site-row"><input type="checkbox" data-site="' + esc(m.id) + '" id="site-' + esc(m.id) + '"' + (selected[m.id] ? " checked" : "") + '>' +
+            '<div class="site-main"><label class="site-name" for="site-' + esc(m.id) + '">' + esc(label) + '</label><span class="tag err">' + why + '</span></div></div>';
+        }).join("") + '</div>';
+    }
+    miss.innerHTML = html;
+    var boxes = document.querySelectorAll("input[data-site]");
+    for (var i = 0; i < boxes.length; i++) {
+      boxes[i].addEventListener("change", function (e) {
+        var id = e.target.getAttribute("data-site");
+        if (e.target.checked) selected[id] = true; else delete selected[id];
+        renderOverlap();
+        resize();
+      });
+    }
+    renderOverlap();
+  }
+
+  var STATE_TAG = {
+    written: "ok", unchanged: "muted", no_rss: "warn", no_cookie: "warn",
+    site_missing: "err", not_cookie_site: "warn", failed: "err"
+  };
+  var STATE_LABEL = {
+    written: "已写入", unchanged: "未变化", no_rss: "没配 RSS", no_cookie: "没有 cookie",
+    site_missing: "站点已删", not_cookie_site: "非 Cookie 站", failed: "失败"
   };
 
-  // ── Sync now ───────────────────────────────────────────────────────────────
+  function renderStatus(st) {
+    lastStatus = st;
+    if (st.running) {
+      $("st-running").innerHTML = '<span class="spinner"></span> 同步中（' + (st.last_trigger === "timer" ? "定时" : "手动") + "，开始于 " + esc(fmtTime(st.started_at)) + "）";
+    } else {
+      $("st-running").textContent = st.finished_at
+        ? "空闲（上次" + (st.last_trigger === "timer" ? "定时" : "手动") + "同步结束于 " + fmtTime(st.finished_at) + "）"
+        : "空闲";
+    }
+    $("st-last").textContent = fmtTime(st.last_synced_at);
+    $("st-count").textContent = String(st.synced_count || 0);
+    $("st-next").textContent = st.interval_min > 0
+      ? "每 " + st.interval_min + " 分钟，下次约 " + fmtTime(st.next_run_at)
+      : "未开启";
+    $("st-error").innerHTML = st.last_error ? '<div class="box err">最近一次的问题：' + esc(st.last_error) + "</div>" : "";
+    var rs = st.results || [];
+    if (!rs.length) {
+      $("st-results").innerHTML = st.running ? "" : '<div class="empty">' + (st.finished_at ? "这次同步没有结果（没勾选站点、也没开豆瓣，或同步中途出错）。" : "本次启动后还没同步过。") + "</div>";
+    } else {
+      $("st-results").innerHTML = '<table><thead><tr><th>目标</th><th>结果</th><th>说明</th></tr></thead><tbody>' +
+        rs.map(function (r) {
+          var tag = STATE_TAG[r.status] || "muted";
+          if (r.status === "written" && r.validation && r.validation !== "ok") tag = "warn";
+          return "<tr><td>" + esc(r.name) + "</td><td class=\"state\"><span class=\"tag " + tag + "\" style=\"margin-left:0\">" +
+            esc(STATE_LABEL[r.status] || r.status) + "</span></td><td>" + esc(r.message) + "</td></tr>";
+        }).join("") + "</tbody></table>";
+    }
+    // 任何一次成功拿到状态都把「停止轮询」复位；running 就接着轮询（I3）
+    var r = CCState.onStatus(poll, st);
+    poll = r.poll;
+    if (r.clearStopped) $("poll-stopped").innerHTML = "";
+    if (r.schedule) schedulePoll();
+    if (r.finished) toast(r.finished.kind, r.finished.msg);
+    updateButtons();
+    resize();
+  }
 
-  window.syncNow = function() {
-    var btn = document.getElementById('btn-sync');
-    btn.disabled = true;
-    showStatus('info', '同步中，请稍候…');
-
-    FC.api('/sync', {}).then(function(res) {
-      btn.disabled = false;
-      if (res && res.ok) {
-        showStatus('success', '同步完成，写入 ' + (res.written || 0) + ' 个站点');
-        loadStatus();
-      } else {
-        var errMsg = (res && res.error) ? res.error : '未知错误';
-        showStatus('error', '同步失败：' + errMsg);
-        loadStatus();
-      }
-    }).catch(function(e) {
-      btn.disabled = false;
-      showStatus('error', '请求出错：' + e.message);
+  function showPollStopped(msg) {
+    $("poll-stopped").innerHTML = '<div class="box warn">' + esc(msg) +
+      '<br><button type="button" class="btn btn-secondary" id="poll-retry">重试</button></div>';
+    $("poll-retry").addEventListener("click", function () {
+      $("poll-stopped").innerHTML = "";
+      poll = CCState.onRetry(poll);
+      pollOnce();
     });
-  };
+    resize();
+  }
 
-  // ── Load status ────────────────────────────────────────────────────────────
+  function stopPolling(msg) {
+    if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+    showPollStopped(msg);
+  }
 
-  window.loadStatus = function() {
-    FC.api('/status', null).then(function(data) {
-      if (!data) return;
-      renderStatus(data);
-      FC.resize(document.body.scrollHeight + 20);
-    }).catch(function() { /* status optional */ });
-  };
+  function pollOnce() {
+    pollTimer = null;
+    FC.api("/status").then(renderStatus, function (e) {
+      var r = CCState.onStatusError(poll, errMsg(e));
+      poll = r.poll;
+      if (r.stop) stopPolling(r.stop);
+      if (r.toast) toast("err", r.toast);
+      if (r.schedule) schedulePoll();
+    });
+  }
 
-  function renderStatus(data) {
-    var card = document.getElementById('status-card');
-    var grid = document.getElementById('stats-grid');
-    var errBox = document.getElementById('last-error-box');
+  function schedulePoll() {
+    if (!CCState.shouldSchedule(poll, !!pollTimer)) return;
+    pollTimer = setTimeout(pollOnce, CCState.POLL_MS);
+  }
 
-    card.style.display = '';
-    grid.innerHTML = '';
-    errBox.innerHTML = '';
+  function readInterval() {
+    var el = $("interval");
+    return CCState.readInterval(el.value, !!(el.validity && el.validity.badInput));
+  }
 
-    var lastSynced = data.last_synced_at ? formatTime(data.last_synced_at) : '从未';
-    var configured = data.configured ? '已配置' : '未配置';
-    var configuredWarn = !data.configured;
-
-    var cells = [
-      { label: '配置状态', value: configured, warn: configuredWarn },
-      { label: '上次同步', value: lastSynced, warn: false },
-      { label: '累计同步次数', value: String(data.synced_count || 0), warn: false }
+  function save() {
+    if (!loaded || saving) return;
+    var iv = readInterval();
+    if (!iv.ok) { toast("err", iv.msg); return; }
+    var host = String($("host").value || "").trim();
+    if (host && !/^https?:\/\//i.test(host)) { toast("err", "CookieCloud 地址要以 http:// 或 https:// 开头"); return; }
+    var uuid = String($("uuid").value || "").trim();
+    var pwd = String($("pwd").value || "");
+    var ids = Object.keys(selected);
+    var puts = [
+      ["host", host, false],
+      ["sites", JSON.stringify(ids), false],
+      ["sync_douban", $("sync-douban").checked ? "true" : "false", false],
+      ["sync_interval_min", iv.value, false]
     ];
-
-    cells.forEach(function(c) {
-      var div = document.createElement('div');
-      div.className = 'stat-cell' + (c.warn ? ' warn' : '');
-      div.innerHTML = '<div class="label">' + c.label + '</div><div class="value">' + escHtml(c.value) + '</div>';
-      grid.appendChild(div);
+    if (uuid !== "") puts.push(["cloud_uuid", uuid, true]);   // 留空 = 不修改
+    if (pwd !== "") puts.push(["cloud_pwd", pwd, true]);
+    saving = true;
+    updateButtons();
+    toast("", "保存中…");
+    var chain = Promise.resolve();
+    puts.forEach(function (p) {
+      chain = chain.then(function () { return FC.config.put(p[0], p[1], p[2]); });
     });
-
-    if (data.last_error) {
-      var errEl = document.createElement('div');
-      errEl.className = 'last-error';
-      errEl.textContent = '最近错误：' + data.last_error;
-      errBox.appendChild(errEl);
-    }
+    chain.then(function () {
+      if (uuid !== "") { $("uuid").value = ""; setSecretState("uuid", true); }
+      if (pwd !== "") { $("pwd").value = ""; setSecretState("pwd", true); }
+      return FC.api("/reschedule", {});
+    }).then(function (st) {
+      renderStatus(st); // 正在同步（如定时刚触发）→ 这里接着轮询
+      return FC.api("/sites").then(function (d) { sitesData = d; renderSites(); resize(); });
+    }).then(function () {
+      toast("ok", "已保存");
+    }, function (e) {
+      toast("err", "保存失败：" + errMsg(e));
+    }).then(function () {
+      saving = false;
+      updateButtons();
+    });
   }
 
-  function formatTime(iso) {
-    if (!iso) return '从未';
-    try {
-      var d = new Date(iso);
-      return d.toLocaleString('zh-CN', { hour12: false });
-    } catch (e) {
-      return iso;
-    }
+  function syncNow() {
+    if (!loaded || syncing) return;
+    syncing = true;
+    updateButtons();
+    toast("", "");
+    FC.api("/sync", {}).then(function (r) {
+      if (r && r.started === false) toast("", "已有同步在进行，等它结束…");
+      else toast("", "同步已开始…");
+      syncing = false;
+      // 触发成功后重新开始看状态（之前因出错停了的轮询也恢复）
+      poll = CCState.onSyncTriggered(poll);
+      $("poll-stopped").innerHTML = "";
+      return FC.api("/status").then(renderStatus, function (e) {
+        // 同步已经在跑，只是这次没读到状态：按钮恢复，交给轮询继续看
+        updateButtons();
+        toast("err", "同步已开始，但读取状态失败：" + errMsg(e) + "（稍后自动重试）");
+        schedulePoll();
+      });
+    }, function (e) {
+      syncing = false;
+      updateButtons();
+      toast("err", "触发同步失败：" + errMsg(e));
+    });
   }
 
-  function escHtml(s) {
-    return String(s)
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;');
+  function load() {
+    $("load-error").innerHTML = "";
+    toast("", "加载中…");
+    return Promise.all([
+      FC.config.get("host"),
+      FC.config.get("cloud_uuid"),
+      FC.config.get("cloud_pwd"),
+      FC.config.get("sync_douban"),
+      FC.config.get("sync_interval_min"),
+      FC.api("/sites"),
+      FC.api("/status")
+    ]).then(function (v) {
+      $("host").value = v[0] || "";
+      // 设过的 secret 回读 ""，没设过回读 null：判断「已设置」只能用 !== null
+      setSecretState("uuid", v[1] !== null);
+      setSecretState("pwd", v[2] !== null);
+      $("sync-douban").checked = v[3] === "true";
+      $("interval").value = v[4] || "";
+      sitesData = v[5];
+      selected = {};
+      (sitesData.selected || []).forEach(function (id) { selected[id] = true; });
+      loaded = true;
+      toast("", "");
+      renderSites();
+      renderStatus(v[6]);
+    }, function (e) {
+      toast("", "");
+      $("load-error").innerHTML = '<div class="box err">加载设置失败：' + esc(errMsg(e)) +
+        '。加载成功之前不能保存（避免用空表单覆盖已有设置）。' +
+        '<br><button type="button" class="btn btn-secondary" id="load-retry">重试</button></div>';
+      $("load-retry").addEventListener("click", load);
+      updateButtons();
+      resize();
+    });
   }
+
+  $("save-btn").addEventListener("click", save);
+  $("sync-btn").addEventListener("click", syncNow);
+  FC.ready().then(load, function (e) {
+    $("load-error").innerHTML = '<div class="box err">连不上宿主：' + esc(errMsg(e)) + '</div>';
+    resize();
+  });
 })();
 </script>
 </body>

@@ -10,7 +10,8 @@
 //   * 用户只配「比哪些维度」+「每个维度用什么操作符」（==、>=、regex）。
 //   * 双端 fail-open：tag 端或库端任一端拿不到值 → 该维度不匹配 → 放行。
 //   * 已配维度全部匹配才算「库里有」→ return false；其余一切 → return true。
-//   * 硬超时 3s；库查询整体预算 ≤2500ms；外部库宕机不拖垮下载管线。
+//   * 宿主硬超时 3s（墙钟，含 await）；库查询软预算 2500ms 只在两次请求之间检查，挡不住已经
+//     发出的请求——在途请求拖过 3s 时宿主已 fail-open 放行，迟到的结果只写缓存、计 late、打一条 warn。
 //   * tmdb_id 缺失 → 无法精确查库 → 放行。
 //
 // === 7 个比对维度 ===
@@ -21,6 +22,8 @@
 //   emby_enabled / emby_url / emby_api_key
 //   plex_enabled / plex_url / plex_token
 //   cache_ttl_sec / dry_run
+//   （插件自己写的：计数器、emby_/plex_last_error[_at]、lib_cache_*（最多 CACHE_MAX_KEYS 个，写缓存时淘汰过期 /
+//    最旧的）、cache_gen（缓存代号，启动时据此删旧版本留下的缓存））
 //
 // === per-flow 配置 key ===
 //   flow_<id>_enabled   "1" 启用本 flow 否决
@@ -32,9 +35,14 @@
 
 var CACHE_PREFIX = "lib_cache_";
 var DEFAULT_CACHE_TTL_SEC = 3600;
+// 缓存键总数上限：给计数器 / per-flow 配置等留足宿主每插件 500 个 key 的配额余量
+var CACHE_MAX_KEYS = 300;
+// 缓存代号：0.4.0 起写入；启动时发现不是这个值 = 旧版本留下的缓存，整批删掉（旧版不淘汰，可能早已把配额写满）
+var CACHE_GEN_KEY = "cache_gen";
+var CACHE_GEN = "2";
 var LIB_CHECK_SOFT_BUDGET_MS = 2500;
 // 镜像宿主 should_download 超时（3s 墙钟，含 await）：过了这个点宿主已 fail-open 放行、
-// 结果被丢弃，迟到的续体只写缓存，不记决策日志、不动 /stats 计数
+// 结果被丢弃，迟到的续体只写缓存 + 计 late + 打一条不带裁决的 warn，不记决策日志、不动其它计数
 var HOST_FILTER_TIMEOUT_MS = 3000;
 
 var MATCH_DIMS = ["resolution", "video_encode", "audio_encode", "code_bits", "hdr", "dv", "format"];
@@ -160,16 +168,28 @@ function strEq(observed, want) {
     return trim(String(observed)).toLowerCase() === trim(String(want)).toLowerCase();
 }
 
-function specBool(v) {
+// hdr / dv 的 tag 端归一成布尔。宿主给的是字符串（mediatag 识别原文如 "HDR"、种子字典值如
+// "HDR10" / "HDR10+" / "HLG" / "HDR Vivid" / "SDR" / "DolbyVision"；没识别到填 "无"），也兼容布尔。
+// 空 / "无" / none / no / false / 0 / sdr（大小写不敏感）= 否，其余非空值 = 是。
+var TAG_FALSE_WORDS = { "": 1, "无": 1, "none": 1, "no": 1, "false": 1, "0": 1, "sdr": 1 };
+function tagBool(v) {
     if (v === true) return true;
     if (v === false) return false;
     var s = trim(String(v == null ? "" : v)).toLowerCase();
-    return s === "1" || s === "true" || s === "yes";
+    return !TAG_FALSE_WORDS.hasOwnProperty(s);
 }
 
-// tag 值是否「有值」（null/undefined/"" 算空；boolean false 是有效值）
+// tag 值是否「有值」（null/undefined/"" 算空；boolean false、hdr/dv 的 "无" 都是有效值「否」）
 function tagHasValue(v) {
     return v !== null && v !== undefined && v !== "";
+}
+
+// 取种子端某维度参与比对的值。hdr 与库端一致：种子 dv 为「是」时 hdr 也算「是」（杜比视界就是一种 HDR；
+// 库端 rangeFlags / plexItemCopies 同样把 DV 副本记成 hdr=true）
+function tagDimValue(tags, dim) {
+    if (!tags || typeof tags !== "object") return undefined;
+    if (dim === "hdr" && tagHasValue(tags.dv) && tagBool(tags.dv)) return true;
+    return tags[dim];
 }
 
 // 从 copy 对象取某维度对应的库端观测值
@@ -210,7 +230,7 @@ function dimMatch(dim, op, tagValue, libValue, pattern) {
     }
 
     if (dim === "hdr" || dim === "dv") {
-        return !!libValue === specBool(tagValue);
+        return !!libValue === tagBool(tagValue);
     }
 
     if (dim === "code_bits") {
@@ -234,7 +254,7 @@ function copyMatchesTags(copy, tags, dims) {
         var cfg = dims[dim];
         if (!cfg || typeof cfg !== "object") continue;
         var op = cfg.op || "==";
-        var tagValue = tags[dim];
+        var tagValue = tagDimValue(tags, dim);
         var libValue = copyDimValue(copy, dim);
         if (!dimMatch(dim, op, tagValue, libValue, cfg.pattern)) return false;
     }
@@ -279,8 +299,17 @@ function readCache(key) {
 
 function writeCache(key, entry) {
     if (!nonEmpty(key)) return;
+    if (canEvictCache()) {
+        if (cacheTtlSec() <= 0) {
+            // 缓存关闭：写进去也是一落地就过期、永远不会被读，不写；顺手清掉旧的
+            pruneCache(nowSec(), null);
+            return;
+        }
+        pruneCache(typeof entry.ts === "number" ? entry.ts : nowSec(), key);
+    }
     try {
         config.set(key, JSON.stringify(entry));
+        if (cacheIndex) cacheIndex[key] = typeof entry.ts === "number" ? entry.ts : 0;
     } catch (e) {
         cache_write_fail++;
         log.warn("media-library-filter: cache write failed: " + e);
@@ -289,6 +318,80 @@ function writeCache(key, entry) {
 
 function cacheTtlSec() {
     return safeNum(config.get("cache_ttl_sec"), DEFAULT_CACHE_TTL_SEC);
+}
+
+// ====== 缓存淘汰（需要宿主的 config.delete；旧宿主没有它时不淘汰，行为同 0.3.x） ======
+//
+// 内存里记一份「缓存键 → 写入时间」索引，每次写缓存前先按 config.list() 对一遍账（管理页手动加 / 删的键也算进来，
+// 新出现的键读一次 ts），然后：先删过期项（按 cache_ttl_sec），再看总数，超过 CACHE_MAX_KEYS 就从最旧的删起。
+// 这样缓存永远不会把插件配置的 500 个 key 配额撑满（撑满后计数器、per-flow 配置都写不进去）。
+
+var cacheIndex = null; // key → ts（秒）；解析不了的旧值记 0（最先被当成过期删掉）
+
+function canEvictCache() {
+    return typeof config === "object" && config !== null && typeof config["delete"] === "function";
+}
+
+// 与 config.list() 对账：列表里有、索引里没有的缓存键读一次 ts 补进来；索引里有、列表里已经没有的去掉
+function loadCacheIndex() {
+    var old = cacheIndex || {};
+    var next = {};
+    var keys = [];
+    try { keys = config.list() || []; } catch (e) { keys = []; }
+    for (var i = 0; i < keys.length; i++) {
+        var k = String(keys[i]);
+        if (k.indexOf(CACHE_PREFIX) !== 0) continue;
+        if (Object.prototype.hasOwnProperty.call(old, k)) { next[k] = old[k]; continue; }
+        var entry = readCache(k);
+        next[k] = (entry && typeof entry.ts === "number") ? entry.ts : 0;
+    }
+    cacheIndex = next;
+}
+
+function dropCacheKey(k) {
+    try { config["delete"](k); } catch (e) { log.warn("media-library-filter: cache delete failed: " + e); }
+    if (cacheIndex) delete cacheIndex[k];
+}
+
+// keepKey：马上要写的那个 key（不删它，并按「写入后」的总数算上限）
+function pruneCache(nowS, keepKey) {
+    loadCacheIndex();
+    var ttl = cacheTtlSec();
+    var k;
+    for (k in cacheIndex) {
+        if (!Object.prototype.hasOwnProperty.call(cacheIndex, k) || k === keepKey) continue;
+        if (ttl <= 0 || (nowS - cacheIndex[k]) >= ttl) dropCacheKey(k);
+    }
+    var rest = [];
+    for (k in cacheIndex) {
+        if (Object.prototype.hasOwnProperty.call(cacheIndex, k) && k !== keepKey) rest.push(k);
+    }
+    var total = rest.length + (keepKey ? 1 : 0);
+    if (total <= CACHE_MAX_KEYS) return;
+    rest.sort(function (a, b) {
+        var d = cacheIndex[a] - cacheIndex[b];
+        return d !== 0 ? d : (a < b ? -1 : (a > b ? 1 : 0));
+    });
+    for (var i = 0; i < rest.length && total > CACHE_MAX_KEYS; i++) {
+        dropCacheKey(rest[i]);
+        total--;
+    }
+}
+
+// 启动时：旧版本留下的缓存（没有 cache_gen 标记）整批删掉；否则只删过期 / 超限的
+function initCache() {
+    if (!canEvictCache()) return;
+    loadCacheIndex();
+    if (config.get(CACHE_GEN_KEY) !== CACHE_GEN) {
+        var n = 0;
+        for (var k in cacheIndex) {
+            if (Object.prototype.hasOwnProperty.call(cacheIndex, k)) { dropCacheKey(k); n++; }
+        }
+        config.set(CACHE_GEN_KEY, CACHE_GEN);
+        if (n > 0) log.info("media-library-filter: removed " + n + " cache keys left by an older version");
+        return;
+    }
+    pruneCache(nowSec(), null);
 }
 
 function cacheFresh(entry) {
@@ -635,10 +738,13 @@ async function resolveLibraryStatus(tmdbType, tmdbID, season, episode) {
     var deadline = nowMs() + LIB_CHECK_SOFT_BUDGET_MS;
     var r = await performLibraryCheck(tmdbType, tmdbID, season, episode, deadline);
 
-    var hadError = false;
+    // 查库没完整做完：任一后端请求失败 / 没配好，或超了软预算没轮到下一个后端。这时「没查到」不代表
+    // 库里没有：不写缓存（别把暂时的故障固化），判定按 allowed_error 计
+    var hadError = !r.hit && r.reason === "deadline";
     for (var i = 0; i < (r.sources || []).length; i++) {
         if (r.sources[i].ok === false) hadError = true;
     }
+    r.incomplete = hadError;
     if (!hadError) {
         writeCache(key, {
             copies: r.copies || [],
@@ -733,7 +839,7 @@ async function decideShouldDownload(p, callDeadline) {
     // tag 端空值短路：任一已配维度 tag 为空 → dimMatch 必 false → 无需查库
     for (var dim in fc.dims) {
         if (!fc.dims.hasOwnProperty(dim)) continue;
-        if (!tagHasValue(tags[dim])) {
+        if (!tagHasValue(tagDimValue(tags, dim))) {
             incCounter("allowed_tag_empty");
             return { allow: true, reason: "tag_empty", empty_dim: dim, fc: fc };
         }
@@ -750,9 +856,10 @@ async function decideShouldDownload(p, callDeadline) {
     }
     if (callDeadline && nowMs() > callDeadline) return { allow: true, reason: "late", late: true };
 
-    if (!libStatus.hit && libStatus.reason === "deadline") {
+    if (!libStatus.hit && libStatus.incomplete) {
+        // Emby / Plex 请求失败（含超了软预算没查完）：不是「库里没有」
         incCounter("allowed_error");
-        return { allow: true, reason: "deadline", fc: fc };
+        return { allow: true, reason: libStatus.reason === "deadline" ? "deadline" : "lib_error", fc: fc, lib: libStatus };
     }
 
     var copies = isArray(libStatus.copies) ? libStatus.copies : [];
@@ -955,7 +1062,7 @@ async function decideShouldDownloadBatch(p, callDeadline) {
     // tag 端空值短路
     for (var dim in fc.dims) {
         if (!fc.dims.hasOwnProperty(dim)) continue;
-        if (!tagHasValue(tags[dim])) {
+        if (!tagHasValue(tagDimValue(tags, dim))) {
             incCounter("allowed_tag_empty");
             return { allow: true, reason: "tag_empty", empty_dim: dim };
         }
@@ -1042,8 +1149,21 @@ async function decideShouldDownloadBatch(p, callDeadline) {
 
 // ====== Hook 注册 ======
 
+// 宿主 3s 超时之后才回来：宿主早已 fail-open 放行，这里的结论没人看。只计 late + 打一条 warn，
+// 不带裁决（免得被误读成「这次否决了」）
+function noteLate(p, startMs, why) {
+    var media = (p && p.media) || {};
+    incCounter("late");
+    log.warn("media-library-filter: should_download finished after the host's " + HOST_FILTER_TIMEOUT_MS +
+             "ms timeout (" + (nowMs() - startMs) + "ms; host already allowed the download, result discarded) flow=" +
+             (p && p.flow_id) + " tmdb=" + (media.tmdb_id || "") + " s" + (media.season || 0) + "e" + (media.episode || 0) +
+             (media.episode_end ? "-" + media.episode_end : "") + (why ? " " + why : ""));
+    return true;
+}
+
 plugin.on("should_download", async function (p) {
-    var callDeadline = nowMs() + HOST_FILTER_TIMEOUT_MS;
+    var startMs = nowMs();
+    var callDeadline = startMs + HOST_FILTER_TIMEOUT_MS;
     try {
         var media = (p && p.media) || {};
         var episodeEnd = safeNum(String(media.episode_end == null ? "" : media.episode_end), 0);
@@ -1052,7 +1172,7 @@ plugin.on("should_download", async function (p) {
         // ---- 合集路径：episode_end > 0 → bitmap 协议 ----
         if (episodeEnd > 0) {
             var db = await decideShouldDownloadBatch(p || {}, callDeadline);
-            if (db.late) return true;
+            if (db.late) return noteLate(p, startMs);
             log.info("media-library-filter: should_download [batch] flow=" + (p && p.flow_id) +
                      " tmdb=" + (media.tmdb_id || "") + " s" + (media.season || 0) +
                      " e" + (media.episode || 0) + "-" + episodeEnd +
@@ -1074,7 +1194,7 @@ plugin.on("should_download", async function (p) {
 
         // ---- 单集/电影路径：保持原有 bool 逻辑 ----
         var d = await decideShouldDownload(p || {}, callDeadline);
-        if (d.late) return true;
+        if (d.late) return noteLate(p, startMs);
         log.info("media-library-filter: should_download flow=" + (p && p.flow_id) +
                  " tmdb=" + (media.tmdb_id || "") + " s" + (media.season || 0) + "e" + (media.episode || 0) +
                  " reason=" + d.reason +
@@ -1089,7 +1209,7 @@ plugin.on("should_download", async function (p) {
         if (d.allow === false) return false;
         return true;
     } catch (e) {
-        if (nowMs() > callDeadline) return true;
+        if (nowMs() > callDeadline) return noteLate(p, startMs, "error=" + e);
         log.error("media-library-filter: should_download handler error: " + e);
         incCounter("allowed_error");
         return true;
@@ -1146,6 +1266,7 @@ plugin.registerAPI("/stats", function (req) {
             allowed_error: safeNum(config.get("allowed_error"), 0),
             dry_run_would_veto: safeNum(config.get("dry_run_would_veto"), 0),
             batch_partial_filtered: safeNum(config.get("batch_partial_filtered"), 0),
+            late: safeNum(config.get("late"), 0),
             cache_write_fail: cache_write_fail
         },
         errors: {
@@ -1169,7 +1290,7 @@ function buildCopyTrace(copies, tags, dims) {
                 if (!dims.hasOwnProperty(dim)) continue;
                 var cfg = dims[dim] || {};
                 var op = cfg.op || "==";
-                var tagValue = tags ? tags[dim] : undefined;
+                var tagValue = tagDimValue(tags, dim);
                 var libValue = copyDimValue(copy, dim);
                 var ok = dimMatch(dim, op, tagValue, libValue, cfg.pattern);
                 if (!ok) matchAll = false;
@@ -1401,6 +1522,8 @@ plugin.registerAPI("/save-config", function (req) {
     }
     return { ok: true, written: written };
 });
+
+try { initCache(); } catch (e) { log.warn("media-library-filter: cache cleanup at startup failed: " + e); }
 
 log.info("media-library-filter loaded (like-for-like dedup; emby=" + isEnabled("emby_enabled") +
          " plex=" + isEnabled("plex_enabled") +

@@ -47,6 +47,20 @@
 3. 若 `manifest_diff.blocking == true`，安装按钮变为**禁用**，提示具体不一致的字段。此时只能联系插件作者修正 registry 条目。
 4. `blocking == false` 时点击「**确认安装**」完成安装，插件自动出现在已安装列表。
 
+### 安装结果：已安装，但启用失败
+
+安装 / 升级（市场与本地上传 zip 都一样）的结果按插件**实际是否在运行**提示：
+
+- 文件替换成功、插件也启动了 → 「已安装」。
+- 文件已经替换成新版本，但新版本**启用失败**（如入口脚本 10 秒没跑完、入口脚本里宿主出错）→ 这**不算安装失败**：提示「已安装，但启用失败：原因」，插件留在已安装列表里、处于停用状态，原因也写进插件详情的最近错误。修好后重新启用即可，不用重装。接口上是 HTTP 200，响应里 `enabled: false`、`enable_error` 为原因（市场升级的响应也从 `{plugin_id}` 变成 `{plugin_id, enabled, enable_error?}`）。
+- 安装前的校验（下载、sha256、zip 结构、manifest 一致性）都在停掉旧版本**之前**做完；停掉旧版本之后才失败的，旧版本原来的运行状态会恢复。
+
+预览对话框里的「当前已启用」指的是这个插件**现在是否在运行**（覆盖安装会沿用它）。
+
+### zip 结构要求
+
+zip 内每个条目的路径都要安全（不能有 `..`、绝对路径），归一化之后**不能重名**（例如同时有 `manifest.json` 和 `./manifest.json`、或同名文件出现两次）——有任何重复，整个 zip 直接被拒绝（`duplicate entry "..."`），预览与安装都一样。`ui/` 下只允许界面资源（`.html` `.css` `.js` `.json` `.map` `.txt`、`.svg` `.png` `.jpg` `.jpeg` `.gif` `.webp`、`.woff` `.woff2`）；单文件 ≤ 5 MiB、解压总大小 ≤ 20 MiB、最多 200 个条目。
+
 ---
 
 ## 升级插件
@@ -115,6 +129,10 @@ zip 文件的实际 SHA-256 与 registry entry 中 `zip_sha256` 不一致。可�
 - registry 维护者上传了新 zip 但没有更新 `zip_sha256`
 
 解决方案：联系 registry 维护者重新计算并更新 `zip_sha256`。
+
+### "duplicate plugin ..."
+
+registry 的 `index.json` 里同一个插件出现了不止一条 entry，整个源解析失败（一个插件只能有一条，见 [`registry-schema.md`](./registry-schema.md#一个插件只能有一条-entry)）。解决方案：联系 registry 维护者删掉多余的 entry。
 
 ### "manifest diff blocking"
 

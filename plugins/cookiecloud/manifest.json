@@ -2,9 +2,22 @@
   "name": "cookiecloud",
   "version": "1.0.0",
   "author": "FollowCat",
-  "description": "从 CookieCloud server 同步浏览器 cookies 到 PT 站凭据 (site_cookie_<id>)",
+  "description": "从自建 CookieCloud 同步浏览器 cookie 到 PT 站凭据与豆瓣 Cookie：按 RSS 域名匹配，只写变了的，可定时自动同步",
   "source_url": "https://plugins.followcat.io/cookiecloud",
-  "draft": true,
-  "permissions": ["api.http", "ui.embed"],
-  "hooks": []
+  "homepage_url": "https://github.com/Bespertrijun/followcat-official-plugins/tree/main/plugins/cookiecloud",
+  "icon": "🍪",
+  "permissions": [
+    "api.http",
+    "ui.embed",
+    "api.ptsite.read",
+    "api.ptsite.write",
+    "api.douban.cookie.read",
+    "api.douban.cookie.write"
+  ],
+  "hooks": [],
+  "ui": {
+    "entry": "ui/index.html",
+    "slots": ["plugin.settings"],
+    "icon": "🍪"
+  }
 }

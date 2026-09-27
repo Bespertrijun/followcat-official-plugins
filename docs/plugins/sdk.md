@@ -1,6 +1,8 @@
 # FollowCat 插件 SDK 参考（MVP）
 
-> 本文是 MVP 阶段插件作者的速查手册。完整设计与扩展规划见 [plugin_guide.md](../../plugin_guide.md)；本文档只列**已实现并可用**的能力。
+> 本文是 MVP 阶段插件作者的速查手册，只列**已实现并可用**的能力。实战教程见 [`dev-guide.md`](./dev-guide.md)；设计与扩展规划在 FollowCat 主仓 `docs/`（`plugin-runtime-eventloop-plan.md`、`plugin-permission-expansion-plan.md`）。
+>
+> **威胁模型：插件可信，只防意外。** 插件跑在 FollowCat 进程里（每个插件一个 JS 引擎，不是独立进程）。宿主防的是**意外**——远端返回的怪数据、手滑写出的死循环、写得不好的正则、启动时插件出错——保证它们不把 FollowCat 带崩：启动时插件出问题只让该插件启用失败，停用一定在有限时间内完成。宿主**不防故意构造的攻击代码**，所以只安装你信任的插件（自己写的或官方的）。
 
 ---
 
@@ -33,21 +35,27 @@ my-plugin/
 
 ## Hook 列表（9 个：8 个通知 hook + 1 个同步否决 hook）
 
-> JS 侧通过 `plugin.on("<hook_name>", function(data) { ... })` 订阅。同名 hook 多次注册以最后一次为准。所有 hook payload 字段命名见 `internal/domain/event.go`，并由 `internal/domain/event_payload_test.go` 锁定。hook 须同时在 `manifest.hooks` 声明、并持有对应权限（见下表与「权限」章）。
+> JS 侧通过 `plugin.on("<hook_name>", function(data) { ... })` 订阅。同名 hook 多次注册以最后一次为准。所有 hook payload 字段命名见主仓 `internal/domain/event.go`（`on_task_completed` 的统一形态见 `internal/plugin/event_bridge.go`），并由 `internal/domain/event_payload_test.go` 锁定。hook 须同时在 `manifest.hooks` 声明、并持有对应权限（见下表与「权限」章）。
+>
+> 类型：`anime_id` / `task_id` / `episode*` / `total_*` 是**数字**，`media_id` 是**字符串**，`episodes` 是数字数组。
 
 | Hook | 所需权限 | 触发时机 | payload 关键字段 |
 |------|---------|---------|-----------------|
 | `on_episode_found` | `hook.download.read` | RSS 发现新集 | `anime_id`, `episode`, `torrent_url` |
 | `on_download_done` | `hook.download.read` | qBittorrent 下载完成 | `anime_id`, `anime_title`, `episode`, `hash`, `files: [{path,size}]?`, `size?`, `save_path?`, `category?` |
-| `on_download_failed` | `hook.download.read` | 下载失败（不可恢复） | `anime_id`, `anime_title`, `episode`, `hash`, `reason` |
+| `on_download_failed` | `hook.download.read` | 下载失败（不可恢复） | `anime_id`, `anime_title`, `episode`, `episode_end?`, `hash`, `reason` |
 | `on_link_done` | `hook.link.read` | 链接整理完成（自动整理路径） | `anime_id`, `anime_title`, `episode`, `dest?`, `tmdb_episode?` |
-| `on_link_failed` | `hook.link.read` | 链接执行失败 | `anime_id`, `anime_title`, `episode`, `reason`, `hash?` |
+| `on_link_failed` | `hook.link.read` | 链接执行失败 | `anime_id`, `anime_title`, `episode`, `episode_end?`, `reason`, `hash?` |
 | `on_episode_acquired` | `hook.task.read` | **集数新入库**：只在集数新入库（位图由灭变亮）时触发，覆盖自动整理 / 手动链接（含部分完成）/ 合集确认；重复整理已入库的集不触发 | `source`, `task_id`, `media_id`, `media_title`, `episodes`, `unit_kind`, `completed_units`, `total_units` |
-| `on_task_completed` | `hook.task.read` | 番剧或豆瓣任务完结（每次完结恰好一次） | `source`（`"mikan"`/`"douban"`）, `task_id`, `media_title`, `total_ep`；兼容旧字段 `anime_title`（同 `media_title`） |
+| `on_task_completed` | `hook.task.read` | 番剧或豆瓣任务完结（每次完结恰好一次） | `source`（`"mikan"`/`"douban"`）, `task_id`, `media_id`, `media_title`, `total_ep`；兼容旧字段 `anime_title`（同 `media_title`） |
 | `on_task_reopened` | `hook.task.read` | 已完成任务因总集数上调/新集出现被打回继续追更（done→tracking） | `source`（`"mikan"`/`"douban"`）, `task_id`, `media_id`, `media_title`, `old_total_ep`, `new_total_ep`, `acquired_units` |
 | `should_download` | `hook.download.write` ⚠️敏感 | ruleflow 推种到 qBittorrent 之前（同步否决，见下节） | 见下节 `PreDownloadCheck` |
 
-> `?` 表示后端可能省略（omitempty）；插件代码须自行做空值兜底。
+> `?` 表示这个字段可能没有有效值：字段**恒在**，没有有效值时是**零值**（空串 `""` / `0` / 空数组 `[]`，个别为 `null`），不会变成 `undefined`。判断「有没有」看值本身（`if (p.size > 0)`、`if (p.files.length)`）；写成 `p.size || 0`、`p.files || []` 也无妨。`episode_end` 只在合集时有意义（`> 0`，与 `episode` 组成 `[episode, episode_end]` 区间），单集 / 电影时为 `0`。
+>
+> **payload 是你自己的一份普通 JS 对象**：宿主给每个订阅插件、每次投递各发一份独立拷贝（宿主数据 → JSON → 沙箱内置 `JSON.parse`），和你自己 `JSON.parse` 出来的对象没有区别——可以改、加字段、`delete` 字段，`"use strict"` 下也不报错；只影响你自己这一份，不影响宿主主流程与其它插件；`should_download` 超时放行之后插件续跑时再改，也改不到宿主那边的数据。时间类字段是 RFC3339 字符串。
+>
+> **`media_id`**（`on_episode_acquired` / `on_task_completed` / `on_task_reopened` 三个 hook 同名同义）：`source` 为 `"mikan"` 时是番剧 ID，`"douban"` 时是豆瓣条目 ID，统一是字符串。
 >
 > **`source` 决定 `task_id` 的命名空间**：`"mikan"` 时是番剧任务 ID，`"douban"` 时是豆瓣任务 ID，两者不通用。只关心番剧的插件（如按 `anime.get` 取元数据）应先 `if (p.source !== "mikan") return;`。
 >
@@ -85,6 +93,7 @@ plugin.on("should_download", function(p) {
 - **硬超时 3 秒**（墙钟，**含 `await` 期间**）：插件没在 3s 内返回 / Promise 没在 3s 内 settle → fail-open 放行（外部库不可达也不拖垮下载管线）；超时后 Promise 才到的结果被丢弃。
 - **回调可以 `async`**：查外部库要 `await http.get(...)`（见下文「同步 / 异步 facade 一览」），宿主等返回的 Promise settle 后再读值；resolve `false` 与同步 `return false` 等价，reject 与抛错等价（fail-open）。
 - **多插件 veto-wins**：任一插件返回 `false` 即跳过；多插件 bitmap 取**并集**（OR）。
+- 返回值由宿主在插件的事件循环上按 JSON **导出成拷贝**后再读（插件之后再改那个对象不影响结论），裁决看的是**导出后的值**：带 `toJSON` 的对象按 `toJSON()` 的结果算（返回 `false` 即否决），`new Boolean(false)` 导出成 `false` 也是否决；`have_bitmap` 要是非空、能按标准 base64（带 `=` 补齐）解出至少 1 个字节的字符串才算数，否则当放行。导不出来的值（带环、`BigInt`、嵌套超过 1000 层、超过 100 万个值、`toJSON` / getter 抛错）按普通错误处理（等同抛错 → fail-open 放行），不会拖垮宿主。
 - 失败策略（外部库挂了算"有"还是"没有"）由插件自行决定——宿主只认显式 `false`。
 
 #### 合集 bitmap 协议（v0.4+）
@@ -140,14 +149,18 @@ plugin.on("should_download", function(p) {
 {
   flow_id,                 // 命中的 ruleflow id（== ruleflow.list() 的 id），用来挂 per-flow 配置
   media: {
-    tmdb_id, tmdb_type,    // "tv" | "movie"；Mikan 来源常缺 tmdb_id
+    tmdb_id, tmdb_type,    // 字符串（裸数字 id）；"tv" | "movie"；Mikan 来源常缺 tmdb_id（""）
     imdb_id,
-    season, episode, episode_end,   // TMDB 原生编号；电影 episode=0；合集 episode_end>0
-    title, original_title, aka, year
+    season, episode, episode_end,   // 数字；TMDB 原生编号；电影 episode=0；合集 episode_end>0
+    title, original_title,
+    aka,                   // 字符串数组（别名 / 多语言名）
+    year                   // 数字，未知为 0
   },
-  tags: {                  // 标题提取的质量标签（ruleflow 已算，原样透传）
+  tags: {                  // 标题提取的质量标签（ruleflow 已算，原样透传），全部是字符串，没提取到为 ""
     resolution, video_encode, audio_encode, dv, hdr, code_bits, format,
     language, source, group, special_content, part_alias
+    // hdr / dv 不是布尔：是识别出的原文（如 "HDR"）或种子字典值（如 "HDR10"、"HDR10+"、"DolbyVision"），
+    // 没识别到填 "无"。要当布尔用自己归一：空 / "无" / none / no / false / 0 当「否」，其余当「是」
   },
   ctx: {                   // 关联 / 日志 / 自定义，可全忽略
     raw_title, subtitle,
@@ -169,7 +182,7 @@ plugin.on("should_download", function(p) {
 
 > 局限：分辨率 / 编码 / HDR / DV / 位深等"实体属性"可从 Emby `MediaStreams` / Plex `Media` 直接可靠读取；字幕组（`group`）/ 来源类型（`source`）可经库内**文件名尽力解析**比对（按 `[组名]` 标签与 WEB-DL / BluRay 等关键字提取），**不保证准确**——解析不出时应按"不符合"处理（fail-open 方向，宁多推不误杀）；`format` / `language` / `special_content` / `part_alias` 等维度依赖文件名，库内文件常缺该信息，解析不出同样按"不符合"处理。
 >
-> [`media-library-filter`](https://github.com/followcat/plugin-registry/tree/main/plugins/media-library-filter) 是该模式的参考实现：挂 `should_download`，按 per-flow 规格（12 维可选）逐副本比对，可靠档维度直接读实体属性，尽力档（group / source）经文件名解析，解析不出即放行。
+> [`media-library-filter`](https://github.com/Bespertrijun/followcat-official-plugins/tree/main/plugins/media-library-filter) 是该模式的参考实现：挂 `should_download`，按 per-flow 选定的维度（7 维可选：分辨率 / 视频编码 / 音频编码 / 位深 / HDR / 杜比视界 / 容器）+ 操作符逐副本比对，维度值都从 Emby / Plex 的实体属性直接读取；任一端缺值即视为不匹配（放行）。
 
 ---
 
@@ -184,7 +197,9 @@ plugin.on("should_download", function(p) {
 | 类别 | facade | 调用方式 |
 |------|--------|---------|
 | 同步（本地存储 / 纯计算，毫秒级） | `plugin.*`、`log.*`、`config.*`、`data.*`、`crypto.*`、`anime.get`、`task.get/list`、`ruleflow.list`、`ptsite.list/get/registry/getCookieMeta`、`douban.getCookie` | 直接取返回值：`var v = config.get("k")` |
-| **异步（返回 Promise）** | `http.get/post/put/delete`、`ptsite.setCookie/setAPIKey`、`douban.setCookie` | 必须 `await`（或 `.then`）：`var resp = await http.get(url)` |
+| **异步（返回 Promise）** | `http.get/post/put/delete`、`ptsite.setCookie`、`douban.setCookie` | 必须 `await`（或 `.then`）：`var resp = await http.get(url)` |
+
+定时器（`setTimeout` / `setInterval` / `setImmediate`）不属于上面两类：登记是同步的、回调稍后在同一个事件循环上跑，语义见下文[「定时器」](#定时器settimeout--setinterval--setimmediate始终可用)。
 
 批次 1（凭据写入 / 加解密）新增方法逐个归属：
 
@@ -192,11 +207,13 @@ plugin.on("should_download", function(p) {
 |------|---------|------------|
 | `crypto.sha256` / `crypto.md5` / `crypto.base64Decode` / `crypto.evpBytesToKey` / `crypto.aesDecryptCBC` | 无（始终可用） | 同步 |
 | `ptsite.list` / `ptsite.get` / `ptsite.registry` / `ptsite.getCookieMeta` | `api.ptsite.read` | 同步 |
-| `ptsite.setCookie` / `ptsite.setAPIKey` | `api.ptsite.write` | **异步** `Promise<{ok}>` |
+| `ptsite.setCookie` | `api.ptsite.write` | **异步** `Promise<{ok}>` |
 | `douban.getCookie` | `api.douban.cookie.read` | 同步 |
 | `douban.setCookie` | `api.douban.cookie.write` | **异步** `Promise<{ok, validation}>` |
 
 > 参数类型不对（如漏传 `value`）在调用处**同步**抛 `TypeError`，不会变成 reject；宿主侧的失败（站点不存在、凭据类型不匹配、加密失败、超时）才以 reject 交付。
+>
+> **跨边界的数据一律是拷贝**：你传给 facade 的引用类型参数（如 `http.*` 的 headers 对象）在调用那一刻就被宿主复制，之后你再改它不影响已经发出的请求；facade 返回给你的结构化结果（`task.list()`、`anime.get()`、`ruleflow.list()`、`ptsite.list/get/registry/getCookieMeta()`、`douban.getCookie()`、`http.*` 的响应对象连同 `headers` 等）**每次调用都是新的一份普通 JS 对象**，和 `JSON.parse` 出来的一样——随便改、加字段、`delete` 字段（`"use strict"` 下也不报错），不影响下次调用、也不影响宿主。字节类返回不变：`data.get` 仍是字节数组、`crypto.*` 仍是 `Uint8Array`（见各自一节）。以后新增的 facade 同样遵守这条。
 
 > ⚠️ **破坏性变更：`http.*` 现在返回 Promise，没有同步别名。** 旧写法 `var resp = http.get(url); resp.status` 拿到的是 Promise 对象，`resp.status` 为 `undefined`。所在函数改成 `async function`，调用处加 `await`，并把 `async` 一路传到回调（hook / registerAPI / should_download 都支持 async，见下）。失败（网络错误、超时、限流、SSRF 拦截）以 **reject** 形式交付——`await` 处抛出的仍是原来那个错误对象（`e.message` 形如 `http GET <url>: ...`），`try { await http.get(...) } catch (e) {}` 照常能接住。
 
@@ -235,9 +252,48 @@ plugin.on("should_download", async function (p) {
 #### 超时语义
 
 - 每次调用一个**墙钟**，**含 `await` 期间**：hook **10s** / `should_download` **3s** / registerAPI **10s**。超时即丢弃该次调用的结果（之后 Promise 才 settle 也被忽略），插件继续运行。
+- registerAPI 超时：HTTP 调用方（含插件 UI 的 `FC.api`）收到 **504**。错误信息有两种：通常是 `plugin runtime: execution timeout`（这次调用的 10s 墙钟到了）；插件事件循环被别的任务占住、这次调用根本没轮上时是宿主 11s 兜底的 `plugin api: execution timeout`。两种都按超时处理。
+- **入口脚本 10s**：`index.js` 顶层代码（连同它执行期间就触发的定时器回调、微任务）必须在 **10 秒**内跑完。到点没跑完（同步死循环、一直 `setImmediate` 自己续命、顶层一个很慢的内置操作都算）= 该插件本次**启用失败**：错误 `run entry script: entry script exceeded 10s (interrupted)` 写进宿主日志与插件的 `last_error_msg`（插件列表 / 详情页可见），插件保持停用状态；数据库里的「已启用」标记不变（下次 FollowCat 启动还会再试）。入口脚本执行期间宿主自己出了 Go panic 同样只算该插件启用失败（`run entry script: host panic: <原因>`），进程不崩。宿主启动时照常加载其它插件，**FollowCat 正常起来，不会被一个坏插件卡住**。耗时的初始化别放在顶层同步跑，放进定时器 / 首次调用里。
+- 入口脚本执行期间就触发的定时器 / `setImmediate` 回调（及其 `await` 之后的续体）里出了宿主 Go panic，按定时器的规则处理（记 `last_error_msg`、计入自动停用），**不影响这次启用**；只有顶层代码本身（含它跑的微任务）里、或脱离了事件循环的宿主 panic 才让启用失败。
 - `http.*` 每个请求固定 **10s** 超时（与所属调用的墙钟无关）。
-- 纯 JS 死循环（同步段里、没 `await` 的 `while(true){}`）仍会被宿主打断；**`await` 之后的续体里写出的死循环宿主不看管**（插件作者负责），它会让整个插件卡住。停用 / 重装 / 自动停用会打断一切（含续体死循环）、取消在途 `http` 请求，插件完全退出。
-- 沙箱**没有** `setTimeout` / `setInterval`，也没有 `require`；需要"稍后再做"请用标志位 + 下一次 hook 消费。
+- **正则单次匹配 5 秒上限**：带反向引用、环视等的正则（goja 用回溯引擎跑它们）遇到不匹配的长输入可能指数级回溯；单次匹配超过 **5 秒** 就放弃，按**未匹配**处理（`test` 返回 `false`，`exec` / `match` 返回 `null`，不抛错）。普通正则（没有反向引用 / 环视）走线性时间引擎，不受影响。别依赖这个上限做业务判断——它只是兜底。
+- **停用卡住 → 需重启 FollowCat 才能再启用**：停用 / 卸载 / 升级最多等 **5 秒**。插件正卡在宿主打断不了的操作里（例如一个一直不返回的内置长操作）时，宿主到点放弃它、停用照常完成；但它的旧引擎还没真正退出之前，**再次启用会被拒绝**：「该插件上次的运行还没退出（卡在无法打断的操作里），请重启 FollowCat 后再启用」。旧引擎自己退出后这个限制自动解除；被放弃的旧引擎回来后也写不了配置 / 数据（`config.set/delete`、`data.put/delete` 抛 `plugin worker stopped`）。
+- 纯 JS 死循环（同步段里、没 `await` 的 `while(true){}`）仍会被宿主打断；**`await` 之后的续体里写出的死循环宿主不看管**（插件作者负责），它会让整个插件卡住。停用 / 重装 / 自动停用会打断一切（含续体死循环）、取消在途 `http` 请求、清掉全部定时器，插件完全退出。
+- 定时器回调与续体同等对待：**不计墙钟**，宿主不看管（见下文「定时器」）。
+- 沙箱没有 `require`。
+
+### 定时器：`setTimeout` / `setInterval` / `setImmediate`（始终可用）
+
+| 函数 | 说明 |
+|------|------|
+| `setTimeout(fn, delayMs, ...args)` | `delayMs` 后调用一次 `fn(...args)`，返回句柄 |
+| `setInterval(fn, delayMs, ...args)` | 每 `delayMs` 调用一次，直到 `clearInterval` |
+| `setImmediate(fn, ...args)` | 尽快（当前任务结束后）调用一次 |
+| `clearTimeout(h)` / `clearInterval(h)` / `clearImmediate(h)` | 取消；已触发 / 不存在的句柄无操作 |
+
+- **和 `await` 之后的续体同等对待**：回调在插件自己的事件循环上跑（与 hook / API 串行，不用加锁），**不计墙钟**、宿主不看管；不限个数、不设最小间隔。回调里写出的死循环同样会卡死整个插件——插件作者自负其责。
+- `delayMs` 规则同 Node：非数字 / `NaN` / 小于 1 / 大于 `2147483647`（约 24.8 天）一律按 **1ms**。周期很长的任务自己先截到这个上限以内，否则会变成每毫秒跑一次。
+- **回调抛错、或 async 回调 reject 未处理**：宿主记一条 WARN（插件详情页日志可见，形如 `setInterval callback error: Error: ...`，同时写进 `last_error_msg`），事件循环照常，同一个 `setInterval` 下个周期照跑，不影响插件其它回调，**不计入 panic 自动停用**。只盯定时器回调本身返回的那个 Promise；回调里另起、没人接的 Promise 被 reject 时宿主不记。
+- **宿主侧 Go panic**（插件 JS 的 throw / reject、栈溢出之类的 JS 错误都不算，只有宿主代码自己崩了才算）发生在定时器回调里：记到 `plugin/<id>` 日志、写 `last_error_msg`，并且**计入** panic 自动停用（1 分钟 5 次；停用后 `last_error_msg` 显示 `因频繁崩溃被自动停用：<最后一次错误>`）——与 hook 里的宿主 panic 同一个计数。（registerAPI / `should_download` 里的宿主 panic 只让这一次调用失败：API 调用方收到错误、`should_download` 放行；不计入自动停用、不写 `last_error_msg`。）
+- **停用 / 卸载 / 升级 / 自动停用**：事件循环终止时全部定时器一并清除，之后不会再触发任何回调；定时器状态不持久化，重新启用是全新状态（入口脚本重跑，想要的定时器自己再登记）。
+- 句柄是不透明值（宿主是数字、devrt 是 Node 的 `Timeout` / `Immediate` 对象），只用来传回 `clear*`，且按类型配对（`setTimeout`↔`clearTimeout` 等）——宿主上三种句柄共用一个 id 空间、混用也能取消，但 devrt（Node）里 `clearImmediate` 取消不了 `setTimeout` 的句柄。
+- 入口脚本顶层就可以登记（例如按配置排一个 `setInterval`），不会拖慢插件启用。
+
+```js
+// 每 N 分钟做一次；配置变了由 UI 调 /reschedule 立即按新间隔重排
+var timer = null;
+function reschedule() {
+  if (timer !== null) { clearInterval(timer); timer = null; }
+  var min = parseInt(config.get("interval_min") || "0", 10);
+  if (min > 0) {
+    timer = setInterval(function () {
+      doWork().catch(function (e) { log.error("定时任务失败: " + e); }); // 自己接住错误，别只靠宿主的 WARN
+    }, Math.min(min * 60000, 2147483647));
+  }
+}
+plugin.registerAPI("/reschedule", function () { reschedule(); return { ok: true }; });
+reschedule(); // 启动时排上（等满一个周期才第一次跑）
+```
 
 ### `plugin` —— 注册中心（始终可用）
 
@@ -254,14 +310,28 @@ log.warn(...args)
 log.error(...args)
 ```
 
-参数被 `fmt.Sprint` 拼接，写入 ringbuffer 时带 `plugin/<id>` 来源前缀，可通过插件详情页拉取。
+每个参数先按 goja 导出成 Go 值、再用 Go 的 `fmt.Sprint` 转成文本，参数之间用一个空格拼接；写入 ringbuffer 时带 `plugin/<id>` 来源前缀，可通过插件详情页拉取。所以非字符串参数的样子是 Go 的，不是 JS 的：
+
+| 参数 | 日志里 |
+|------|-------|
+| `{b: 2, a: {c: [1, 2]}}` | `map[a:map[c:[1 2]] b:2]`（键排序） |
+| `[1, "a", null, true]` | `[1 a <nil> true]` |
+| `null` / `undefined` | `<nil>` |
+| `new Error("boom")` | `map[]`（Error 没有可枚举属性）——要看错误写 `String(e)` 或 `"失败: " + e` |
+| `0.1 + 0.2` / `123456789.5` / `1e-7` | `0.30000000000000004` / `1.234567895e+08` / `1e-07`（非整数按 Go 浮点写法） |
+| `Infinity` / `NaN` | `+Inf` / `NaN` |
+
+想要确定的文本就自己拼成字符串再传（`log.info("n=" + n + " obj=" + JSON.stringify(o))`）。
+
+消息里的换行 / 回车被转义成可见的 `\n` / `\r` 两个字符（`log.info("a\nb")` 在日志里是一行 `a\nb`）：一次 `log.*` 永远只产生一行，插件打不出看起来像别的行（例如审计行）的第二行。要分行就多调几次 `log.*`。
 
 ### `config` —— 插件配置（始终可用）
 
 | 方法 | 说明 |
 |------|------|
 | `config.get(key) → string \| null` | 读，未设置返回 `null` |
-| `config.set(key, value)` | 写；`value` 必须是 string |
+| `config.set(key, value)` | 写。`value` 按字符串存：`null` / `undefined` / 不传 → `""`，其它非字符串按 JS 的 `String(v)` 转（`5` → `"5"`、`true` → `"true"`、对象 → `"[object Object]"`——存结构化数据请自己 `JSON.stringify`）。key / value / 配额不合法时抛错 |
+| `config.delete(key) → boolean` | **同步**删除本插件的这个 key 并释放它占的配额；返回是否真的删到（没设过 → `false`）。key 校验同 `config.set`（不合法抛错）。需要宿主开放 `config.delete` 之后的版本——兼容旧宿主就先判断 `typeof config.delete === "function"` |
 | `config.list() → string[]` | **v3.4+** 列出当前插件全部 keys，按字典序排序，仅 keys 不含 values |
 
 **所有 Value 在 store 层无条件 AES-256-GCM 加密落库。** `is_secret` 标记不是加密开关，仅控制 API 回读时是否返回明文（前端 `is_secret=true` 时回传空字符串，UI 显示「已设置」占位）。`config.set` 默认写入的项 `is_secret=false`（更新已有 key 时保留原标记）；要标记 secret 需走管理页 UI、admin REST `PUT /api/plugins/:id/config` 显式传 `is_secret:true`，或插件 UI 里 `FC.config.put(key, value, true)`。插件后端的 `config.get` 始终拿明文，脱敏只发生在 API / iframe 回读。
@@ -273,7 +343,7 @@ log.error(...args)
 - 每插件最多 **500 个 key**（admin 可调，见下文）
 - 跨 plugin 隔离：plugin A 看不到 B 的 keys
 
-**配额错误**：超出抛错，message 含 `current=N limit=M`：
+**配额错误**：新 key 超出抛错（更新已有 key 不计），message 含 `current=N limit=M`。用来做缓存的 key 记得自己清理（过期就 `config.delete`、总数设上限），别让它把配额撑满——撑满之后计数器、用户配置都写不进去了：
 
 ```js
 try {
@@ -289,8 +359,8 @@ try {
 
 | 方法 | 签名 |
 |------|------|
-| `data.get(name) → ArrayBuffer \| null` | 读取；未设置或读取失败返回 `null` |
-| `data.put(name, value)` | 写入；`value` **必须** 是 `ArrayBuffer` 或 `Uint8Array`，传 string/object 抛 `TypeError` |
+| `data.get(name) → number[] \| null` | 读取：返回**字节数组**（每个元素 0–255 的数字，`Array.isArray` 为 `true`，**不是** `ArrayBuffer`）；未设置或读取失败返回 `null`。要当二进制用就 `new Uint8Array(data.get(name))` |
+| `data.put(name, value)` | 写入；`value` **必须** 是 `ArrayBuffer`、`Uint8Array`，或 `data.get` 拿到的那个字节数组（原样写回可以）；传 string / 对象 / 普通数组字面量（如 `[1, 2, 3]`）/ 其它 TypedArray 抛 `TypeError`（`data.put requires ArrayBuffer or Uint8Array, got <Go 类型>`）。`name` 按 `String(name)` 转换（`42` → `"42"`）后再按 key 规则校验 |
 | `data.list() → string[]` | 列出当前插件全部 blob name |
 | `data.delete(name) → boolean` | 删除；返回是否成功 |
 
@@ -332,7 +402,7 @@ data.put("cache.bin", { foo: 1 });
 | 番剧封面 / 缩略图 | `data.put` |
 | 大型 JSON 状态机快照 | `data.put` |
 
-> goja 没有原生 `TextEncoder`/`TextDecoder`，要把 string 转 Uint8Array 需自己实现 UTF-8 编解码。可直接抄 [dev-guide「UTF-8 编解码」](./dev-guide.md#utf-8-编解码goja-没有原生-textencoder) 的 `encodeUtf8` / `decodeUtf8` 参考实现。
+> goja 没有原生 `TextEncoder`/`TextDecoder`，要把 string 转 Uint8Array 需自己实现 UTF-8 编解码。可直接抄 [dev-guide「UTF-8 编解码」](./dev-guide.md#utf-8-编解码goja-没有原生-textencoder) 的 `encodeUtf8` / `decodeUtf8` 参考实现（都交给内置函数完成，MB 级数据也只要几十毫秒）。
 
 ### 配额可调（管理员）
 
@@ -371,6 +441,8 @@ var resp = await http.get(url, { "Accept": "application/json" }); // 所在函�
 - 单次请求 **10 秒**超时；最多 3 次重定向
 - 网络错误 / 超时 / 限流 / SSRF 拦截一律 reject（`e.message` 形如 `http GET <url>: ...`）；4xx/5xx **不** reject，看 `resp.status`
 - `body` 是 string；JSON 请求自行 `JSON.stringify` + 设 `Content-Type: application/json`
+- `headers` 对象在调用那一刻被复制，之后改它不影响这次请求
+- **SSRF 守卫**（按真正连接的 IP 判断，含每次重定向）：局域网 RFC1918（`10.x` / `172.16–31.x` / `192.168.x`）、IPv6 ULA、以及 **`100.64.0.0/10`（CGNAT，Tailscale 等组网用的地址段）放行**；本机回环（`127.0.0.1` / `localhost` / `::1`）、`0.0.0.0`、链路本地 `169.254.0.0/16`（含云厂商元数据 `169.254.169.254`）、组播**一律拦截**。`100.64.0.0/10` 里**单独拦截 `100.100.100.200`**（阿里云等的元数据地址），其余地址照常可达。这条放行只对插件的 `http.*` 生效；插件源（registry）拉取等宿主自己的出网仍不放行内网
 
 ### `anime` —— 番剧只读（需 `api.anime.read`）
 
@@ -418,7 +490,7 @@ var flows = ruleflow.list()
 | `crypto.aesDecryptCBC(key, iv, data)` | `(bytes, bytes, bytes) → Uint8Array`（key 16/24/32 字节、iv 16 字节、data 为 16 的正整数倍；自动去 PKCS7 填充，填充不合法 = 口令错 / 数据坏 → 抛错） |
 
 - `bytes` = `Uint8Array`（含 `subarray` 视图）或 `ArrayBuffer`；返回值都是新分配的 `Uint8Array`，改它不影响入参。
-- 沙箱没有 `TextDecoder`：解密出的 UTF-8 字节转字符串需自行解码（纯 ASCII 可逐字节 `String.fromCharCode`）。
+- 沙箱没有 `TextDecoder`：解密出的 UTF-8 字节转字符串需自行解码——照抄 dev-guide「UTF-8 编解码」的 `decodeUtf8`（交给内置函数完成，1 MB 级数据也只要几十毫秒；别自己写逐字节循环 + `+=` 拼接，那在 goja 里是平方级的，1 MB 要几分钟）。
 
 ```js
 // CookieCloud：encrypted = CryptoJS.AES.encrypt(json, md5(uuid + "-" + password).substring(0, 16))
@@ -430,13 +502,15 @@ var json = utf8Decode(crypto.aesDecryptCBC(kv.key, kv.iv, raw.subarray(16)));
 
 ### `ptsite` —— PT 站配置与凭据（需 `api.ptsite.read` / `api.ptsite.write`）
 
-对象按域注入、方法按权限挂载：只声明 `api.ptsite.read` 时对象上**没有** `setCookie/setAPIKey`（`typeof ptsite.setCookie === "undefined"`）；只声明 `api.ptsite.write` 时没有读方法。两个都没声明时 `ptsite` 本身为 `undefined`。
+对象按域注入、方法按权限挂载：只声明 `api.ptsite.read` 时对象上**没有** `setCookie`（`typeof ptsite.setCookie === "undefined"`）；只声明 `api.ptsite.write` 时没有读方法。两个都没声明时 `ptsite` 本身为 `undefined`。
+
+> 插件**只能同步 cookie**：2026-09-25 起 `ptsite.setAPIKey` 已删除（`typeof ptsite.setAPIKey === "undefined"`），API Key 只能在管理端改。
 
 **读（`api.ptsite.read`，同步）**——凭据本体永不出宿主，只回「已配置」标记与指纹：
 
 | 方法 | 返回 |
 |------|------|
-| `ptsite.list()` | `[{id, name, adapter, enabled, auth_kind, has_cookie, has_apikey}]`（仅已注册 adapter 的 PT 站行） |
+| `ptsite.list()` | `[{id, name, adapter, enabled, auth_kind, has_cookie, has_apikey, hosts}]`（仅已注册 adapter 的 PT 站行） |
 | `ptsite.get(id)` | 同形单个；不存在 / 非 PT 站 / adapter 未注册 → `null` |
 | `ptsite.registry()` | `[{site_id, name, auth_kind}]`，`auth_kind ∈ "cookie" \| "apikey" \| "none"`（none = RSS 链接自带 passkey） |
 | `ptsite.getCookieMeta(id)` | `{configured, sha256}`；`sha256` 按下文「Cookie 归一化契约」对**归一化后**的明文计算，未配置时为 `""`；站点不存在 → `null`。不提供打码值：明文永不出宿主，插件只需判「是否相同」 |
@@ -446,10 +520,11 @@ var json = utf8Decode(crypto.aesDecryptCBC(kv.key, kv.iv, raw.subarray(16)));
 | 方法 | 返回 |
 |------|------|
 | `ptsite.setCookie(id, value)` | `Promise<{ok: true}>` |
-| `ptsite.setAPIKey(id, value)` | `Promise<{ok: true}>` |
+
+`hosts`（只读）：该站 RSS 链接的**主机名**列表——每个 URL 取 hostname、小写、去重、保持首次出现顺序，解析失败的条目跳过，没配 RSS 时为 `[]`。只有主机名，**不含**路径 / query / 端口 / 账号密码（passkey 在路径或 query 里，`rss_urls` 本身仍不开放，见下文写方法说明）。宿主 PT 适配器只把 Cookie 发给 RSS 链接本身与 RSS 里的同站详情页，所以 `hosts` 正是这个站 cookie 的使用方——按浏览器 cookie 规则把 cookie 的 `domain` 与 `hosts` 匹配，就能挑出该写进这个站的 cookie（cookiecloud 插件即如此）。
 
 - `value` 为明文，`""` = 清空。宿主加密落库（AES-256-GCM），**只更新这一列**，不会用旧值冲掉管理端同时改的其它字段。
-- 与管理端 `PATCH /api/pt-sites/:id` 同一份校验：cookie 站拒绝 `setAPIKey`、apikey 站拒绝 `setCookie`、`auth_kind=none` 的站拒绝任何非空写入（清空一律放行）；不匹配 / 站点不存在 → reject（`e.message` 以 `pt credential: ...` 开头）。
+- 与管理端 `PATCH /api/pt-sites/:id` 同一份校验：apikey 站与 `auth_kind=none` 的站拒绝非空 cookie（清空一律放行）；不匹配 / 站点不存在 → reject（`e.message` 以 `pt credential: ...` 开头，不回显你传的参数值）。
 - 每次调用在入口记一条审计日志（见下文「审计日志」）。
 - `rss_urls` / `adapter` 不开放写入（将来的 `ptsite.update` 也不会开放）：宿主拉 RSS 时会把 Cookie 头发给 `rss_urls` 里的每个 URL，能改它就等于能把明文 cookie 送去任意服务器。
 
@@ -552,7 +627,7 @@ function compareCodePoints(a, b) {
 
 ### 审计日志
 
-所有写 facade（当前：`ptsite.setCookie/setAPIKey`、`douban.setCookie`）在入口由宿主记一行：来源 `audit/plugin/<id>`，消息 `AUDIT action=<方法> target=<目标>`（`target` 为站点 id 或 `douban_cookie`，超长截断、非 `[A-Za-z0-9_.-]` 字符替换为 `_`），**不记值**。插件的 `log.*` 固定来源 `plugin/<id>`，打不出 `audit/` 前缀，所以审计行无法伪造。插件详情页日志窗口两类行都显示，审计行带「[审计]」标签。
+所有写 facade（当前：`ptsite.setCookie`、`douban.setCookie`）在入口由宿主记一行：来源 `audit/plugin/<id>`，消息 `AUDIT action=<方法> target=<目标>`（`target` 为站点 id 或 `douban_cookie`，超长截断、非 `[A-Za-z0-9_.-]` 字符替换为 `_`），**不记值**。`ptsite.setCookie` 传进来的 id 只有**确认站点存在**时才写进审计行；不存在（比如把参数写反成 `setCookie(cookie, siteId)`）时记成 `target=<invalid len=N>`（只记长度）——防止写反时把 cookie 当成 id 落进审计日志。插件的 `log.*` 固定来源 `plugin/<id>`，打不出 `audit/` 前缀，消息里的换行也被转义（见上文 `log`），所以审计行无法伪造。插件详情页日志窗口两类行都显示，审计行带「[审计]」标签。
 
 ---
 
@@ -563,6 +638,7 @@ function compareCodePoints(a, b) {
 | 读 `anime.get(id)` | 写任何 anime/task 数据（批次 3 规划中） |
 | 经 `ptsite` / `douban` facade 写 PT 站凭据 / 豆瓣 Cookie（需对应 `.write` 权限） | 读回任何凭据明文（只有「已配置」+ 指纹） |
 | `crypto.*` 本地加解密 | 用 `api.http` 回跳 FollowCat 自己的 REST（见下文「内部访问走 facade」） |
+| `setTimeout` / `setInterval` 做定时任务 | 指望定时器跨停用 / 重启保留（停用即全清，重新启用从头登记） |
 | 读 `task.get/list` | 直接访问 `domain.Server` / `domain.Download` |
 | `http.*` 调外部 HTTP | `require` / `import` / `eval` / `Function(...)` |
 | `log.*` / `config.*` | 文件系统、子进程、数据库句柄 |
@@ -618,6 +694,7 @@ function compareCodePoints(a, b) {
 | `FC.api(path, body)` | `Promise<any>` | 调用插件自身注册的 API（`plugin.registerAPI`），宿主用 pluginToken 代理鉴权；resolve 为回调的返回值。请求形态见下方「`FC.api` 请求规则」 |
 | `FC.config.get(key)` | `Promise<string\|null>` | 读取插件配置：设置过的 key 返回字符串——**secret 项回读 `""`**（脱敏，拿不到明文），普通项原样返回（存的是空串就是 `""`）；**没设置过返回 `null`**。判断「是否已设置」请用 `!== null`，别用 `!== ''`。不传 key 返回整个列表 `[{key, value?, is_secret, updated_at}]`（secret 项和值为空串的项没有 `value` 字段） |
 | `FC.config.put(key, value, isSecret)` | `Promise<{updated: 1}>` | 写入插件配置；每次写都按 `isSecret` 覆盖 secret 标记，`isSecret=true` 仅控制回读脱敏（加密一直开）。key 须匹配 `^[a-zA-Z0-9_.\-]{1,128}$`（且不能是 `__proto__` / `constructor` / `prototype`），value 须是字符串（不传 / `null` 按 `""` 存）、≤ 64 KiB，否则 reject |
+| `FC.config.delete(key)` | `Promise<{deleted: boolean}>` | 删除插件配置的这个 key 并释放配额；`deleted` 表示是否真的删到（没设过 → `false`，不报错）。key 规则同 `FC.config.put`（不合法 → reject，文案透传）。非字符串 / 空串，以及 `.`、`..` 在桥上直接 reject、不发请求（这两个键作为 URL 路径段会被浏览器规范化掉，只能用后端 JS 的 `config.delete` 删） |
 | `FC.notify(level, msg)` | `Promise<{ok: true}>` | 在宿主界面显示 Toast：`level === "error"` 显示错误样式，**其余任何值都按成功提示** |
 | `FC.resize(height)` | `Promise<{ok: true, applied}>` | 请求宿主调整 iframe 高度（像素，宿主 clamp 到 200–1500，非数字按 400；`applied` 是实际生效的高度） |
 
@@ -630,27 +707,28 @@ function compareCodePoints(a, b) {
   - 对象 / 数组 → `JSON.stringify` 后作为 `req.body`（插件侧自己 `JSON.parse`）；
   - 其它原始值（非 0 数字、`true`）→ 转成字符串。
 - `path` 可以带 query：`FC.api("/check?tmdb_id=1&season=2")` 的 `?` 前面部分是端点，query 进 `req.query`（`Record<string, string>`，同名 key 取第一个值）。
-- **失败**时 Promise reject 的 `Error.message` 是宿主回的真实原因：回调 `throw` / reject 的内容（如 `Error: boom`；同步 throw 时 goja 会在后面附上出错位置）、`plugin <id> api "/x" not registered`、超时等，而不是笼统的 `Request failed with status code 500`。
+- **失败**时 Promise reject 的 `Error.message` 是宿主回的真实原因：回调 `throw` / reject 的内容（如 `Error: boom`；同步 throw 时 goja 会在后面附上出错位置）、`plugin <id> api "/x" not registered`、超时（HTTP 504，`plugin runtime: execution timeout`）、参数校验等，而不是笼统的 `Request failed with status code 500`。例外是**宿主自己的内部错误**（数据库 / 存储出错、宿主 Go panic 等）：插件页只收到一句「宿主内部错误」，详情只记在服务端日志里（`FC.api`、`FC.config.*` 都一样）。
 
-> **iframe 桥就这 6 类消息**（`fc.init` / `api.call` / `config.get` / `config.put` / `host.notify` / `host.resize`）。`data.*` 加密 blob、`config.list`、`http.*`、`crypto.*`、`anime`/`task`/`ruleflow`/`ptsite`/`douban` 等**都不在 iframe 桥里**——它们只活在 `index.js` 的 goja 运行时。
+> **iframe 桥就这 7 类消息**（`fc.init` / `api.call` / `config.get` / `config.put` / `config.delete` / `host.notify` / `host.resize`）。`data.*` 加密 blob、`config.list`、`http.*`、`crypto.*`、`anime`/`task`/`ruleflow`/`ptsite`/`douban` 等**都不在 iframe 桥里**——它们只活在 `index.js` 的 goja 运行时。
 >
 > 而且 iframe 的 CSP 是 `connect-src 'none'`，连 `fetch`/`XHR` 都被禁，UI **不能**直接打 sandbox REST（`/api/plugins/<id>/sandbox/*`）。要在 UI 里读写 blob 或调上述能力，正确做法是在 `index.js` 里用 `plugin.registerAPI` 包一个端点，内部用 `data.*` / `http.*` 完成，UI 再通过 `FC.api` 调它：
 >
 > ```js
 > // index.js（goja 侧，data.* 可用）
 > plugin.registerAPI("/save-cover", function (req) {
->   data.put("cover.jpg", encodeUtf8(req.body).buffer); // req.body 是原始字节 string
+>   // req.body 是请求体按 UTF-8 解出来的字符串，不是原始字节：二进制请 UI 先 base64 成字符串再发
+>   data.put("cover.jpg", crypto.base64Decode(req.body));
 >   return { ok: true };
 > });
 > ```
 > ```html
 > <!-- ui/index.html（iframe 侧，只有 FC.* 可用） -->
 > <script>
->   await FC.api("/save-cover", "...");
+>   await FC.api("/save-cover", base64String);
 > </script>
 > ```
 >
-> `FC.api` 的 body：字符串原样进 `req.body`，对象 / 数组会被 JSON 序列化（规则见上方「`FC.api` 请求规则」）；传二进制需自己先 base64 成字符串。
+> `FC.api` 的 body：字符串原样进 `req.body`，对象 / 数组会被 JSON 序列化（规则见上方「`FC.api` 请求规则」）。`req.body` 是字符串：直接发二进制会在 UTF-8 解码时损坏（非法字节变成 U+FFFD），所以二进制一律先 base64，后端用 `crypto.base64Decode` 还原。
 
 ### 安全模型
 
@@ -662,12 +740,12 @@ function compareCodePoints(a, b) {
 
 ### 示例
 
-完整参考实现：[`cookiecloud/ui/index.html` @ followcat/plugin-registry](https://github.com/followcat/plugin-registry/tree/main/cookiecloud/ui/index.html)
+完整参考实现：[`cookiecloud/ui/index.html` @ Bespertrijun/followcat-official-plugins](https://github.com/Bespertrijun/followcat-official-plugins/blob/main/plugins/cookiecloud/ui/index.html)
 
-- 用 `FC.ready()` 初始化，用 `FC.config.get(key)` 读取现有配置填充表单（secret 项回读 `""`，只用来判断「已设置」）
+- 用 `FC.ready()` 初始化，用 `FC.config.get(key)` 读取现有配置填充表单（secret 项回读 `""`，只用来判断「已设置」）；**初始加载成功之前禁用「保存」**，失败时给「重试」——否则会拿空表单覆盖已有配置
 - 用 `FC.config.put(key, value, isSecret)` 逐项写入（secret 字段留空 = 不修改）
-- 用 `FC.api('/sync', null)` 触发同步并显示结果
-- 用 `FC.api('/status', null)` 拉取状态并渲染
+- 用 `FC.api('/sync', {})` 触发同步（立即返回 `{started}`，不等同步结束），只要 `/status` 还是 `running` 就每 2 秒轮询；读状态失败按钮要恢复、继续轮询，连续失败或插件已停用（`plugin not running`）就停下并给「重试」
+- 保存设置后 `FC.api('/reschedule', {})` 让插件按新间隔重排定时器
 - 用 `FC.resize(height)` 在内容变化后自动调整高度
 
 ---
@@ -678,8 +756,16 @@ function compareCodePoints(a, b) {
 - **仅一个可否决 hook**：`should_download` 是当前唯一的同步可否决 hook（读返回值、可拦下载）；其余 `on_*` 都是只读通知（fire-and-forget），无其它 `on_before_*`。
 - **无热重载**：插件代码改动需重新上传/启用；配置改动是热生效。
 - **单 hook 仅最后注册有效**：同一 plugin 内重复 `plugin.on("x", ...)` 后者覆盖前者。
-- **manifest 大小** ≤ 64 KiB，单文件 ≤ 5 MiB，zip 总解压 ≤ 20 MiB / ≤ 200 条目。
-- **执行模型**：每个插件一个 JS 引擎 + 一个事件循环（仍是单线程，插件间隔离）。任务按队列顺序逐个执行同步段，队列容量 64，满则 drop-oldest 并 WARN；async 回调 `await` 期间，同一插件的其它任务可以先跑（完成顺序不保证）。墙钟超时 hook 10s / registerAPI 10s / `should_download` 3s（含 `await`）；1 分钟内 5 次 panic 自动熔断（disable）。
+- **manifest 大小** ≤ 64 KiB，单文件 ≤ 5 MiB，zip 总解压 ≤ 20 MiB / ≤ 200 条目；zip 内条目路径归一化后**不得重名**（有重复整个 zip 被拒，预览与安装都一样）。
+- **已安装、但启用失败**：安装 / 升级时文件已经替换成新版本、但新版本启用失败（如入口脚本超时），算安装成功——管理页提示「已安装，但启用失败：原因」，插件停用、原因进 `last_error_msg`，修好后重新启用即可。
+- **执行模型**：每个插件一个 JS 引擎 + 一个事件循环（仍是单线程，插件间隔离）。任务按队列顺序逐个执行同步段，队列容量 64，满则 drop-oldest 并 WARN；async 回调 `await` 期间，同一插件的其它任务可以先跑（完成顺序不保证）。墙钟超时 hook 10s / registerAPI 10s（超时回 504）/ `should_download` 3s（含 `await`）/ 入口脚本 10s（超时启用失败）；定时器回调不排这个队列、不计墙钟。hook 与定时器回调里 1 分钟内 5 次宿主 Go panic 自动熔断（disable）；registerAPI / `should_download` 里的宿主 panic 只让那次调用失败，不计数。插件 JS 的错误（throw / reject / 栈溢出等）永远不算 panic。
+- **全局对象**：没有 `console`、`require`、`TextEncoder` / `TextDecoder`；`eval`、`Function` 是 `undefined`。日志用 `log.*`。
+- **内置 `JSON` 带保护**：插件看到的 `JSON.parse` / `JSON.stringify` 是宿主包过的版本（插件代码不用改）：`JSON.parse` 遇到嵌套超过 **1000 层**的输入、`JSON.stringify` 遇到嵌套超过 **1000 层**或要输出超过 **100 万个值**的数据，抛普通 `TypeError`（`JSON.parse: input nested deeper than 1000 levels`、`JSON.stringify: value nested deeper than 1000 levels (circular reference?)`、`JSON.stringify: more than 1000000 values`），`try/catch` 接得住，不会拖垮宿主进程。正常输入与原生逐字节一致，`reviver`、`replacer`（函数或属性名数组）、`space`、`toJSON` 语义不变。
+- **宿主给你的数据也有同样的上限**：payload、registerAPI 请求信封、facade 的结构化返回、`http.*` 的响应对象都是宿主按 JSON 转成的普通对象，转换时同样限嵌套 1000 层 / 100 万个值。插件改写了全局原型（如 `Object.prototype.toJSON`）导致转换超限时，这一次调用报错（hook 记 WARN、同步 facade 抛普通错误、`http.*` 等 reject，文案形如 `convert host value for plugin: nested deeper than 1000 levels (circular reference?)`），不会拖垮宿主。`JSON.stringify` 的数组 replacer（属性名白名单）长度超过 100 万直接抛 `TypeError`。
+- **宿主内部错误**：异步 facade（`http.*`、`ptsite.setCookie`、`douban.setCookie`）在宿主侧出了 Go panic 时，reject 的错误文案固定是「宿主内部错误」，详情只进服务端日志。
+- **生命周期操作按插件依次执行**：同一个插件的安装 / 升级、启用、停用、卸载、自动停用不会交错（后来的等前面的做完），所以升级过程中点「启用」最终跑的一定是新版本；不同插件之间互不等待。
+- **安装 / 升级中途 FollowCat 被杀**：升级停旧版本时不改「已启用」标记。重启时宿主先核对插件目录：换目录做到一半（旧目录已挪成备份、新目录还没到位）→ 恢复备份；残留的暂存目录删掉；插件目录里 `manifest.json` 的版本 / 权限与数据库记录对不上（新记录写了、文件还是旧的）→ 不启用该插件并提示「插件文件与记录不一致，请重新安装后再启用」，不会用新版本的权限跑旧代码。重新安装一次（装完是停用状态）再手动启用即恢复。这项核对只在 FollowCat 启动时做；手动启用不核对。
+- **返回给宿主的值**（registerAPI 的返回值、`should_download` 的返回值）按 JSON 导出成拷贝：`undefined` / 函数 / `Symbol` 属性被丢掉（数组里的变 `null`），`NaN` / `Infinity` 变 `null`，`Date` 变 ISO 字符串，`Map` / `Set` / 正则 / `Error` 变 `{}`，`Uint8Array` 变 `{"0":1,"1":2}` 形式的对象，`toJSON` 生效；带环、`BigInt`、嵌套超过 1000 层、超过 100 万个值 → 导出失败（registerAPI 调用方收到 `plugin return value is not JSON-serializable: ...`，`should_download` 放行）。
 
 ---
 
@@ -704,14 +790,14 @@ function compareCodePoints(a, b) {
 | `hook.download.write` ⚠️敏感 | 注册同步否决 hook `should_download`（推送下载前可决定不下载） | 已实现 |
 | `hook.link.read` | 订阅 `on_link_done` / `on_link_failed` | 已实现 |
 | `hook.task.read` | 订阅 `on_episode_acquired` / `on_task_completed` / `on_task_reopened` | 已实现 |
-| `api.http` ⚠️敏感 | 注入全局 `http`（仅外部调用，SSRF 守卫） | 已实现 |
+| `api.http` ⚠️敏感 | 注入全局 `http`（SSRF 守卫：放行局域网与 `100.64.0.0/10`（其中 `100.100.100.200` 仍拦），拦本机 / 链路本地） | 已实现 |
 | `api.anime.read` | `anime.get` | 已实现 |
 | `api.task.read` | `task.get/list` | 已实现 |
 | `api.ruleflow.read` | `ruleflow.list` | 已实现（正式名） |
 | `api.ruleflow` | 同 `api.ruleflow.read` | **已弃用别名**（仍可用，新插件别用） |
 | `ui.embed` | 声明 `manifest.ui.entry`（iframe 内嵌 UI） | 已实现 |
 | `api.ptsite.read` | `ptsite.list/get/registry/getCookieMeta` | 已实现 |
-| `api.ptsite.write` ⚠️敏感 | `ptsite.setCookie/setAPIKey`（批次 3 补 `create/update/delete`） | 已实现（凭据写入） |
+| `api.ptsite.write` ⚠️敏感 | `ptsite.setCookie`（只写 cookie；批次 3 补 `create/update/delete`） | 已实现（凭据写入） |
 | `api.douban.cookie.read` | `douban.getCookie` | 已实现 |
 | `api.douban.cookie.write` ⚠️敏感 | `douban.setCookie(v, {validate})` | 已实现 |
 | `api.rsssite.read` | `rsssite.list/get` | 规划中 |
@@ -742,9 +828,9 @@ function compareCodePoints(a, b) {
 
 ## 示例
 
-- 下载去重类（`should_download` 同步否决 + Emby/Plex 查询，per-flow 满足判断）：[plugin-registry/media-library-filter](https://github.com/followcat/plugin-registry/tree/main/media-library-filter)
-- 聚合 API 类（headless，仅 `registerAPI`）：[plugin-registry/dashboard-stats](https://github.com/followcat/plugin-registry/tree/main/dashboard-stats)
-- 综合类（iframe UI + 内嵌 CryptoJS + 自定义 API + http 外网调用）：[plugin-registry/cookiecloud](https://github.com/followcat/plugin-registry/tree/main/cookiecloud)
+- 下载去重类（`should_download` 同步否决 + Emby/Plex 查询，per-flow 满足判断）：[followcat-official-plugins/media-library-filter](https://github.com/Bespertrijun/followcat-official-plugins/tree/main/plugins/media-library-filter)
+- 聚合 API 类（headless，仅 `registerAPI`）：[followcat-official-plugins/dashboard-stats](https://github.com/Bespertrijun/followcat-official-plugins/tree/main/plugins/dashboard-stats)
+- 综合类（iframe UI + `crypto.*` 解密 + `ptsite` / `douban` 凭据写入 + 定时器自动同步 + 立即返回 / 轮询状态的 API）：[followcat-official-plugins/cookiecloud](https://github.com/Bespertrijun/followcat-official-plugins/tree/main/plugins/cookiecloud)
 
 > Slack / Telegram 通知不再以插件形式提供，自 v3.5 起已并入主仓 `internal/notify`。**想扩通道**（钉钉 / 飞书 / 企微等）PR 到主仓 channel registry；（旧的 `on_notification_*` 抄送 hook 已删除。）
 

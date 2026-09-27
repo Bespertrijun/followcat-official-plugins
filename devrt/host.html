@@ -130,6 +130,7 @@
 'use strict';
 
 var state = null;
+var serverConfig = null;   // 服务端最近一次下发的 config（算「改过的键」用）
 
 function $(id) { return document.getElementById(id); }
 function esc(s) { return String(s).replace(/[&<>"']/g, function (c) { return ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]; }); }
@@ -158,6 +159,7 @@ async function loadState() {
     $('status').className = 'pill ok';
     $('status').textContent = 'ready';
   }
+  serverConfig = Object.assign({}, state.config || {});
   renderHooks();
   renderApis();
   renderConfig();
@@ -213,6 +215,7 @@ async function refreshConfig() {
     var s = await res.json();
     state.config = s.config;
     state.config_secrets = s.config_secrets;
+    serverConfig = Object.assign({}, s.config);
     renderConfig();
   } catch (e) { /* 侧栏刷新失败不影响桥 */ }
 }
@@ -245,6 +248,15 @@ async function sendTrigger(hook, data) {
     if (!res.ok) {
       var t = await res.text(); toast('error', 'trigger 失败: ' + t); return;
     }
+    var out = await res.json();
+    if (hook === 'should_download' && out.verdict) {
+      // 回显宿主会得出的裁决（只认显式 false；{have_bitmap} 合集逐集过滤；超时 / 抛错 fail-open 放行）
+      var line = 'should_download → ' + out.verdict + (out.fail_open ? '（fail-open：' + (out.error || '') + '）' : '') +
+        '，返回值 ' + JSON.stringify(out.result);
+      toast(out.verdict === 'veto' ? 'warning' : 'success', line);
+      pushLog({ts: Date.now()/1000, level: 'info', args: ['[devrt] ' + line]});
+      return;
+    }
     toast('success', 'fired ' + hook);
   } catch (e) {
     toast('error', String(e));
@@ -264,17 +276,24 @@ async function callApi(p) {
   } catch (e) { toast('error', String(e)); }
 }
 
+// 只提交改过的键（与服务端最近一次下发的值比）+ 新增项：没动的键不回写，
+// 免得把插件后端这期间 config.set 的新值冲回旧值
 async function saveConfig() {
   var entries = {};
+  var server = serverConfig || {};
   document.querySelectorAll('input[data-cfg-value]').forEach(function (inp) {
-    entries[inp.getAttribute('data-cfg-value')] = inp.value;
+    var k = inp.getAttribute('data-cfg-value');
+    if (!(k in server) || server[k] !== inp.value) entries[k] = inp.value;
   });
+  var n = Object.keys(entries).length;
+  if (!n && !pendingSecrets.length) { toast('warning', '没有改动'); return; }
   try {
-    await fetch('/api/config', {
+    var res = await fetch('/api/config', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({entries: entries, secrets: pendingSecrets})
     });
-    toast('success', '已保存 ' + Object.keys(entries).length + ' 项');
+    if (!res.ok) { toast('error', '保存失败: ' + await res.text()); return; }
+    toast('success', '已保存 ' + n + ' 项');
     pendingSecrets = [];
     await refreshConfig();
   } catch (e) { toast('error', String(e)); }
@@ -296,9 +315,21 @@ function addConfig() {
   renderConfig();
 }
 
-function removeConfig(k) {
-  if (state.config) delete state.config[k];
-  renderConfig();
+// 删除走显式接口（DELETE /api/config/<key>），立即生效
+async function removeConfig(k) {
+  if (serverConfig && !(k in serverConfig)) {
+    // 还没保存过的新增项：只从侧栏去掉
+    if (state.config) delete state.config[k];
+    pendingSecrets = pendingSecrets.filter(function (x) { return x !== k; });
+    renderConfig();
+    return;
+  }
+  try {
+    var res = await fetch('/api/config/' + encodeURIComponent(k), { method: 'DELETE' });
+    if (!res.ok) { toast('error', '删除失败: ' + await res.text()); return; }
+    toast('success', '已删除 ' + k);
+    await refreshConfig();
+  } catch (e) { toast('error', String(e)); }
 }
 
 // ─── plugin iframe + postMessage bridge ───
@@ -400,6 +431,24 @@ function sandboxPutConfig(entries) {
   return sandboxRequest('PUT', '/api/sandbox/config', JSON.stringify({ entries: entries }), true);
 }
 
+// 复刻 sandboxDeleteConfig：DELETE .../sandbox/config/<key>，回 {deleted}（是否真的删到一行）
+function sandboxDeleteConfig(key) {
+  return sandboxRequest('DELETE', '/api/sandbox/config/' + encodeURIComponent(key), null, false);
+}
+
+// 复刻 utils/pluginBridge.ts pluginConfigDeleteKey：格式规则（字符集、长度、保留名）交给后端，与 config.put
+// 同一套；这里只拦到不了后端的两类输入——非字符串 / 空串（否则会去删一个叫 "undefined" 的键），
+// 以及 "." / ".."（作为 URL 路径段会被浏览器规范化掉，打不到该键）
+function pluginConfigDeleteKey(raw) {
+  if (typeof raw !== 'string' || raw === '') {
+    throw new Error('config.delete: key must be a non-empty string');
+  }
+  if (raw === '.' || raw === '..') {
+    throw new Error('config.delete: key "' + raw + '" cannot be deleted through the iframe bridge');
+  }
+  return raw;
+}
+
 // 复刻 utils/pluginBridge.ts pluginBridgeErrorMessage：信封 message 优先，没有才退回 err.message
 function pluginBridgeErrorMessage(err) {
   var envelopeMsg = err && err.response && err.response.data && err.response.data.message;
@@ -457,6 +506,11 @@ window.addEventListener('message', async function (e) {
         }]));
         refreshConfig();
         break;
+      case 'config.delete':
+        // 回 {deleted: bool}：是否真的删到一行（没设过的键 → false）
+        reply(await sandboxDeleteConfig(pluginConfigDeleteKey(msg.payload && msg.payload.key)));
+        refreshConfig();
+        break;
       case 'host.notify': {
         var level = (msg.payload && msg.payload.level) === 'error' ? 'error' : 'success';
         var text = msg.payload && msg.payload.message;
@@ -493,13 +547,24 @@ function pushLog(entry) {
 
 function clearLogs() { $('logs').innerHTML = ''; }
 
+// 断线重连前先关掉旧连接：EventSource 自己也会重连，不关的话每次 onerror 都多挂一条流，日志重复显示
+var logStream = null;
+var logReconnectTimer = null;
 function startLogStream() {
+  if (logStream) { logStream.close(); logStream = null; }
   var es = new EventSource('/api/logs/stream');
+  logStream = es;
   es.onmessage = function (ev) {
     if (!ev.data) return;
     try { pushLog(JSON.parse(ev.data)); } catch (e) {}
   };
-  es.onerror = function () { setTimeout(startLogStream, 2000); };
+  es.onerror = function () {
+    if (es !== logStream) return;
+    es.close();
+    logStream = null;
+    if (logReconnectTimer) return;
+    logReconnectTimer = setTimeout(function () { logReconnectTimer = null; startLogStream(); }, 2000);
+  };
 }
 
 // ─── boot ───

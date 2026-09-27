@@ -18,7 +18,39 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # 插件 / devrt 的 node 测试与 build.py 的 unittest：任一不过就不构建、不发布。
+  # 按具体文件路径跑（node --test 的目录参数在不同 Node 版本上行为不一）。
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Node tests (plugins + devrt)
+        run: |
+          set -e
+          for f in devrt/cookie-normalize.test.js \
+                   tests/cookiecloud/cookiecloud.test.js \
+                   tests/cookiecloud/ui-state.test.js \
+                   tests/media-library-filter/media-library-filter.test.js \
+                   tests/devrt/sandbox.test.js; do
+            echo "::group::node --test $f"
+            node --test "$f"
+            echo "::endgroup::"
+          done
+
+      - name: build.py unittest
+        run: python3 -m unittest tests/build/test_build.py
+
   build-and-deploy:
+    needs: test
     runs-on: ubuntu-latest
     environment:
       name: github-pages
@@ -40,9 +72,13 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      # 校验 manifest 与 index.json 一致性（permissions / hooks / source_url 必须匹配，blocking）
+      # 校验 manifest 与 index.json 一致性（permissions / hooks / source_url 必须匹配、一个插件只能一条 entry，blocking）。
+      # 「HEAD 与最新 tag 同版本号但内容不同」只对本次 tag 对应的插件判失败，其它插件只警告——
+      # 它们这次不发布，main 上别的插件的半成品不该拦住这次发版。手动触发（不是 tag 构建）时全部只警告。
       - name: Validate manifest ↔ index.json consistency
-        run: python scripts/build.py --check
+        env:
+          RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+        run: python scripts/build.py --check --release-tag "$RELEASE_TAG"
 
       - name: Build artifacts
         env:
