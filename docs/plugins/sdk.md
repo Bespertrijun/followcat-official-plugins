@@ -49,7 +49,7 @@ my-plugin/
 | `on_episode_acquired` | `hook.task.read` | **集数新入库**：只在集数新入库（位图由灭变亮）时触发，覆盖自动整理 / 手动链接（含部分完成）/ 合集确认；重复整理已入库的集不触发 | `source`, `task_id`, `media_id`, `media_title`, `episodes`, `unit_kind`, `completed_units`, `total_units` |
 | `on_task_completed` | `hook.task.read` | 番剧或豆瓣任务完结（每次完结恰好一次） | `source`（`"mikan"`/`"douban"`）, `task_id`, `media_id`, `media_title`, `total_ep`；兼容旧字段 `anime_title`（同 `media_title`） |
 | `on_task_reopened` | `hook.task.read` | 已完成任务因总集数上调/新集出现被打回继续追更（done→tracking） | `source`（`"mikan"`/`"douban"`）, `task_id`, `media_id`, `media_title`, `old_total_ep`, `new_total_ep`, `acquired_units` |
-| `on_task_subscribed` | `hook.task.read` | 新建了一个追踪任务（自动或手动，见下方说明；每个任务恰好一次） | `source`（`"mikan"`/`"douban"`）, `trigger`（`"auto"`/`"manual"`）, `task_id`, `media_id`, `media_title`, `site_id` |
+| `on_task_subscribed` | `hook.task.read` | 新建了一个追踪任务（自动或手动，见下方说明；每个任务最多一次） | `source`（`"mikan"`/`"douban"`）, `trigger`（`"auto"`/`"manual"`）, `task_id`, `media_id`, `media_title?`, `site_id` |
 | `should_download` | `hook.download.write` ⚠️敏感 | ruleflow 推种到 qBittorrent 之前（同步否决，见下节） | 见下节 `PreDownloadCheck` |
 
 > `?` 表示这个字段可能没有有效值：字段**恒在**，没有有效值时是**零值**（空串 `""` / `0` / 空数组 `[]`，个别为 `null`），不会变成 `undefined`。判断「有没有」看值本身（`if (p.size > 0)`、`if (p.files.length)`）；写成 `p.size || 0`、`p.files || []` 也无妨。`episode_end` 只在合集时有意义（`> 0`，与 `episode` 组成 `[episode, episode_end]` 区间），单集 / 电影时为 `0`。
@@ -67,9 +67,9 @@ my-plugin/
 > - 手动链接「部分完成」（种子仍待人工）也会触发（只含这次链上的集）；之后补完剩余文件只发剩下那几集。
 > - 与 `on_link_done` 并存：前者管「进度到哪」（全部入库路径），后者管「文件放哪」（仅自动整理路径；手动链接不发 `on_link_done` / `on_link_failed`）。
 >
-> **`on_task_subscribed`** 在追踪任务**落库之后**发，每个任务恰好一次。`trigger` 区分来源：
+> **`on_task_subscribed`** 在追踪任务**落库之后**发，**每个任务最多一次**：极少数情况下（比如宿主恰好在这一刻崩溃、或数据库出错）会漏发，且不会补发。`trigger` 区分来源：
 >
-> - `"auto"`：Mikan 站开了自动订阅、新番入库时自动建的任务；豆瓣自动追踪任务在**第一次写入订阅记录**时（不论那条种子是通过还是被规则排除）。
+> - `"auto"`：Mikan 站开了自动订阅、新番入库时自动建的任务；豆瓣自动追踪任务**第一次有种子通过规则**时（只被规则排除过的不发）。
 > - `"manual"`：在番剧页手动订阅（单个、或「一键订阅本季」里逐个建的每个任务）；在豆瓣条目页手动建任务。
 > - **不发**：已存在的任务（重复订阅 / 409）、建任务失败、普通成员的订阅请求（转成心愿单待审批）、心愿单审批建的任务、Mikan 委托种子在豆瓣侧的导航锚任务、RSS 站级任务。升级前就存在的豆瓣任务、以及在委托导航锚基础上被复用来自动追踪的豆瓣任务，也不会补发。
 > - `site_id` 是这个任务所属的追更配置（站点）ID。插件按任务收到事件；同一部作品在多个站被订阅会收到多次，按 `media_id` 自行去重。宿主自己的「已自动订阅」通知只发 `auto` 且按作品去重，与插件 hook 互不影响。

@@ -111,7 +111,7 @@ qBit / linker --->|  EventBus 同步分 |       |
 >
 > `on_task_completed` / `on_episode_acquired` / `on_task_reopened` / `on_task_subscribed` 同时覆盖 Mikan 与豆瓣任务，按 `p.source`（`"mikan"` / `"douban"`）区分；`task_id` 只在各自命名空间内有意义。
 >
-> `on_task_subscribed` 在新建追踪任务后发，`p.trigger` 为 `"auto"`（Mikan 自动订阅、豆瓣自动任务第一次写入订阅记录）或 `"manual"`（手动订阅，含「一键订阅本季」逐个建的任务、豆瓣手动建任务）；委托导航锚、心愿单、站级任务不发。详见 sdk.md。
+> `on_task_subscribed` 在新建追踪任务后发，`p.trigger` 为 `"auto"`（Mikan 自动订阅、豆瓣自动任务第一次有种子通过规则——只被规则排除过的不发）或 `"manual"`（手动订阅，含「一键订阅本季」逐个建的任务、豆瓣手动建任务）；委托导航锚、心愿单、站级任务不发。详见 sdk.md。
 >
 > `on_episode_acquired` 只在集数新入库（位图由灭变亮）时触发，覆盖自动整理 / 手动链接（含部分完成）/ 合集确认；重复整理已入库的集不触发。`p.episodes` 只含本次新亮的集（综艺按期为期号、电影为空数组且只在首次获取时发一次）。
 
