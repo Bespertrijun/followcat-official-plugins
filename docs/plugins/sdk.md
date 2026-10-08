@@ -74,7 +74,7 @@ my-plugin/
 > - **不发**：已存在的任务（重复订阅 / 409）、建任务失败、普通成员的订阅请求（转成心愿单待审批）、心愿单审批建的任务、Mikan 委托种子在豆瓣侧的导航锚任务、RSS 站级任务。升级前就存在的豆瓣任务、以及在委托导航锚基础上被复用来自动追踪的豆瓣任务，也不会补发。
 > - `site_id` 是这个任务所属的追更配置（站点）ID。插件按任务收到事件；同一部作品在多个站被订阅会收到多次，按 `media_id` 自行去重。宿主自己的「已自动订阅」通知只发 `auto` 且按作品去重，与插件 hook 互不影响。
 >
-> **通知 hook 已删除**：旧的 `hook.notify` 与 `on_notification_before_send` / `on_notification_after_send`（把宿主发出的 Slack/Telegram 通知抄送给插件）已移除——manifest 声明它们会解析失败。「插件借宿主通知通道发通知」将另行设计。
+> **通知 hook 已删除**：旧的 `hook.notify` 与 `on_notification_before_send` / `on_notification_after_send`（把宿主发出的 Slack/Telegram 通知抄送给插件）已移除——manifest 声明它们会解析失败。插件要借宿主的通知通道发消息，用 [`notify.send`](#notify--借宿主的通知通道发消息需-apinotifysend异步)（需 `api.notify.send`）。
 
 ---
 
@@ -205,7 +205,9 @@ plugin.on("should_download", function(p) {
 | 类别 | facade | 调用方式 |
 |------|--------|---------|
 | 同步（本地存储 / 纯计算，毫秒级） | `plugin.*`、`log.*`、`config.*`、`data.*`、`crypto.*`、`anime.get`、`task.get/list`、`ruleflow.list`、`ptsite.list/get/registry/getCookieMeta`、`douban.getCookie` | 直接取返回值：`var v = config.get("k")` |
-| **异步（返回 Promise）** | `http.get/post/put/delete`、`ptsite.setCookie`、`douban.setCookie` | 必须 `await`（或 `.then`）：`var resp = await http.get(url)` |
+| **异步（返回 Promise）** | `http.get/post/put/delete`、`ptsite.setCookie`、`douban.setCookie`、`notify.send` | 必须 `await`（或 `.then`）：`var resp = await http.get(url)` |
+
+`notify.send` 不出网（只是在宿主里排进发送队列），但和 `ptsite.setCookie` 一样返回 Promise：校验不过、超配额、队列满都以 reject 交付。宿主不跟踪没人处理的 rejection，**调用处必须 `await` 或 `.catch`**，否则被拒了也没有任何提示（见下文 [`notify`](#notify--借宿主的通知通道发消息需-apinotifysend异步)）。
 
 定时器（`setTimeout` / `setInterval` / `setImmediate`）不属于上面两类：登记是同步的、回调稍后在同一个事件循环上跑，语义见下文[「定时器」](#定时器settimeout--setinterval--setimmediate始终可用)。
 
@@ -424,6 +426,7 @@ PUT /api/admin/settings
 | `plugin.config.max_keys_per_plugin` | 500 | [10, 5000] |
 | `plugin.blob.max_bytes_per_blob` | 4 MiB | [4 KiB, 64 MiB] |
 | `plugin.blob.max_bytes_per_plugin` | 16 MiB | [4 KiB, 256 MiB] |
+| `plugin.notify.max_per_hour` | 300 | [1, 3600] |
 
 越界返 `412 Precondition Failed`。改后调 `POST /api/admin/settings/refresh` 立即生效（默认 5 分钟 TTL 自动刷新）。
 
@@ -637,6 +640,132 @@ function compareCodePoints(a, b) {
 
 所有写 facade（当前：`ptsite.setCookie`、`douban.setCookie`）在入口由宿主记一行：来源 `audit/plugin/<id>`，消息 `AUDIT action=<方法> target=<目标>`（`target` 为站点 id 或 `douban_cookie`，超长截断、非 `[A-Za-z0-9_.-]` 字符替换为 `_`），**不记值**。`ptsite.setCookie` 传进来的 id 只有**确认站点存在**时才写进审计行；不存在（比如把参数写反成 `setCookie(cookie, siteId)`）时记成 `target=<invalid len=N>`（只记长度）——防止写反时把 cookie 当成 id 落进审计日志。插件的 `log.*` 固定来源 `plugin/<id>`，打不出 `audit/` 前缀，消息里的换行也被转义（见上文 `log`），所以审计行无法伪造。插件详情页日志窗口两类行都显示，审计行带「[审计]」标签。
 
+### `notify` —— 借宿主的通知通道发消息（需 `api.notify.send`，**异步**）
+
+插件借 FollowCat 已配置好的通知通道（Telegram / Slack）发一条消息。没声明 `api.notify.send` 时 `notify` 是 `undefined`。
+
+> ⚠️ **必须 `await` 它，或者给它接 `.catch`。** 宿主不跟踪没人处理的 rejection：被拒（超配额、链接不合规等）时不 `await` 也不 `.catch`，就什么提示都没有，消息也没发出去。
+
+> 这和插件 iframe UI 里的 `FC.notify(level, msg)` **不是一回事**：`FC.notify` 只是在管理页弹一个 Toast，不发任何消息；`notify.send` 是在后端 `index.js` 里调用、真的发到 Telegram / Slack。
+
+```js
+try {
+  var r = await notify.send({
+    title: "Cookie 同步完成",                        // 必填，纯文本
+    body: "更新了 **3** 个站点，详见 [日志](https://example.com/log)", // 可选，FC-Markdown（见下）
+    image: "https://example.com/poster.jpg",       // 可选
+    buttons: [{ label: "打开面板", url: "https://example.com/" }]     // 可选，见下文按钮规则
+  });
+  // r = { queued: true, channels: 2 }
+} catch (e) {
+  log.warn("通知没发出去: " + e.message);            // e.message 是下表里的中文原因
+}
+```
+
+| 项 | 说明 |
+|---|---|
+| 签名 | `notify.send(msg) → Promise<{queued: true, channels: N}>`；`msg = {title, body?, image?, buttons?}`，其它字段忽略 |
+| resolve | 消息**进了发送队列**就 resolve。`channels` = 实际排上队的通道数：一个通道都没配、或每个通道都没勾「插件消息」时是 `0`（照样 resolve，不算错）。发送结果不回给插件：真正发送失败的条数与最近一次失败原因在插件详情页「运行状态」里看 |
+| 收件人 | 插件不能指定通道、也不能指定收件人：发给每个通道里所有已配置的对话（通知设置里每个通道都有「插件消息」勾选，默认勾上） |
+| 前缀 | 消息开头固定加 `🧩 [插件名]`（插件名 = manifest 的 `name`），插件去不掉 |
+| 链接预览 | 插件消息一律不展开链接预览（Telegram 关预览，Slack 不 unfurl） |
+| 时机 | 调用时就在宿主里校验并入队，返回的 Promise 已经 settle（连续几次 `send` 的入队顺序就是调用顺序），在 `should_download` 里调用也不增加延迟；返回的 Promise 不影响任何 hook 的结果（`should_download` 的裁决只看它自己的返回值） |
+| 与宿主通知重复 | 宿主自己会就下载完成、整理完成、任务完结等事件发通知。在 `on_download_done` / `on_link_done` / `on_task_completed` 这类 hook 里再发一条同样内容的，用户会**收到两条**；插件应只发宿主不发的内容（例如 cookiecloud 的「同步完成」） |
+
+**参数类型不对 → 同步抛 `TypeError`**（不会变成 reject）：
+
+| 情形 | `e.message` |
+|---|---|
+| 参数不是普通对象（不传、`null`、字符串、数字、函数、数组） | `notify.send: argument must be a message object` |
+| `title` / `body` / `image` 不是字符串（`undefined` / `null` 当没给） | `notify.send: title must be a string`（`body` / `image` 同理） |
+| 字段值导不出 JSON（带环、`BigInt`、嵌套过深） | `notify.send: title is not JSON-serializable`（字段名随之变） |
+| `buttons` 不是数组，或一维、二维写法混用 | `notify.send: buttons must be an array of button objects or an array of button rows` |
+| 某个按钮不是对象 | `notify.send: each button must be an object` |
+| 按钮的 `label` / `url` / `action` 不是字符串 | `notify.send: button label must be a string`（`url` / `action` 同理） |
+
+**内容不合规 / 超配额 / 队列满 → reject**，`e.message` 是下面的原因之一。宿主按这个顺序检查，报**第一条**不满足的：标题 → 正文长度 → 正文里的链接 → 图片 → 按钮（先查每行个数，再查总数，再逐个按钮按顺序查）→ 配额 → 队列。
+
+| 原因（`e.message`） | 什么时候 |
+|---|---|
+| `缺少标题` | `title` 没给、为空或全是空白 |
+| `标题过长（上限 1024 字节）` | `title` 超过 1024 字节（UTF-8，一个汉字 3 字节） |
+| `正文过长（上限 16384 字节）` | `body` 超过 16 KB |
+| `正文里的链接无效：只允许 http / https，且不能带用户名和密码` | 正文里某个 `[文字](url)` 的地址不合规（见下文「链接与按钮」） |
+| `正文里的链接过长（上限 2048 字符）` | 正文里某个链接的地址超过 2048 字节（按百分号编码后的长度算：路径里一个汉字算 9 字节） |
+| `图片地址无效：只允许 http / https，且不能带用户名和密码` | `image` 不合规 |
+| `图片地址过长（上限 2048 字符）` | `image` 超过 2048 字节（原文或编码后） |
+| `每行按钮最多 3 个` | 自己分行时某一行超过 3 个 |
+| `按钮最多 6 个` | 按钮合计超过 6 个 |
+| `按钮文字不能为空` | `label` 为空或全是空白 |
+| `按钮只能是链接（url）或动作（action）其中一种` | 同时给了 `url` 和 `action` |
+| `按钮缺少链接（url）或动作（action）` | 两个都没给 |
+| `只有动作按钮可以带 data` | 链接按钮带了 `data` |
+| `按钮数据过大（上限 4096 字节）` | `data` 序列化成 JSON 后超过 4 KB |
+| `按钮动作未在 manifest 中声明` | 带 `action` 的按钮——**当前版本还不能用动作按钮**，任何 `action` 都按「未声明」拒绝；动作按钮（点了回调插件）在后续版本开放 |
+| `按钮链接无效：只允许 http / https，且不能带用户名和密码` | 按钮的 `url` 不合规 |
+| `按钮链接过长（上限 2048 字符）` | 按钮的 `url` 超过 2048 字节（原文或编码后） |
+| `超出通知配额（每小时 N 条）` | 近 60 分钟已入队的条数达到配额（见下文「配额」） |
+| `通知队列已满` | 每个该收的通道的插件队列都满了（只要还有一个通道排上队就 resolve，`channels` 是排上的个数） |
+| `plugin worker stopped` | 插件已停用 / 卸载 / 升级，旧代码还在跑 |
+| `notify host unavailable` | 宿主没接上通知服务（正常部署不会出现） |
+
+#### FC-Markdown（`body` 的写法）
+
+| 写法 | Telegram | Slack | 备注 |
+|---|---|---|---|
+| `**加粗**` | 加粗 | 加粗 | |
+| `*斜体*` | 斜体 | 斜体 | 不支持 `_斜体_`（文件名里下划线太多） |
+| `***加粗斜体***` | 加粗 + 斜体 | 加粗 + 斜体 | |
+| `~~删除线~~` | 删除线 | 删除线 | |
+| `` `代码` `` | 等宽 | 等宽 | 里面不再解析；要显示字面反引号就用更长的反引号包（同 CommonMark） |
+| 一行 ` ``` `（可跟语言词）到下一行 ` ``` ` | 代码块 | 代码块 | 里面不解析；没有闭合时从开启行到结尾按原文输出 |
+| `[文字](https://…)` | 链接 | 链接 | 显示时文字后自动附「(域名)」；规则见下文 |
+| `> 引用` | 引用 | 引用 | 只在行首，`>` 后要有空格 |
+| `- 列表` | `• 列表` | `• 列表` | 只在行首 |
+| `++下划线++` | 下划线 | **普通文字** | 仅 Telegram |
+| `\|\|剧透\|\|` | 剧透（点开才显示） | **普通文字，直接显示内容** | 仅 Telegram；别拿它藏敏感内容 |
+| `>> 可折叠引用` | 可折叠引用 | **普通引用** | 仅 Telegram；只在行首且后面跟空格 |
+| `\` + 标点 | 显示该标点 | 同左 | `\*\*` 显示为 `**` |
+| 换行 | 原样 | 原样 | 行内标记不跨行 |
+
+- 不支持：`# 标题`、表格、`@所有人`（故意不做）。没有闭合的标记按原文显示；`*` 两侧都是字母或数字时不当定界符（`2*3*4` 原样），`C++` 不会被当成下划线。
+- 动态文字（站点名、文件名、错误信息）放进 `body` 前要转义：`` \ * ~ + | ` [ ] `` 在任何位置前面加 `\`，行首的 `>` / `-` 也加（参考实现：dev-guide §6.6 的 `fcEscape`，与主仓 `EscapeFCMarkdown` 同规则）。
+- 截断（不 reject）：标题折成一行、超过 100 字截断；正文按**显示出来的文字**超过 1000 字截断（不会切出半个链接）；按钮文字超过 64 字截断成「…」结尾（Slack 按钮另有 75 字上限）。
+
+#### 链接与按钮
+
+- 正文链接、链接按钮、图片地址都只允许 `http` / `https`；**带用户名 / 密码的地址（如 `https://bank.com@evil.cn/`）一律拒绝**；国际化域名会转成 punycode。
+- 显示时附域名：正文链接显示成「文字 (域名)」，链接按钮显示成「文字 (域名)」，域名取可注册域（`https://bank.com.evil.cn/x` 显示 `evil.cn`），非默认端口一起显示。插件改不掉。
+- 按钮写法：`{label, url}` 是链接按钮；`{label, action, data?}` 是动作按钮（**本版本不可用**，见上表）。
+- 合计最多 6 个。可以自己分行（二维数组 `[[b1, b2], [b3]]`），每行最多 3 个；不分行（一维数组 `[b1, b2, b3]`）时宿主每行排 2 个。Slack 没有分行，按顺序平铺。
+
+#### 图片
+
+<!-- C-2 依赖段：以 FollowCat 阶段 C-2（通知图片）最终实现为准 -->
+- 地址本身不合规（不是 http / https、带用户名密码、过长）在调用时就 reject（见上表）；图片能不能下载、内容合不合规要到**发送时**才检查，这一步出问题**不会 reject**：这条消息照发、只是不带图（不算发送失败）。
+- 限制：最大 **10 MB**；只收 **JPEG / PNG / WebP / GIF**（按内容判断，不看扩展名）；像素数不超过 4000 万；最多 3 次重定向；单张下载 15 秒超时。
+- 内网地址：插件声明了 `api.http` 才能用局域网 / Tailscale 地址的图（放行规则同 `http.*`；本机回环、链路本地、云厂商元数据地址始终拦截）；没声明只能用公网地址。
+- 宿主下载图片**不走环境代理**（`HTTPS_PROXY` 等）：FollowCat 只能经代理出网时，公网图片可能下不来，消息会退回纯文字。
+- Telegram：宿主下载后上传；带图消息的说明文字上限 1024 字，超出时先发图（只带标题），再单独发正文和按钮。
+- Slack：由 Slack 自己去拉图，只能是 Slack 访问得到的公网地址；Slack 拉不到就去掉图重发一次。豆瓣等有防盗链的图片站，目前在 Slack 上不发图。
+
+#### 配额
+
+- 每个插件每小时最多 **300** 条（admin 可调，见上文「配额可调」的 `plugin.notify.max_per_hour`，范围 [1, 3600]）。
+- 按最近 60 分钟滚动计算；只有至少排上一个通道的消息才计数，`channels: 0` 的和被拒的都不计。插件重启 / 升级不清零，FollowCat 重启清零。
+- 插件详情页「运行状态」显示：近 1 小时已发 / 配额、配额拒绝、队列满拒绝、发送失败条数，以及最近一次失败的原因与时间。
+
+```js
+// 推荐：同步一类的批量任务结束后汇总发一条，别每处理一项发一条（配额按条算）
+async function notifyDone(n) {
+  try {
+    await notify.send({ title: "同步完成", body: "更新了 **" + n + "** 个站点" });
+  } catch (e) {
+    log.warn("通知没发出去: " + e.message); // 超配额 / 队列满 / 内容不合规
+  }
+}
+```
+
 ---
 
 ## 能干什么 / 不能干什么
@@ -703,7 +832,7 @@ function compareCodePoints(a, b) {
 | `FC.config.get(key)` | `Promise<string\|null>` | 读取插件配置：设置过的 key 返回字符串——**secret 项回读 `""`**（脱敏，拿不到明文），普通项原样返回（存的是空串就是 `""`）；**没设置过返回 `null`**。判断「是否已设置」请用 `!== null`，别用 `!== ''`。不传 key 返回整个列表 `[{key, value?, is_secret, updated_at}]`（secret 项和值为空串的项没有 `value` 字段） |
 | `FC.config.put(key, value, isSecret)` | `Promise<{updated: 1}>` | 写入插件配置；每次写都按 `isSecret` 覆盖 secret 标记，`isSecret=true` 仅控制回读脱敏（加密一直开）。key 须匹配 `^[a-zA-Z0-9_.\-]{1,128}$`（且不能是 `__proto__` / `constructor` / `prototype`），value 须是字符串（不传 / `null` 按 `""` 存）、≤ 64 KiB，否则 reject |
 | `FC.config.delete(key)` | `Promise<{deleted: boolean}>` | 删除插件配置的这个 key 并释放配额；`deleted` 表示是否真的删到（没设过 → `false`，不报错）。key 规则同 `FC.config.put`（不合法 → reject，文案透传）。非字符串 / 空串，以及 `.`、`..` 在桥上直接 reject、不发请求（这两个键作为 URL 路径段会被浏览器规范化掉，只能用后端 JS 的 `config.delete` 删） |
-| `FC.notify(level, msg)` | `Promise<{ok: true}>` | 在宿主界面显示 Toast：`level === "error"` 显示错误样式，**其余任何值都按成功提示** |
+| `FC.notify(level, msg)` | `Promise<{ok: true}>` | 在宿主界面显示 Toast：`level === "error"` 显示错误样式，**其余任何值都按成功提示**。只是页面提示，不发消息——发到 Telegram / Slack 用后端的 `notify.send` |
 | `FC.resize(height)` | `Promise<{ok: true, applied}>` | 请求宿主调整 iframe 高度（像素，宿主 clamp 到 200–1500，非数字按 400；`applied` 是实际生效的高度） |
 
 **`FC.api` 请求规则**（宿主把调用转成一次 HTTP 请求，插件回调收到的 `req` 由它决定）：
@@ -808,6 +937,7 @@ function compareCodePoints(a, b) {
 | `api.ptsite.write` ⚠️敏感 | `ptsite.setCookie`（只写 cookie；批次 3 补 `create/update/delete`） | 已实现（凭据写入） |
 | `api.douban.cookie.read` | `douban.getCookie` | 已实现 |
 | `api.douban.cookie.write` ⚠️敏感 | `douban.setCookie(v, {validate})` | 已实现 |
+| `api.notify.send` | `notify.send`（借宿主已配置的 Telegram / Slack 通道发消息，开头固定标插件名；不能指定通道或收件人） | 已实现 |
 | `api.rsssite.read` | `rsssite.list/get` | 规划中 |
 | `api.rsssite.write` ⚠️敏感 | `rsssite.create/update/delete` | 规划中 |
 | `api.douban.read` | `douban.listMedias/getMedia/listTasks/getTask` | 规划中 |
@@ -824,7 +954,7 @@ function compareCodePoints(a, b) {
 
 `crypto.*` 是纯函数，无需权限。**「规划中」的权限现在声明会导致 manifest 解析报错**，等宿主对应批次发布后再用。
 
-明确**不给**：`api.server.*`、`api.notify.write`（webhook URL 即凭据外发通道）、用户 / 邀请码、密钥备份恢复、系统升级、插件管理自身、裸 `app_settings` 写与 `plugin.*` 配额键、qB WebUI 会话。暂缓：`api.notify.read`、`api.logs.read`、`api.link.execute`。
+明确**不给**：`api.server.*`、`api.notify.write`（改通知通道配置：webhook URL / bot token 即凭据外发通道。插件**发**消息用 `api.notify.send`，碰不到通道配置）、用户 / 邀请码、密钥备份恢复、系统升级、插件管理自身、裸 `app_settings` 写与 `plugin.*` 配额键、qB WebUI 会话。暂缓：`api.notify.read`（读通知通道配置）、`api.logs.read`、`api.link.execute`。
 
 ## 内部访问走 facade，禁止 `api.http` 回跳宿主 REST
 

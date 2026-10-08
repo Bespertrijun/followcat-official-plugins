@@ -2,7 +2,7 @@
 
 本地调试 followcat 插件的轻量宿主，无需启动完整 FollowCat 服务即可：
 
-- 在 Node 沙箱里跑插件 `index.js`，注入与宿主一致的 `plugin / log / config / data / crypto / http / anime / task / ruleflow / ptsite / douban` 全局与定时器（没有 `console`；`eval` / `Function` 为 `undefined`）
+- 在 Node 沙箱里跑插件 `index.js`，注入与宿主一致的 `plugin / log / config / data / crypto / http / anime / task / ruleflow / ptsite / douban / notify` 全局与定时器（没有 `console`；`eval` / `Function` 为 `undefined`）
 - 模拟触发任意 hook（自带每个 hook 的示例 payload）
 - 调用插件通过 `plugin.registerAPI` 注册的端点
 - 在 iframe 里加载 `<plugin>/ui/`，`FC.*` SDK 与宿主桥和生产行为一致（见下文「iframe 桥」）
@@ -32,6 +32,9 @@ python devrt/server.py media-library-filter --allow-http
 
 # 把 mock config 持久化到 devrt/data/<plugin>/config.json
 python devrt/server.py cookiecloud --persist
+
+# notify.send 模拟「一个通道都没配」（resolve channels: 0）；默认 1
+DEVRT_NOTIFY_CHANNELS=0 python devrt/server.py cookiecloud
 ```
 
 `--persist` 文件格式：`{"version": 2, "entries": {"<key>": {"value", "is_secret", "updated_at"}}}`
@@ -153,6 +156,7 @@ python devrt/server.py cookiecloud --persist
 | 入口脚本 | 同步段 10s 超时 → 加载失败（`load error`：`run entry script: entry script exceeded 10s (interrupted)`，文案同生产）；入口脚本排的 `setImmediate` 等在它之后才跑，不算进这 10s | 10s 看门狗（含入口脚本执行期间触发的定时器回调、微任务）→ 启用失败，`run entry script: entry script exceeded 10s (interrupted)` 进日志与 `last_error_msg`；入口期宿主 Go panic 也只算启用失败（`run entry script: host panic: ...`）；数据库「已启用」标记不变，FollowCat 与其它插件照常起来 |
 | 返回值 / payload | 返回值按 JSON 导出成普通值（带环、`BigInt`、超过 1000 层 / 100 万个值 → 普通错误，文案同生产）；`should_download` 按导出后的值裁决；hook payload 每次触发由 server.py 重新发一份 | 同左（在循环线程上导出；每个插件拿自己的一份 payload） |
 | `ptsite` mock | 内存里 5 个 PT 站行（含带 / 不带 RSS、cookie / apikey / none 鉴权），`hosts` 由各行 mock RSS 链接算出；站点不能增删；只有 `setCookie`（`setAPIKey` 已随生产删除）；站点不存在时审计 target 记 `<invalid len=N>`、reject 文案不回显参数 | 真实 `site_configs`；`hosts` 由 `RssURLs` 算出 |
+| `notify.send` | 有 `api.notify.send` 才注入（同生产）。参数类型不对同步抛的 `TypeError`、内容规则的 reject 原因与检查顺序、每小时配额（默认 300，可用 `DEVRT_NOTIFY_MAX_PER_HOUR` 调；`channels: 0` 与被拒的不计）都同生产文案；调用返回时 Promise 已 settle（同生产）。**不真发**：接受的消息在日志面板打一行 `[notify.send] {...}`（带 `🧩 [插件名]` 前缀与排好的按钮行），resolve `{queued: true, channels: N}`，N 由 `DEVRT_NOTIFY_CHANNELS` 决定（默认 1，`0` 模拟没配通道）。不模拟队列满、图片下载、按钮文字截断与附域名。链接地址校验移植自 Go `net/url`，国际化域名用 Node 的 `domainToASCII` 近似宿主的 IDNA 转换，罕见域名的结论可能与生产不同。没人接的 reject 会在日志面板记一条 warn（devrt 通用行为，生产不记） | 借宿主已配置的 Telegram / Slack 真发；入队即 resolve；配额 admin 可调；最终发送失败计入插件详情页统计 |
 | `douban.setCookie` 的 opts | 同生产：任何 JS 对象（含函数）都收，只有原始值（数字 / 字符串 / 布尔）抛 `TypeError` | 同左 |
 | `crypto.base64Decode` | 同生产：忽略 `\r` / `\n`（Go `StdEncoding` 行为） | 同左 |
 | 队列 / 节流 / 超时 | 无队列；墙钟超时同生产（hook 10s / API 10s / `should_download` 3s fail-open，含 `await`），同步段死循环按超时打断，async 回调 reject 等同抛错 | 64 队列、墙钟超时（含 `await`）、每插件一个事件循环 |

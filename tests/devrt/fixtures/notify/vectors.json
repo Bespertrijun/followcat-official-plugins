@@ -1,0 +1,1493 @@
+[
+ {
+  "name": "basic",
+  "msg": {
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "title empty",
+  "msg": {
+   "title": ""
+  },
+  "want": "缺少标题"
+ },
+ {
+  "name": "title ascii blanks",
+  "msg": {
+   "title": " \t\n\r\u000b\f"
+  },
+  "want": "缺少标题"
+ },
+ {
+  "name": "title ideographic space",
+  "msg": {
+   "title": "\u3000"
+  },
+  "want": "缺少标题"
+ },
+ {
+  "name": "title NEL is blank in Go",
+  "msg": {
+   "title": "\u0085"
+  },
+  "want": "缺少标题"
+ },
+ {
+  "name": "title BOM is not blank in Go",
+  "msg": {
+   "title": "\ufeff"
+  },
+  "want": ""
+ },
+ {
+  "name": "title 1024 bytes",
+  "msg": {
+   "title": {
+    "$repeat": [
+     "a",
+     1024
+    ]
+   }
+  },
+  "want": ""
+ },
+ {
+  "name": "title 1025 bytes",
+  "msg": {
+   "title": {
+    "$repeat": [
+     "a",
+     1025
+    ]
+   }
+  },
+  "want": "标题过长（上限 1024 字节）"
+ },
+ {
+  "name": "title 342 CJK = 1026 bytes",
+  "msg": {
+   "title": {
+    "$repeat": [
+     "汉",
+     342
+    ]
+   }
+  },
+  "want": "标题过长（上限 1024 字节）"
+ },
+ {
+  "name": "body 16384 bytes",
+  "msg": {
+   "title": "t",
+   "body": {
+    "$repeat": [
+     "a",
+     16384
+    ]
+   }
+  },
+  "want": ""
+ },
+ {
+  "name": "body 16385 bytes",
+  "msg": {
+   "title": "t",
+   "body": {
+    "$repeat": [
+     "a",
+     16385
+    ]
+   }
+  },
+  "want": "正文过长（上限 16384 字节）"
+ },
+ {
+  "name": "body blank skips link scan",
+  "msg": {
+   "title": "t",
+   "body": "   "
+  },
+  "want": ""
+ },
+ {
+  "name": "link ok",
+  "msg": {
+   "title": "t",
+   "body": "see [x](https://a.example/)"
+  },
+  "want": ""
+ },
+ {
+  "name": "link ftp",
+  "msg": {
+   "title": "t",
+   "body": "[x](ftp://a.example/)"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "link userinfo user:pass",
+  "msg": {
+   "title": "t",
+   "body": "[x](https://u:p@a.example/)"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "link userinfo user",
+  "msg": {
+   "title": "t",
+   "body": "[x](https://u@a.example/)"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "link userinfo lookalike",
+  "msg": {
+   "title": "t",
+   "body": "[x](https://bank.com@evil.cn/)"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "link opaque http:host",
+  "msg": {
+   "title": "t",
+   "body": "[x](http:a.example)"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "link scheme-relative",
+  "msg": {
+   "title": "t",
+   "body": "[x](//a.example/)"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "link uppercase scheme host",
+  "msg": {
+   "title": "t",
+   "body": "[x](HTTPS://A.EXAMPLE/)"
+  },
+  "want": ""
+ },
+ {
+  "name": "link bad port",
+  "msg": {
+   "title": "t",
+   "body": "[x](https://a.example:abc/)"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "link empty port",
+  "msg": {
+   "title": "t",
+   "body": "[x](https://a.example:/)"
+  },
+  "want": ""
+ },
+ {
+  "name": "link empty host",
+  "msg": {
+   "title": "t",
+   "body": "[x](https:///path)"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "link ipv6",
+  "msg": {
+   "title": "t",
+   "body": "[x](https://[::1]:8080/)"
+  },
+  "want": ""
+ },
+ {
+  "name": "link ipv6 unclosed",
+  "msg": {
+   "title": "t",
+   "body": "[x](https://[::1/)"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "link ipv4",
+  "msg": {
+   "title": "t",
+   "body": "[x](http://192.168.1.2:9000/a)"
+  },
+  "want": ""
+ },
+ {
+  "name": "link IDN",
+  "msg": {
+   "title": "t",
+   "body": "[x](https://例子.测试/路径)"
+  },
+  "want": ""
+ },
+ {
+  "name": "link host %2F",
+  "msg": {
+   "title": "t",
+   "body": "[x](https://a%2Fb.example/)"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "link host %-encoded UTF-8",
+  "msg": {
+   "title": "t",
+   "body": "[x](https://%E4%BE%8B.example/)"
+  },
+  "want": ""
+ },
+ {
+  "name": "link host underscore",
+  "msg": {
+   "title": "t",
+   "body": "[x](https://a_b.example/)"
+  },
+  "want": ""
+ },
+ {
+  "name": "link host bang",
+  "msg": {
+   "title": "t",
+   "body": "[x](https://a!b.example/)"
+  },
+  "want": ""
+ },
+ {
+  "name": "link host lt",
+  "msg": {
+   "title": "t",
+   "body": "[x](https://a<b.example/)"
+  },
+  "want": ""
+ },
+ {
+  "name": "link host fullwidth",
+  "msg": {
+   "title": "t",
+   "body": "[x](https://Ｅxample.com/)"
+  },
+  "want": ""
+ },
+ {
+  "name": "link host bad xn-- with non-ASCII",
+  "msg": {
+   "title": "t",
+   "body": "[x](https://例子.xn--zz.com/)"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "link host bad xn-- ASCII only",
+  "msg": {
+   "title": "t",
+   "body": "[x](https://xn--zz.com/)"
+  },
+  "want": ""
+ },
+ {
+  "name": "link with space is not a link",
+  "msg": {
+   "title": "t",
+   "body": "[x](https://a b.example/)"
+  },
+  "want": ""
+ },
+ {
+  "name": "link with ideographic space is not a link",
+  "msg": {
+   "title": "t",
+   "body": "[x](https://a\u3000b.example/)"
+  },
+  "want": ""
+ },
+ {
+  "name": "link bad path escape",
+  "msg": {
+   "title": "t",
+   "body": "[x](https://a.example/a%zz)"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "link control char",
+  "msg": {
+   "title": "t",
+   "body": "[x](https://a.example/\u007f)"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "link paren in url",
+  "msg": {
+   "title": "t",
+   "body": "[x](https://a.example/(y))"
+  },
+  "want": ""
+ },
+ {
+  "name": "link javascript",
+  "msg": {
+   "title": "t",
+   "body": "[x](javascript:alert(1))"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "link mailto",
+  "msg": {
+   "title": "t",
+   "body": "[x](mailto:a@b.example)"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "link empty text",
+  "msg": {
+   "title": "t",
+   "body": "[](ftp://a.example/)"
+  },
+  "want": ""
+ },
+ {
+  "name": "link nested inner literal",
+  "msg": {
+   "title": "t",
+   "body": "[a [b](ftp://x)](https://ok.example/)"
+  },
+  "want": ""
+ },
+ {
+  "name": "link nested inner valid outer bad",
+  "msg": {
+   "title": "t",
+   "body": "[a [b](https://ok.example/)](ftp://x)"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "link after unmatched bracket",
+  "msg": {
+   "title": "t",
+   "body": "[ [x](ftp://a)"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "code span hides link",
+  "msg": {
+   "title": "t",
+   "body": "`[x](ftp://a)`"
+  },
+  "want": ""
+ },
+ {
+  "name": "double code span hides link",
+  "msg": {
+   "title": "t",
+   "body": "``[x](ftp://a)``"
+  },
+  "want": ""
+ },
+ {
+  "name": "unclosed code span",
+  "msg": {
+   "title": "t",
+   "body": "`[x](ftp://a)"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "code span length mismatch",
+  "msg": {
+   "title": "t",
+   "body": "``[x](ftp://a)`"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "code span inside brackets",
+  "msg": {
+   "title": "t",
+   "body": "[a`]`](ftp://a)"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "escaped open bracket",
+  "msg": {
+   "title": "t",
+   "body": "\\[x](ftp://a)"
+  },
+  "want": ""
+ },
+ {
+  "name": "escaped close bracket",
+  "msg": {
+   "title": "t",
+   "body": "[x\\](ftp://a)"
+  },
+  "want": ""
+ },
+ {
+  "name": "backslash non-punct",
+  "msg": {
+   "title": "t",
+   "body": "\\a[x](ftp://a)"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fenced block hides link",
+  "msg": {
+   "title": "t",
+   "body": "```\n[x](ftp://a)\n```"
+  },
+  "want": ""
+ },
+ {
+  "name": "fenced block with lang",
+  "msg": {
+   "title": "t",
+   "body": "```js\n[x](ftp://a)\n```"
+  },
+  "want": ""
+ },
+ {
+  "name": "unclosed fence is literal",
+  "msg": {
+   "title": "t",
+   "body": "```\n[x](ftp://a)"
+  },
+  "want": ""
+ },
+ {
+  "name": "fence with space is not a fence",
+  "msg": {
+   "title": "t",
+   "body": "``` js\n[x](ftp://a)\n```"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "link after fence",
+  "msg": {
+   "title": "t",
+   "body": "```\ncode\n```\n[x](ftp://a)"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "quote line",
+  "msg": {
+   "title": "t",
+   "body": "> [x](ftp://a)"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "expandable quote line",
+  "msg": {
+   "title": "t",
+   "body": ">> [x](ftp://a)"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "list line",
+  "msg": {
+   "title": "t",
+   "body": "- [x](ftp://a)"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "quote without space",
+  "msg": {
+   "title": "t",
+   "body": ">[x](ftp://a)"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "CR line breaks",
+  "msg": {
+   "title": "t",
+   "body": "a\r[x](ftp://a)"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "emphasis around link",
+  "msg": {
+   "title": "t",
+   "body": "**[x](ftp://a)**"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "link long ok",
+  "msg": {
+   "title": "t",
+   "body": {
+    "$cat": [
+     "[x](https://a.example/",
+     {
+      "$repeat": [
+       "a",
+       2020
+      ]
+     },
+     ")"
+    ]
+   }
+  },
+  "want": ""
+ },
+ {
+  "name": "link long 2048 bytes ok",
+  "msg": {
+   "title": "t",
+   "body": {
+    "$cat": [
+     "[x](https://a.example/",
+     {
+      "$repeat": [
+       "a",
+       2030
+      ]
+     },
+     ")"
+    ]
+   }
+  },
+  "want": ""
+ },
+ {
+  "name": "link long 2049 bytes",
+  "msg": {
+   "title": "t",
+   "body": {
+    "$cat": [
+     "[x](https://a.example/",
+     {
+      "$repeat": [
+       "a",
+       2031
+      ]
+     },
+     ")"
+    ]
+   }
+  },
+  "want": "正文里的链接过长（上限 2048 字符）"
+ },
+ {
+  "name": "link CJK path escaped ok",
+  "msg": {
+   "title": "t",
+   "body": {
+    "$cat": [
+     "[x](https://a.example/",
+     {
+      "$repeat": [
+       "路",
+       200
+      ]
+     },
+     ")"
+    ]
+   }
+  },
+  "want": ""
+ },
+ {
+  "name": "link CJK path escaped too long",
+  "msg": {
+   "title": "t",
+   "body": {
+    "$cat": [
+     "[x](https://a.example/",
+     {
+      "$repeat": [
+       "路",
+       230
+      ]
+     },
+     ")"
+    ]
+   }
+  },
+  "want": "正文里的链接过长（上限 2048 字符）"
+ },
+ {
+  "name": "link CJK query verbatim",
+  "msg": {
+   "title": "t",
+   "body": {
+    "$cat": [
+     "[x](https://a.example/?q=",
+     {
+      "$repeat": [
+       "路",
+       690
+      ]
+     },
+     ")"
+    ]
+   }
+  },
+  "want": "正文里的链接过长（上限 2048 字符）"
+ },
+ {
+  "name": "link CJK fragment escaped",
+  "msg": {
+   "title": "t",
+   "body": {
+    "$cat": [
+     "[x](https://a.example/#",
+     {
+      "$repeat": [
+       "路",
+       230
+      ]
+     },
+     ")"
+    ]
+   }
+  },
+  "want": "正文里的链接过长（上限 2048 字符）"
+ },
+ {
+  "name": "link path with percent-encoded ok",
+  "msg": {
+   "title": "t",
+   "body": {
+    "$cat": [
+     "[x](https://a.example/",
+     {
+      "$repeat": [
+       "%E8%B7%AF",
+       200
+      ]
+     },
+     ")"
+    ]
+   }
+  },
+  "want": ""
+ },
+ {
+  "name": "invalid wins over long",
+  "msg": {
+   "title": "t",
+   "body": {
+    "$cat": [
+     "[x](https://a.example/",
+     {
+      "$repeat": [
+       "a",
+       2100
+      ]
+     },
+     ") [y](ftp://a)"
+    ]
+   }
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "long before invalid on later line",
+  "msg": {
+   "title": "t",
+   "body": {
+    "$cat": [
+     "[x](https://a.example/",
+     {
+      "$repeat": [
+       "a",
+       2100
+      ]
+     },
+     ")\n[y](ftp://a)"
+    ]
+   }
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "IDN host length after punycode",
+  "msg": {
+   "title": "t",
+   "body": {
+    "$cat": [
+     "[x](https://",
+     {
+      "$repeat": [
+       "例",
+       60
+      ]
+     },
+     ".example/",
+     {
+      "$repeat": [
+       "a",
+       1900
+      ]
+     },
+     ")"
+    ]
+   }
+  },
+  "want": ""
+ },
+ {
+  "name": "image ok",
+  "msg": {
+   "title": "t",
+   "image": "https://img.example/p.png"
+  },
+  "want": ""
+ },
+ {
+  "name": "image empty = none",
+  "msg": {
+   "title": "t",
+   "image": ""
+  },
+  "want": ""
+ },
+ {
+  "name": "image ftp",
+  "msg": {
+   "title": "t",
+   "image": "ftp://img.example/p.png"
+  },
+  "want": "图片地址无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "image data url",
+  "msg": {
+   "title": "t",
+   "image": "data:image/png;base64,AAAA"
+  },
+  "want": "图片地址无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "image userinfo",
+  "msg": {
+   "title": "t",
+   "image": "https://u:p@img.example/p.png"
+  },
+  "want": "图片地址无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "image raw too long",
+  "msg": {
+   "title": "t",
+   "image": {
+    "$cat": [
+     "https://img.example/",
+     {
+      "$repeat": [
+       "a",
+       2040
+      ]
+     }
+    ]
+   }
+  },
+  "want": "图片地址过长（上限 2048 字符）"
+ },
+ {
+  "name": "image spaces escaped ok",
+  "msg": {
+   "title": "t",
+   "image": {
+    "$cat": [
+     "https://img.example/",
+     {
+      "$repeat": [
+       " ",
+       600
+      ]
+     }
+    ]
+   }
+  },
+  "want": ""
+ },
+ {
+  "name": "image spaces escaped too long",
+  "msg": {
+   "title": "t",
+   "image": {
+    "$cat": [
+     "https://img.example/",
+     {
+      "$repeat": [
+       " ",
+       700
+      ]
+     }
+    ]
+   }
+  },
+  "want": "图片地址过长（上限 2048 字符）"
+ },
+ {
+  "name": "image relative",
+  "msg": {
+   "title": "t",
+   "image": "/p.png"
+  },
+  "want": "图片地址无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "buttons 3 in a row",
+  "msg": {
+   "title": "t",
+   "buttons": [
+    [
+     {
+      "label": "a",
+      "url": "https://ok.example/"
+     },
+     {
+      "label": "b",
+      "url": "https://ok.example/"
+     },
+     {
+      "label": "c",
+      "url": "https://ok.example/"
+     }
+    ]
+   ]
+  },
+  "want": ""
+ },
+ {
+  "name": "buttons 4 in a row",
+  "msg": {
+   "title": "t",
+   "buttons": [
+    [
+     {
+      "label": "a",
+      "url": "https://ok.example/"
+     },
+     {
+      "label": "b",
+      "url": "https://ok.example/"
+     },
+     {
+      "label": "c",
+      "url": "https://ok.example/"
+     },
+     {
+      "label": "d",
+      "url": "https://ok.example/"
+     }
+    ]
+   ]
+  },
+  "want": "每行按钮最多 3 个"
+ },
+ {
+  "name": "buttons 6 total",
+  "msg": {
+   "title": "t",
+   "buttons": [
+    [
+     {
+      "label": "a",
+      "url": "https://ok.example/"
+     },
+     {
+      "label": "b",
+      "url": "https://ok.example/"
+     }
+    ],
+    [
+     {
+      "label": "c",
+      "url": "https://ok.example/"
+     },
+     {
+      "label": "d",
+      "url": "https://ok.example/"
+     }
+    ],
+    [
+     {
+      "label": "e",
+      "url": "https://ok.example/"
+     },
+     {
+      "label": "f",
+      "url": "https://ok.example/"
+     }
+    ]
+   ]
+  },
+  "want": ""
+ },
+ {
+  "name": "buttons 7 total",
+  "msg": {
+   "title": "t",
+   "buttons": [
+    [
+     {
+      "label": "a",
+      "url": "https://ok.example/"
+     }
+    ],
+    [
+     {
+      "label": "b",
+      "url": "https://ok.example/"
+     },
+     {
+      "label": "c",
+      "url": "https://ok.example/"
+     },
+     {
+      "label": "d",
+      "url": "https://ok.example/"
+     }
+    ],
+    [
+     {
+      "label": "e",
+      "url": "https://ok.example/"
+     },
+     {
+      "label": "f",
+      "url": "https://ok.example/"
+     },
+     {
+      "label": "g",
+      "url": "https://ok.example/"
+     }
+    ]
+   ]
+  },
+  "want": "按钮最多 6 个"
+ },
+ {
+  "name": "row check before total",
+  "msg": {
+   "title": "t",
+   "buttons": [
+    [
+     {
+      "label": "a",
+      "url": "https://ok.example/"
+     }
+    ],
+    [
+     {
+      "label": "b",
+      "url": "https://ok.example/"
+     }
+    ],
+    [
+     {
+      "label": "c",
+      "url": "https://ok.example/"
+     }
+    ],
+    [
+     {
+      "label": "d",
+      "url": "https://ok.example/"
+     }
+    ],
+    [
+     {
+      "label": "e",
+      "url": "https://ok.example/"
+     }
+    ],
+    [
+     {
+      "label": "f",
+      "url": "https://ok.example/"
+     }
+    ],
+    [
+     {
+      "label": "g",
+      "url": "https://ok.example/"
+     },
+     {
+      "label": "h",
+      "url": "https://ok.example/"
+     },
+     {
+      "label": "i",
+      "url": "https://ok.example/"
+     },
+     {
+      "label": "j",
+      "url": "https://ok.example/"
+     }
+    ]
+   ]
+  },
+  "want": "每行按钮最多 3 个"
+ },
+ {
+  "name": "empty rows",
+  "msg": {
+   "title": "t",
+   "buttons": [
+    [],
+    [
+     {
+      "label": "a",
+      "url": "https://ok.example/"
+     }
+    ],
+    []
+   ]
+  },
+  "want": ""
+ },
+ {
+  "name": "label blank",
+  "msg": {
+   "title": "t",
+   "buttons": [
+    [
+     {
+      "label": " ",
+      "url": "https://ok.example/"
+     }
+    ]
+   ]
+  },
+  "want": "按钮文字不能为空"
+ },
+ {
+  "name": "label ideographic space",
+  "msg": {
+   "title": "t",
+   "buttons": [
+    [
+     {
+      "label": "\u3000",
+      "url": "https://ok.example/"
+     }
+    ]
+   ]
+  },
+  "want": "按钮文字不能为空"
+ },
+ {
+  "name": "label long is fine",
+  "msg": {
+   "title": "t",
+   "buttons": [
+    [
+     {
+      "label": {
+       "$cat": [
+        {
+         "$repeat": [
+          "长",
+          70
+         ]
+        }
+       ]
+      },
+      "url": "https://ok.example/"
+     }
+    ]
+   ]
+  },
+  "want": ""
+ },
+ {
+  "name": "both url and action",
+  "msg": {
+   "title": "t",
+   "buttons": [
+    [
+     {
+      "label": "a",
+      "url": "https://ok.example/",
+      "action": "x"
+     }
+    ]
+   ]
+  },
+  "want": "按钮只能是链接（url）或动作（action）其中一种"
+ },
+ {
+  "name": "neither url nor action",
+  "msg": {
+   "title": "t",
+   "buttons": [
+    [
+     {
+      "label": "a"
+     }
+    ]
+   ]
+  },
+  "want": "按钮缺少链接（url）或动作（action）"
+ },
+ {
+  "name": "data on link",
+  "msg": {
+   "title": "t",
+   "buttons": [
+    [
+     {
+      "label": "a",
+      "url": "https://ok.example/",
+      "data": {}
+     }
+    ]
+   ]
+  },
+  "want": "只有动作按钮可以带 data"
+ },
+ {
+  "name": "data false on link",
+  "msg": {
+   "title": "t",
+   "buttons": [
+    [
+     {
+      "label": "a",
+      "url": "https://ok.example/",
+      "data": false
+     }
+    ]
+   ]
+  },
+  "want": "只有动作按钮可以带 data"
+ },
+ {
+  "name": "data null on link",
+  "msg": {
+   "title": "t",
+   "buttons": [
+    [
+     {
+      "label": "a",
+      "url": "https://ok.example/",
+      "data": null
+     }
+    ]
+   ]
+  },
+  "want": ""
+ },
+ {
+  "name": "action button",
+  "msg": {
+   "title": "t",
+   "buttons": [
+    [
+     {
+      "label": "a",
+      "action": "retry"
+     }
+    ]
+   ]
+  },
+  "want": "按钮动作未在 manifest 中声明"
+ },
+ {
+  "name": "action with small data",
+  "msg": {
+   "title": "t",
+   "buttons": [
+    [
+     {
+      "label": "a",
+      "action": "retry",
+      "data": {
+       "id": 7
+      }
+     }
+    ]
+   ]
+  },
+  "want": "按钮动作未在 manifest 中声明"
+ },
+ {
+  "name": "action data too big",
+  "msg": {
+   "title": "t",
+   "buttons": [
+    [
+     {
+      "label": "a",
+      "action": "retry",
+      "data": {
+       "s": {
+        "$repeat": [
+         "x",
+         4100
+        ]
+       }
+      }
+     }
+    ]
+   ]
+  },
+  "want": "按钮数据过大（上限 4096 字节）"
+ },
+ {
+  "name": "action data U+2028 escaped by Go",
+  "msg": {
+   "title": "t",
+   "buttons": [
+    [
+     {
+      "label": "a",
+      "action": "retry",
+      "data": {
+       "$repeat": [
+        "\u2028",
+        1300
+       ]
+      }
+     }
+    ]
+   ]
+  },
+  "want": "按钮数据过大（上限 4096 字节）"
+ },
+ {
+  "name": "action data <>& not escaped",
+  "msg": {
+   "title": "t",
+   "buttons": [
+    [
+     {
+      "label": "a",
+      "action": "retry",
+      "data": {
+       "$repeat": [
+        "<",
+        4090
+       ]
+      }
+     }
+    ]
+   ]
+  },
+  "want": "按钮动作未在 manifest 中声明"
+ },
+ {
+  "name": "label blank before action",
+  "msg": {
+   "title": "t",
+   "buttons": [
+    [
+     {
+      "label": "",
+      "action": "retry"
+     }
+    ]
+   ]
+  },
+  "want": "按钮文字不能为空"
+ },
+ {
+  "name": "action before later bad url",
+  "msg": {
+   "title": "t",
+   "buttons": [
+    [
+     {
+      "label": "a",
+      "url": "https://ok.example/"
+     },
+     {
+      "label": "b",
+      "action": "x"
+     }
+    ],
+    [
+     {
+      "label": "c",
+      "url": "ftp://x"
+     }
+    ]
+   ]
+  },
+  "want": "按钮动作未在 manifest 中声明"
+ },
+ {
+  "name": "bad url before later action",
+  "msg": {
+   "title": "t",
+   "buttons": [
+    [
+     {
+      "label": "a",
+      "url": "ftp://x"
+     },
+     {
+      "label": "b",
+      "action": "x"
+     }
+    ]
+   ]
+  },
+  "want": "按钮链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "button javascript url",
+  "msg": {
+   "title": "t",
+   "buttons": [
+    [
+     {
+      "label": "a",
+      "url": "javascript:alert(1)"
+     }
+    ]
+   ]
+  },
+  "want": "按钮链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "button url too long",
+  "msg": {
+   "title": "t",
+   "buttons": [
+    [
+     {
+      "label": "a",
+      "url": {
+       "$cat": [
+        "https://a.example/",
+        {
+         "$repeat": [
+          "a",
+          2040
+         ]
+        }
+       ]
+      }
+     }
+    ]
+   ]
+  },
+  "want": "按钮链接过长（上限 2048 字符）"
+ },
+ {
+  "name": "button url userinfo",
+  "msg": {
+   "title": "t",
+   "buttons": [
+    [
+     {
+      "label": "a",
+      "url": "https://bank.com@evil.cn/"
+     }
+    ]
+   ]
+  },
+  "want": "按钮链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "order: title before image",
+  "msg": {
+   "title": "",
+   "image": "ftp://x"
+  },
+  "want": "缺少标题"
+ },
+ {
+  "name": "order: title length before body",
+  "msg": {
+   "title": {
+    "$repeat": [
+     "a",
+     1025
+    ]
+   },
+   "body": {
+    "$repeat": [
+     "a",
+     16385
+    ]
+   }
+  },
+  "want": "标题过长（上限 1024 字节）"
+ },
+ {
+  "name": "order: body link before image",
+  "msg": {
+   "title": "t",
+   "body": "[x](ftp://a)",
+   "image": "ftp://x"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "order: image before buttons",
+  "msg": {
+   "title": "t",
+   "image": "ftp://x",
+   "buttons": [
+    [
+     {
+      "label": "a",
+      "url": "https://ok.example/"
+     },
+     {
+      "label": "b",
+      "url": "https://ok.example/"
+     },
+     {
+      "label": "c",
+      "url": "https://ok.example/"
+     },
+     {
+      "label": "d",
+      "url": "https://ok.example/"
+     }
+    ]
+   ]
+  },
+  "want": "图片地址无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "order: body size before body link",
+  "msg": {
+   "title": "t",
+   "body": {
+    "$cat": [
+     "[x](ftp://a)",
+     {
+      "$repeat": [
+       "a",
+       16384
+      ]
+     }
+    ]
+   }
+  },
+  "want": "正文过长（上限 16384 字节）"
+ }
+]

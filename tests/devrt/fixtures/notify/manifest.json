@@ -1,0 +1,3 @@
+{"name":"devrt-notify","version":"0.0.1","source_url":"https://example.com/devrt-notify",
+ "permissions":["api.notify.send","hook.download.write"],
+ "hooks":["should_download"]}

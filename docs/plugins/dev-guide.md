@@ -62,7 +62,7 @@ qBit / linker --->|  EventBus 同步分 |       |
 - **凭证不会泄漏**：`anime.get` 返回的是脱敏 view，拿不到 `Server.Password` 之类；PT 站 / 豆瓣凭据只写不读，读侧只有「已配置」+ 指纹。
 - **内置 `JSON` 带保护**：`JSON.parse` / `JSON.stringify` 用起来和平常一样（输出逐字节相同，`reviver` / `replacer` / `space` / `toJSON` 照旧），只是嵌套超过 1000 层、或 stringify 超过 100 万个值时抛普通 `TypeError`，而不是拖垮宿主进程。宿主把数据转成普通对象交给你时也有同样的上限：别改写全局原型（如 `Object.prototype.toJSON`），否则宿主给你的 payload / facade 结果会转换失败（该次调用报错）。
 - **正则单次匹配 5 秒上限**：带反向引用 / 环视的正则遇上长输入可能指数级回溯；超过 5 秒按**未匹配**处理（`test` → `false`、`exec` / `match` → `null`）。写正则时避免 `(a|aa)+`、`(.*)*` 这类嵌套量词，长文本先截短再匹配。
-- **没有文件系统、没有 require、没有 console**（`eval` / `Function` 也是 `undefined`）：始终可用的是 `plugin` / `log` / `config` / `data` / `crypto` 与定时器（`setTimeout` / `setInterval` / `setImmediate`，见 §6.5）；`http` / `anime` / `task` / `ruleflow` / `ptsite` / `douban` 按 manifest 权限注入（见 §2 权限表）。
+- **没有文件系统、没有 require、没有 console**（`eval` / `Function` 也是 `undefined`）：始终可用的是 `plugin` / `log` / `config` / `data` / `crypto` 与定时器（`setTimeout` / `setInterval` / `setImmediate`，见 §6.5）；`http` / `anime` / `task` / `ruleflow` / `ptsite` / `douban` / `notify` 按 manifest 权限注入（见 §2 权限表）。
 
 ---
 
@@ -131,6 +131,7 @@ qBit / linker --->|  EventBus 同步分 |       |
 | `api.ptsite.write` ⚠️ | `ptsite.setCookie`（插件只能写 cookie；`setAPIKey` 已于 2026-09-25 删除） | 异步 |
 | `api.douban.cookie.read` | `douban.getCookie` | 同步 |
 | `api.douban.cookie.write` ⚠️ | `douban.setCookie(v, {validate})`（验活上限 8s，到点回 `rate_limited`） | 异步 |
+| `api.notify.send` | `notify.send(msg)`（借宿主已配置的 Telegram / Slack 发消息，开头固定标插件名；**必须 `await` 或 `.catch`**，见 §6.6） | 异步（只在本地入队，但返回 Promise） |
 | `ui.embed` | 允许声明 `manifest.ui.entry` | — |
 
 hook 类权限（`hook.download.read` / `hook.download.write` ⚠️ / `hook.link.read` / `hook.task.read`）不注入对象，只决定能 `plugin.on` 哪些 hook，见上表。
@@ -544,6 +545,57 @@ setInterval(function () { startJob("timer"); }, 30 * 60000);             // 定�
 ```
 
 完整示例见 `cookiecloud`（按配置间隔自动同步、保存设置后 `/reschedule` 即时重排、`/sync` 立即返回、UI 每 2 秒轮询 `/status`）。
+
+---
+
+## 6.6 发通知：`notify.send`
+
+声明 `api.notify.send` 后，插件可以借 FollowCat 已配置的通知通道（Telegram / Slack）发消息，完整规则见 sdk.md「[`notify`](./sdk.md#notify--借宿主的通知通道发消息需-apinotifysend异步)」。要点：
+
+- 返回 Promise：**必须 `await` 或 `.catch`**。宿主不跟踪没人处理的 rejection，被拒（超配额、链接不合规、队列满）时不接就什么提示都没有。
+- 参数类型不对（如 `title` 是数字）在调用处**同步抛 `TypeError`**，内容不合规才是 reject，`e.message` 是中文原因。
+- resolve `{queued: true, channels: N}` 只表示进了发送队列；`channels: 0` = 没有通道收这类消息（没配通道、或都没勾「插件消息」），不算错。
+- 消息开头固定带 `🧩 [插件名]`；每小时默认最多 300 条（只算真正排上队的）。批量任务结束后汇总发一条，别每处理一项发一条。
+- 别在 `on_download_done` / `on_link_done` / `on_task_completed` 这类 hook 里转发宿主已经发过的内容，用户会收到两条。
+- 正文是 FC-Markdown：站点名、文件名这类动态文字放进 `body` 前先转义，免得 `*`、`[` 之类被当成格式。
+
+cookiecloud 式的例子：同步跑完后发一条汇总（失败时多带一个跳到 CookieCloud 面板的按钮）：
+
+```js
+// 动态文字转义成 FC-Markdown 的字面文字（同主仓 EscapeFCMarkdown 的规则）
+function fcEscape(s) {
+  return String(s).replace(/[\\*~+|`\[\]]/g, "\\$&").replace(/^[>-]/gm, "\\$&");
+}
+
+async function notifySyncResult(results) {
+  if (typeof notify === "undefined") return; // 没声明 api.notify.send
+  var failed = results.filter(function (r) { return r.status === "failed"; });
+  var written = results.filter(function (r) { return r.status === "written"; });
+  if (!failed.length && !written.length) return; // 没变化就不打扰
+  var lines = ["写入 **" + written.length + "** 个，失败 **" + failed.length + "** 个"];
+  failed.forEach(function (r) { lines.push("- " + fcEscape(r.name) + "：" + fcEscape(r.message)); });
+  try {
+    var r = await notify.send({
+      title: failed.length ? "Cookie 同步有失败" : "Cookie 同步完成",
+      body: lines.join("\n"),
+      buttons: failed.length ? [{ label: "打开 CookieCloud", url: config.get("server_url") || "https://example.com/" }] : [],
+    });
+    if (r.channels === 0) log.info("没有通道接收插件消息（未配置或未勾选「插件消息」）");
+  } catch (e) {
+    log.warn("同步通知没发出去：" + e.message); // 超配额 / 队列满 / 内容不合规
+  }
+}
+
+async function syncTask(trigger) {
+  try {
+    var results = await runSync();
+    // ……记录状态……
+    await notifySyncResult(results); // 自己接住了错误：通知发不出去不影响同步结果
+  } catch (e) {
+    log.error("同步失败：" + e);
+  }
+}
+```
 
 ---
 

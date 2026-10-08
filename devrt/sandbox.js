@@ -3,7 +3,7 @@
 //
 // Loads <plugin>/index.js inside Node's `vm` module with goja-compatible globals
 // injected (plugin / log / config / crypto / http / anime / task / ruleflow /
-// ptsite / douban), then talks JSON-RPC to
+// ptsite / douban / notify), then talks JSON-RPC to
 // the Python parent over stdin/stdout.
 //
 // Protocol (newline-delimited JSON):
@@ -65,6 +65,18 @@
 //   lowercased, de-duplicated, first-seen order; never the URL itself).
 //   DEVRT_DOUBAN_VALIDATION=<ok|cookie_invalid|rate_limited|unreachable> picks the
 //   mocked validation result (default "ok").
+//
+// notify.send (api.notify.send; mirror internal/plugin/host_api_notify.go + internal/notify/plugin.go):
+//   injected only with the permission. Same synchronous TypeErrors ("notify.send: ...") for a non-object
+//   argument / wrong field types, same Chinese reject reasons in the host's order (title, body, body links,
+//   image, buttons, then the quota). Body links are found with a port of the host's FC-Markdown link rules
+//   (code blocks / code spans / backslash escapes hide them) and URLs are checked with a port of Go net/url
+//   + the host's IDNA chain — Node's domainToASCII stands in for the strict x/net/idna lookup profile, so
+//   unusual internationalized hosts may differ. Nothing is delivered: an accepted message is printed to the
+//   log panel ("[notify.send] {...}", with the host's "🧩 [<name>]" prefix and the button rows) and resolves
+//   {queued: true, channels: N}. DEVRT_NOTIFY_CHANNELS sets N (default 1; 0 = nothing configured, which
+//   is not counted against the quota); DEVRT_NOTIFY_MAX_PER_HOUR sets the quota (default 300, like the host).
+//   The queue-full reject, image download and button label truncation are not simulated.
 //
 // Timers (host opened them 2026-09-25): setTimeout / setInterval / setImmediate and the
 // clear* functions are Node's own. Like the host, a callback that throws or returns a
@@ -613,6 +625,521 @@ function buildDouban(perms) {
   return api;
 }
 
+// ─── notify.send (api.notify.send) ──────────────────────────────────────────
+// Mirror of internal/plugin/host_api_notify.go (the facade: argument / field type checks → synchronous
+// TypeError) and internal/notify/plugin.go EnqueuePlugin (content rules → rejected Promise with the host's
+// Chinese reason, then the quota). Nothing is delivered: an accepted message is printed to the log panel
+// and resolves {queued: true, channels: DEVRT_NOTIFY_CHANNELS}.
+
+const NOTIFY_CHANNELS = (function () {
+  const raw = process.env.DEVRT_NOTIFY_CHANNELS;
+  const n = Number(raw);
+  return raw !== undefined && raw !== '' && Number.isSafeInteger(n) && n >= 0 ? n : 1;
+})();
+// Host: plugin.notify.max_per_hour, default 300, admin range [1, 3600]
+const NOTIFY_MAX_PER_HOUR = (function () {
+  const n = Number(process.env.DEVRT_NOTIFY_MAX_PER_HOUR);
+  return Number.isSafeInteger(n) && n >= 1 && n <= 3600 ? n : 300;
+})();
+const NOTIFY_QUOTA_WINDOW_MS = 60 * 60 * 1000;
+const NOTIFY_MAX_TITLE_BYTES = 1024;
+const NOTIFY_MAX_BODY_BYTES = 16 * 1024;
+const NOTIFY_MAX_URL_LEN = 2048;            // bytes, raw and re-serialized
+const NOTIFY_MAX_BUTTON_DATA_BYTES = 4096;
+const NOTIFY_MAX_BUTTONS = 6;
+const NOTIFY_MAX_BUTTONS_IN_ROW = 3;
+const NOTIFY_AUTO_BUTTONS_PER_ROW = 2;      // flat button list → the facade lays it out 2 per row
+const NOTIFY_LINK_RULE = '只允许 http / https，且不能带用户名和密码';
+
+function utf8Len(s) { return Buffer.byteLength(s, 'utf8'); }
+
+// Go unicode.IsSpace
+function goIsSpace(cp) {
+  return (cp >= 0x09 && cp <= 0x0d) || cp === 0x20 || cp === 0x85 || cp === 0xa0 || cp === 0x1680 ||
+    (cp >= 0x2000 && cp <= 0x200a) || cp === 0x2028 || cp === 0x2029 || cp === 0x202f || cp === 0x205f || cp === 0x3000;
+}
+// Go strings.TrimSpace(s) === "" (JS trim() differs: it strips U+FEFF and keeps U+0085)
+function goIsBlank(s) {
+  for (const ch of s) if (!goIsSpace(ch.codePointAt(0))) return false;
+  return true;
+}
+
+// ── Go net/url port (Parse + String), on byte strings: each char is one UTF-8 byte (latin1) ──
+const URL_ENC_PATH = 'path', URL_ENC_HOST = 'host', URL_ENC_ZONE = 'zone', URL_ENC_FRAGMENT = 'fragment';
+function goIsHexByte(c) { return (c >= 48 && c <= 57) || (c >= 97 && c <= 102) || (c >= 65 && c <= 70); }
+function goUnhex(c) { return c <= 57 ? c - 48 : (c >= 97 ? c - 87 : c - 55); }
+function goShouldEscape(c, mode) {
+  if ((c >= 97 && c <= 122) || (c >= 65 && c <= 90) || (c >= 48 && c <= 57)) return false;
+  const ch = String.fromCharCode(c);
+  if ((mode === URL_ENC_HOST || mode === URL_ENC_ZONE) && '!$&\'()*+,;=:[]<>"'.includes(ch)) return false;
+  if ('-_.~'.includes(ch)) return false;
+  if ('$&+,/:;=?@'.includes(ch)) {
+    if (mode === URL_ENC_PATH) return ch === '?';
+    if (mode === URL_ENC_FRAGMENT) return false;
+  }
+  if (mode === URL_ENC_FRAGMENT && '!()*'.includes(ch)) return false;
+  return true;
+}
+function goUnescape(s, mode) {
+  let n = 0;
+  for (let i = 0; i < s.length;) {
+    const c = s.charCodeAt(i);
+    if (c === 37) { // %
+      n++;
+      if (i + 2 >= s.length || !goIsHexByte(s.charCodeAt(i + 1)) || !goIsHexByte(s.charCodeAt(i + 2))) throw new Error('invalid URL escape');
+      if (mode === URL_ENC_HOST && goUnhex(s.charCodeAt(i + 1)) < 8 && s.slice(i, i + 3) !== '%25') throw new Error('invalid URL escape');
+      if (mode === URL_ENC_ZONE) {
+        const v = goUnhex(s.charCodeAt(i + 1)) << 4 | goUnhex(s.charCodeAt(i + 2));
+        if (s.slice(i, i + 3) !== '%25' && v !== 32 && goShouldEscape(v, URL_ENC_HOST)) throw new Error('invalid URL escape');
+      }
+      i += 3;
+    } else {
+      if ((mode === URL_ENC_HOST || mode === URL_ENC_ZONE) && c < 0x80 && goShouldEscape(c, mode)) throw new Error('invalid character in host name');
+      i++;
+    }
+  }
+  if (n === 0) return s;
+  let out = '';
+  for (let i = 0; i < s.length; i++) {
+    if (s.charCodeAt(i) === 37) {
+      out += String.fromCharCode(goUnhex(s.charCodeAt(i + 1)) << 4 | goUnhex(s.charCodeAt(i + 2)));
+      i += 2;
+    } else {
+      out += s[i];
+    }
+  }
+  return out;
+}
+function goEscape(s, mode) {
+  let out = '';
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    out += goShouldEscape(c, mode) ? '%' + c.toString(16).toUpperCase().padStart(2, '0') : s[i];
+  }
+  return out;
+}
+function goValidEncoded(s, mode) {
+  for (let i = 0; i < s.length; i++) {
+    if ('!$&\'()*+,;=:@[]%'.includes(s[i])) continue;
+    if (goShouldEscape(s.charCodeAt(i), mode)) return false;
+  }
+  return true;
+}
+function goValidOptionalPort(p) { return p === '' || /^:[0-9]*$/.test(p); }
+function goParseHost(host) {
+  if (host.startsWith('[')) {
+    const i = host.lastIndexOf(']');
+    if (i < 0) throw new Error("missing ']' in host");
+    if (!goValidOptionalPort(host.slice(i + 1))) throw new Error('invalid port');
+    const zone = host.slice(0, i).indexOf('%25');
+    if (zone >= 0) {
+      return goUnescape(host.slice(0, zone), URL_ENC_HOST) + goUnescape(host.slice(zone, i), URL_ENC_ZONE) +
+        goUnescape(host.slice(i), URL_ENC_HOST);
+    }
+  } else {
+    const i = host.lastIndexOf(':');
+    if (i !== -1 && !goValidOptionalPort(host.slice(i))) throw new Error('invalid port');
+  }
+  return goUnescape(host, URL_ENC_HOST);
+}
+// url.Parse; throws where Go returns an error. Only the absolute (scheme://host) shape matters here.
+function goURLParse(raw) {
+  const hash = raw.indexOf('#');
+  const u = { scheme: '', opaque: '', user: false, host: '', path: '', rawPath: '', forceQuery: false, rawQuery: '',
+    fragment: '', rawFragment: '', omitHost: false };
+  let rest = hash < 0 ? raw : raw.slice(0, hash);
+  if (/[\x00-\x1f\x7f]/.test(rest)) throw new Error('invalid control character in URL');
+  const m = /^([A-Za-z][A-Za-z0-9+.-]*):/.exec(rest);
+  if (rest.startsWith(':')) throw new Error('missing protocol scheme');
+  if (m) { u.scheme = m[1].toLowerCase(); rest = rest.slice(m[0].length); }
+  if (rest.endsWith('?') && rest.indexOf('?') === rest.length - 1) {
+    u.forceQuery = true;
+    rest = rest.slice(0, -1);
+  } else {
+    const q = rest.indexOf('?');
+    if (q >= 0) { u.rawQuery = rest.slice(q + 1); rest = rest.slice(0, q); }
+  }
+  if (!rest.startsWith('/')) {
+    if (u.scheme !== '') { u.opaque = rest; return u; }
+    if (rest.split('/')[0].includes(':')) throw new Error('first path segment in URL cannot contain colon');
+  }
+  if ((u.scheme !== '' || !rest.startsWith('///')) && rest.startsWith('//')) {
+    let authority = rest.slice(2);
+    rest = '';
+    const i = authority.indexOf('/');
+    if (i >= 0) { rest = authority.slice(i); authority = authority.slice(0, i); }
+    const at = authority.lastIndexOf('@');
+    u.host = goParseHost(at < 0 ? authority : authority.slice(at + 1));
+    if (at >= 0) u.user = true; // ValidateLinkURL refuses any userinfo (or Go fails to parse it): same outcome
+  } else if (u.scheme !== '' && rest.startsWith('/')) {
+    u.omitHost = true;
+  }
+  u.path = goUnescape(rest, URL_ENC_PATH);
+  u.rawPath = goEscape(u.path, URL_ENC_PATH) === rest ? '' : rest;
+  if (hash >= 0) {
+    const f = raw.slice(hash + 1);
+    if (f !== '') {
+      u.fragment = goUnescape(f, URL_ENC_FRAGMENT);
+      u.rawFragment = goEscape(u.fragment, URL_ENC_FRAGMENT) === f ? '' : f;
+    }
+  }
+  return u;
+}
+function goEscapedPart(raw, decoded, mode) {
+  if (raw !== '' && goValidEncoded(raw, mode)) {
+    try { if (goUnescape(raw, mode) === decoded) return raw; } catch (e) { /* fall through */ }
+  }
+  return goEscape(decoded, mode);
+}
+// URL.EscapedPath
+function goEscapedPath(u) {
+  if (u.rawPath !== '' && goValidEncoded(u.rawPath, URL_ENC_PATH)) {
+    try { if (goUnescape(u.rawPath, URL_ENC_PATH) === u.path) return u.rawPath; } catch (e) { /* fall through */ }
+  }
+  return u.path === '*' ? '*' : goEscape(u.path, URL_ENC_PATH);
+}
+function goURLString(u) {
+  let s = u.scheme ? u.scheme + ':' : '';
+  if (u.opaque) {
+    s += u.opaque;
+  } else {
+    if ((u.scheme || u.host || u.user) && !(u.omitHost && u.host === '' && !u.user)) {
+      if (u.host || u.path || u.user) s += '//';
+      if (u.host) s += goEscape(u.host, URL_ENC_HOST);
+    }
+    const path = goEscapedPath(u);
+    if (path !== '' && path[0] !== '/' && u.host !== '') s += '/';
+    s += path;
+  }
+  if (u.forceQuery || u.rawQuery !== '') s += '?' + u.rawQuery;
+  if (u.fragment !== '') s += '#' + goEscapedPart(u.rawFragment, u.fragment, URL_ENC_FRAGMENT);
+  return s;
+}
+// url.URL Hostname() / Port()
+function goSplitHostPort(hostPort) {
+  let host = hostPort, port = '';
+  const colon = host.lastIndexOf(':');
+  if (colon !== -1 && goValidOptionalPort(host.slice(colon))) { port = host.slice(colon + 1); host = host.slice(0, colon); }
+  if (host.startsWith('[') && host.endsWith(']')) host = host.slice(1, -1);
+  return { host, port };
+}
+
+// RFC 3492 punycode (golang.org/x/net/idna's Punycode profile: encode non-ASCII labels, xn-- labels must decode)
+const PUNY = { base: 36, tMin: 1, tMax: 26, skew: 38, damp: 700, initialBias: 72, initialN: 128 };
+function punyAdapt(delta, numPoints, first) {
+  delta = first ? Math.floor(delta / PUNY.damp) : delta >> 1;
+  delta += Math.floor(delta / numPoints);
+  let k = 0;
+  for (; delta > ((PUNY.base - PUNY.tMin) * PUNY.tMax) >> 1; k += PUNY.base) delta = Math.floor(delta / (PUNY.base - PUNY.tMin));
+  return k + Math.floor((PUNY.base - PUNY.tMin + 1) * delta / (delta + PUNY.skew));
+}
+function punyDigit(d) { return String.fromCharCode(d < 26 ? d + 97 : d + 22); }
+function punyEncode(label) {
+  const cps = Array.from(label, (c) => c.codePointAt(0));
+  let out = cps.filter((c) => c < 0x80).map((c) => String.fromCharCode(c)).join('');
+  const b = out.length;
+  let h = b;
+  if (b > 0) out += '-';
+  let n = PUNY.initialN, delta = 0, bias = PUNY.initialBias;
+  while (h < cps.length) {
+    const m = Math.min(...cps.filter((c) => c >= n));
+    delta += (m - n) * (h + 1);
+    n = m;
+    for (const c of cps) {
+      if (c < n) delta++;
+      if (c === n) {
+        let q = delta;
+        for (let k = PUNY.base; ; k += PUNY.base) {
+          const t = k <= bias ? PUNY.tMin : (k >= bias + PUNY.tMax ? PUNY.tMax : k - bias);
+          if (q < t) break;
+          out += punyDigit(t + (q - t) % (PUNY.base - t));
+          q = Math.floor((q - t) / (PUNY.base - t));
+        }
+        out += punyDigit(q);
+        bias = punyAdapt(delta, h + 1, h === b);
+        delta = 0;
+        h++;
+      }
+    }
+    delta++;
+    n++;
+  }
+  return out;
+}
+function punyDecodes(s) {
+  const d = s.lastIndexOf('-');
+  const output = [];
+  for (let i = 0; i < Math.max(d, 0); i++) {
+    if (s.charCodeAt(i) >= 0x80) return false;
+    output.push(s.charCodeAt(i));
+  }
+  let n = PUNY.initialN, bias = PUNY.initialBias, i = 0;
+  for (let pos = d > 0 ? d + 1 : 0; pos < s.length;) {
+    const oldi = i;
+    for (let w = 1, k = PUNY.base; ; k += PUNY.base) {
+      if (pos >= s.length) return false;
+      const c = s.charCodeAt(pos++);
+      const digit = c >= 48 && c <= 57 ? c - 22 : (c >= 65 && c <= 90 ? c - 65 : (c >= 97 && c <= 122 ? c - 97 : -1));
+      if (digit < 0) return false;
+      i += digit * w;
+      if (i > 0x7fffffff) return false;
+      const t = k <= bias ? PUNY.tMin : (k >= bias + PUNY.tMax ? PUNY.tMax : k - bias);
+      if (digit < t) break;
+      w *= PUNY.base - t;
+      if (w > 0x7fffffff) return false;
+    }
+    const len = output.length + 1;
+    bias = punyAdapt(i - oldi, len, oldi === 0);
+    n += Math.floor(i / len);
+    i %= len;
+    if (n > 0x10ffff) return false;
+    output.splice(i, 0, n);
+    i++;
+  }
+  return true;
+}
+const nodeURL = require('url');
+const nodeNet = require('net');
+// Mirror of notify idnaASCII: (1) strict lookup — approximated by Node's WHATWG domainToASCII, (2) punycode-only
+// fallback on the lowercased host, (3) an ASCII host as-is. null = no ASCII form (link refused).
+function notifyIDNAASCII(hostBytes) {
+  const host = Buffer.from(hostBytes, 'latin1').toString('utf8');
+  const isAscii = (x) => !/[^\x00-\x7f]/.test(x);
+  const a = nodeURL.domainToASCII(host);
+  if (a !== '' && isAscii(a)) return a.toLowerCase();
+  let ok = true;
+  const labels = host.toLowerCase().split('.').map(function (l) {
+    if (l.startsWith('xn--')) { if (!punyDecodes(l.slice(4))) ok = false; return l; }
+    return isAscii(l) ? l : 'xn--' + punyEncode(l);
+  });
+  if (ok) return labels.join('.');
+  if (isAscii(host)) return host.toLowerCase();
+  return null;
+}
+// Mirror of notify.ValidateLinkURL: the re-serialized href (as a byte string), or null when the host refuses it
+function notifyValidateLinkURL(raw) {
+  let u;
+  try { u = goURLParse(Buffer.from(raw, 'utf8').toString('latin1')); } catch (e) { return null; }
+  if (u.scheme !== 'http' && u.scheme !== 'https') return null;
+  if (u.user) return null;
+  const hp = goSplitHostPort(u.host);
+  if (u.host === '' || hp.host === '') return null;
+  if (!u.host.startsWith('[') && nodeNet.isIP(hp.host) === 0) {
+    const ascii = notifyIDNAASCII(hp.host);
+    if (ascii === null) return null;
+    u.host = ascii + (hp.port !== '' ? ':' + hp.port : '');
+  }
+  return goURLString(u);
+}
+// Mirror of notify checkPluginURL: '' = ok, else 'too_long' / 'invalid'
+function notifyCheckURL(raw) {
+  if (utf8Len(raw) > NOTIFY_MAX_URL_LEN) return 'too_long';
+  const href = notifyValidateLinkURL(raw);
+  if (href === null) return 'invalid';
+  return href.length > NOTIFY_MAX_URL_LEN ? 'too_long' : '';
+}
+
+// Mirror of the link part of notify.ParseFCMarkdown (Doc.Issues) + docHasLongLink: 'invalid' when any
+// [text](url) has a URL the host refuses, else 'too_long' when a link's re-serialized URL exceeds 2048 bytes.
+// Code blocks / code spans / backslash escapes hide links exactly like the host parser.
+function fcmdLinkProblem(src) {
+  const lines = src.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n');
+  const st = { invalid: false, long: false };
+  const fenceOpen = (l) => l.startsWith('```') && !Array.from(l.slice(3)).some((c) => c === '`' || goIsSpace(c.codePointAt(0)));
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (fenceOpen(line)) {
+      let end = -1;
+      for (let j = i + 1; j < lines.length; j++) if (lines[j] === '```') { end = j; break; }
+      if (end < 0) break; // unclosed fence: the rest is literal text
+      i = end;
+      continue;
+    }
+    let seg = line;
+    if (line.startsWith('>> ')) seg = line.slice(3);
+    else if (line.startsWith('> ') || line.startsWith('- ')) seg = line.slice(2);
+    fcmdScanLinks(seg, st);
+  }
+  return st.invalid ? 'invalid' : (st.long ? 'too_long' : '');
+}
+function fcmdIsASCIIPunct(c) {
+  return (c >= 33 && c <= 47) || (c >= 58 && c <= 64) || (c >= 91 && c <= 96) || (c >= 123 && c <= 126);
+}
+function fcmdScanLinks(seg, st) {
+  const runs = []; // maximal backtick runs [start, length]
+  for (let i = 0; i < seg.length;) {
+    if (seg[i] !== '`') { i++; continue; }
+    let n = 0;
+    while (seg[i + n] === '`') n++;
+    runs.push([i, n]);
+    i += n;
+  }
+  const runLen = (i) => { let n = 0; while (seg[i + n] === '`') n++; return n; };
+  // CommonMark code span: the closing run is the next maximal run of exactly n backticks
+  const codeSpanEnd = (i, n) => {
+    for (const r of runs) if (r[1] === n && r[0] >= i + n) return r[0] + n;
+    return -1;
+  };
+  const matchBracket = (i) => {
+    const stack = [];
+    for (let j = i; j < seg.length;) {
+      const c = seg[j];
+      if (c === '\\' && j + 1 < seg.length && fcmdIsASCIIPunct(seg.charCodeAt(j + 1))) { j += 2; continue; }
+      if (c === '`') { const n = runLen(j); const e = codeSpanEnd(j, n); j = e >= 0 ? e : j + n; continue; }
+      if (c === '[') stack.push(j);
+      else if (c === ']' && stack.length > 0 && stack.pop() === i) return j;
+      j++;
+    }
+    return -1;
+  };
+  for (let i = 0; i < seg.length;) {
+    const c = seg[i];
+    if (c === '\\') { i += (i + 1 < seg.length && fcmdIsASCIIPunct(seg.charCodeAt(i + 1))) ? 2 : 1; continue; }
+    if (c === '`') { const n = runLen(i); const e = codeSpanEnd(i, n); i = e >= 0 ? e : i + n; continue; }
+    if (c !== '[') { i++; continue; }
+    const j = matchBracket(i);
+    if (j < 0 || j + 1 >= seg.length || seg[j + 1] !== '(' || j === i + 1) { i++; continue; }
+    const k = seg.indexOf(')', j + 2);
+    if (k < 0) { i++; continue; }
+    let spaced = false;
+    for (const ch of seg.slice(j + 2, k)) if (goIsSpace(ch.codePointAt(0))) { spaced = true; break; }
+    if (spaced) { i++; continue; }
+    const href = notifyValidateLinkURL(seg.slice(j + 2, k));
+    if (href === null) st.invalid = true;
+    else if (href.length > NOTIFY_MAX_URL_LEN) st.long = true;
+    i = k + 1; // link text never holds another link (inner [ ]( ) are literal)
+  }
+}
+
+// Mirror of notify.buildPluginNotification + buildPluginButtons: the reject reason, or null
+function notifyContentReason(msg) {
+  if (goIsBlank(msg.title)) return '缺少标题';
+  if (utf8Len(msg.title) > NOTIFY_MAX_TITLE_BYTES) return '标题过长（上限 ' + NOTIFY_MAX_TITLE_BYTES + ' 字节）';
+  if (utf8Len(msg.body) > NOTIFY_MAX_BODY_BYTES) return '正文过长（上限 ' + NOTIFY_MAX_BODY_BYTES + ' 字节）';
+  if (!goIsBlank(msg.body)) {
+    const p = fcmdLinkProblem(msg.body);
+    if (p === 'invalid') return '正文里的链接无效：' + NOTIFY_LINK_RULE;
+    if (p === 'too_long') return '正文里的链接过长（上限 ' + NOTIFY_MAX_URL_LEN + ' 字符）';
+  }
+  if (msg.image !== '') {
+    const p = notifyCheckURL(msg.image);
+    if (p === 'too_long') return '图片地址过长（上限 ' + NOTIFY_MAX_URL_LEN + ' 字符）';
+    if (p) return '图片地址无效：' + NOTIFY_LINK_RULE;
+  }
+  let total = 0;
+  for (const row of msg.buttons) {
+    total += row.length;
+    if (row.length > NOTIFY_MAX_BUTTONS_IN_ROW) return '每行按钮最多 ' + NOTIFY_MAX_BUTTONS_IN_ROW + ' 个';
+  }
+  if (total > NOTIFY_MAX_BUTTONS) return '按钮最多 ' + NOTIFY_MAX_BUTTONS + ' 个';
+  for (const row of msg.buttons) {
+    for (const b of row) {
+      if (goIsBlank(b.label)) return '按钮文字不能为空';
+      if (b.url !== '' && b.action !== '') return '按钮只能是链接（url）或动作（action）其中一种';
+      if (b.url === '' && b.action === '') return '按钮缺少链接（url）或动作（action）';
+      if (b.data !== null && b.action === '') return '只有动作按钮可以带 data';
+      if (b.data !== null && utf8Len(b.data) > NOTIFY_MAX_BUTTON_DATA_BYTES) return '按钮数据过大（上限 ' + NOTIFY_MAX_BUTTON_DATA_BYTES + ' 字节）';
+      // The manifest has no `actions` field yet, so every action button counts as undeclared (host stage C)
+      if (b.action !== '') return '按钮动作未在 manifest 中声明';
+      const p = notifyCheckURL(b.url);
+      if (p === 'too_long') return '按钮链接过长（上限 ' + NOTIFY_MAX_URL_LEN + ' 字符）';
+      if (p) return '按钮链接无效：' + NOTIFY_LINK_RULE;
+    }
+  }
+  return null;
+}
+
+// ── facade type checks (host: synchronous TypeError "notify.send: ...") ──
+function notifyTypeError(msg) { return typeError('notify.send: ' + msg); }
+// exportJSON: undefined / null → absent; not serializable (cycle, BigInt, too deep) → TypeError
+function notifyExport(v, field) {
+  try {
+    return exportValue(v);
+  } catch (e) {
+    throw notifyTypeError(field + ' is not JSON-serializable');
+  }
+}
+function notifyStringField(v, field) {
+  if (v === undefined || v === null) return '';
+  const x = notifyExport(v, field);
+  if (typeof x !== 'string') throw notifyTypeError(field + ' must be a string');
+  return x;
+}
+function notifyButton(x) {
+  if (x === null || typeof x !== 'object' || Array.isArray(x)) throw notifyTypeError('each button must be an object');
+  const str = function (key) {
+    const v = Object.prototype.hasOwnProperty.call(x, key) ? x[key] : null;
+    if (v === null) return '';
+    if (typeof v !== 'string') throw notifyTypeError('button ' + key + ' must be a string');
+    return v;
+  };
+  const b = { label: str('label'), url: str('url'), action: str('action'), data: null };
+  if (Object.prototype.hasOwnProperty.call(x, 'data') && x.data !== null) {
+    // Go encoding/json (SetEscapeHTML(false)) still escapes U+2028 / U+2029
+    b.data = JSON.stringify(x.data).replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029');
+  }
+  return b;
+}
+function notifyButtons(v) {
+  const shape = 'buttons must be an array of button objects or an array of button rows';
+  if (v === undefined || v === null) return [];
+  const arr = notifyExport(v, 'buttons');
+  if (!Array.isArray(arr)) throw notifyTypeError(shape);
+  if (arr.length === 0) return [];
+  if (Array.isArray(arr[0])) {
+    return arr.map(function (row) {
+      if (!Array.isArray(row)) throw notifyTypeError(shape);
+      return row.map(notifyButton);
+    });
+  }
+  const flat = arr.map(function (b) {
+    if (Array.isArray(b)) throw notifyTypeError(shape);
+    return notifyButton(b);
+  });
+  const rows = [];
+  for (let i = 0; i < flat.length; i += NOTIFY_AUTO_BUTTONS_PER_ROW) rows.push(flat.slice(i, i + NOTIFY_AUTO_BUTTONS_PER_ROW));
+  return rows;
+}
+function notifyReadMessage(arg) {
+  if (arg === null || typeof arg !== 'object' || Array.isArray(arg)) throw notifyTypeError('argument must be a message object');
+  return {
+    title: notifyStringField(arg.title, 'title'),
+    body: notifyStringField(arg.body, 'body'),
+    image: notifyStringField(arg.image, 'image'),
+    buttons: notifyButtons(arg.buttons),
+  };
+}
+
+const notifySent = []; // ms timestamps of messages queued on at least one channel (rolling 60-minute window)
+
+function buildNotify() {
+  return {
+    // Settles synchronously (like the host, which resolves / rejects on the loop thread inside the call):
+    // consecutive sends keep their order. Plugins must await or .catch it — the host ignores unhandled rejections.
+    send: function (msg) {
+      const m = notifyReadMessage(msg);
+      return new CtxPromise(function (resolve, reject) {
+        const reason = notifyContentReason(m);
+        if (reason) return reject(goError(reason));
+        const now = Date.now();
+        while (notifySent.length > 0 && notifySent[0] <= now - NOTIFY_QUOTA_WINDOW_MS) notifySent.shift();
+        if (notifySent.length >= NOTIFY_MAX_PER_HOUR) {
+          return reject(goError('超出通知配额（每小时 ' + NOTIFY_MAX_PER_HOUR + ' 条）'));
+        }
+        if (NOTIFY_CHANNELS > 0) notifySent.push(now); // channels: 0 is not counted against the quota
+        const shown = {
+          prefix: '🧩 [' + manifest.name + ']', // the host puts this in front of every plugin message
+          channels: NOTIFY_CHANNELS,
+          title: m.title, body: m.body, image: m.image,
+          buttons: m.buttons.map((row) => row.map((b) => ({ label: b.label, url: b.url }))),
+        };
+        emitEvent('log', { level: 'info', args: [escapeLogText('[notify.send] ' + JSON.stringify(shown))], notify: shown });
+        resolve(toPlugin({ queued: true, channels: NOTIFY_CHANNELS }));
+      });
+    },
+  };
+}
+
 const anime = {
   get: function (id) {
     return toPlugin({ id, title: 'Mock Anime ' + id, mikan_id: '', douban_id: '', total_ep: 12, ep_num: 1, status: 'tracking' });
@@ -711,6 +1238,7 @@ const HOST_PERMISSIONS = [
   'hook.download.read', 'hook.download.write', 'hook.link.read', 'hook.task.read',
   'api.http', 'api.anime.read', 'api.task.read', 'api.ruleflow', 'ui.embed', 'api.ruleflow.read',
   'api.ptsite.read', 'api.ptsite.write', 'api.douban.cookie.read', 'api.douban.cookie.write',
+  'api.notify.send',
 ];
 const HOST_HOOKS = [
   'on_episode_found', 'on_download_done', 'on_download_failed', 'on_link_done', 'on_link_failed',
@@ -875,6 +1403,8 @@ const sandbox = {
   // Object per domain, methods per permission (read-only ⇒ no write methods)
   ptsite: (declaredPerms.has('api.ptsite.read') || declaredPerms.has('api.ptsite.write')) ? buildPTSite(declaredPerms) : undefined,
   douban: (declaredPerms.has('api.douban.cookie.read') || declaredPerms.has('api.douban.cookie.write')) ? buildDouban(declaredPerms) : undefined,
+  // notify.send only with api.notify.send (otherwise typeof notify === "undefined", like the host)
+  notify: declaredPerms.has('api.notify.send') ? buildNotify() : undefined,
   // utility: runtime needs Date / JSON / Math / etc — vm provides them by default
   // timers: open since 2026-09-25 (host timers.go); callback errors only log a WARN
   setTimeout: timers.setTimeout,

@@ -343,3 +343,123 @@ test('registerAPI 返回值导出上限同宿主：1000 层可以、1001 层报�
   const b = await s.api('/export-bigint');
   assert.match(b.error, /^plugin return value is not JSON-serializable: TypeError: Do not know how to serialize a BigInt/);
 });
+
+// ─── notify.send（api.notify.send）：与宿主 internal/plugin/host_api_notify.go + internal/notify/plugin.go 对齐 ──────
+
+// fixtures/notify/vectors.json：每条消息的 want 是主仓宿主 notify.Service.EnqueuePlugin 实跑的结果（"" = 接受），
+// 字符串里的 {"$repeat": [s, n]} / {"$cat": [...]} 是展开宏（省篇幅）
+function expandVector(x) {
+  if (Array.isArray(x)) return x.map(expandVector);
+  if (x && typeof x === 'object') {
+    if (Object.prototype.hasOwnProperty.call(x, '$repeat')) return expandVector(x.$repeat[0]).repeat(x.$repeat[1]);
+    if (Object.prototype.hasOwnProperty.call(x, '$cat')) return x.$cat.map(expandVector).join('');
+    const o = {};
+    for (const k of Object.keys(x)) o[k] = expandVector(x[k]);
+    return o;
+  }
+  return x;
+}
+
+test('notify：没声明 api.notify.send 时 notify 是 undefined；声明了才挂 notify.send', async (t) => {
+  const s = start('notify-noperm');
+  t.after(s.stop);
+  assert.equal(await s.api('/typeof'), 'undefined');
+  const n = start('notify');
+  t.after(n.stop);
+  assert.equal((await n.ready).loadError, null, 'api.notify.send is in the host permission list');
+});
+
+test('notify.send：参数不是对象、字段类型不对 → 同步抛 TypeError，文案同宿主', async (t) => {
+  const s = start('notify');
+  t.after(s.stop);
+  const r = await s.api('/typeerrors');
+  const shape = 'TypeError: notify.send: buttons must be an array of button objects or an array of button rows';
+  const want = {
+    '': 'TypeError: notify.send: argument must be a message object',
+    'undefined': 'TypeError: notify.send: argument must be a message object',
+    'null': 'TypeError: notify.send: argument must be a message object',
+    'string': 'TypeError: notify.send: argument must be a message object',
+    'number': 'TypeError: notify.send: argument must be a message object',
+    'function': 'TypeError: notify.send: argument must be a message object',
+    'array': 'TypeError: notify.send: argument must be a message object',
+    'title number': 'TypeError: notify.send: title must be a string',
+    'title object': 'TypeError: notify.send: title must be a string',
+    'title function': 'TypeError: notify.send: title must be a string',
+    'body number': 'TypeError: notify.send: body must be a string',
+    'image array': 'TypeError: notify.send: image must be a string',
+    'buttons string': shape,
+    'buttons object': shape,
+    'rows then flat': shape,
+    'flat then row': shape,
+    'button number': 'TypeError: notify.send: each button must be an object',
+    'row button number': 'TypeError: notify.send: each button must be an object',
+    'label number': 'TypeError: notify.send: button label must be a string',
+    'url number': 'TypeError: notify.send: button url must be a string',
+    'action boolean': 'TypeError: notify.send: button action must be a string',
+    'title cyclic': 'TypeError: notify.send: title is not JSON-serializable',
+    'title bigint': 'TypeError: notify.send: title is not JSON-serializable',
+    'boxed string title ok': 'no throw',
+  };
+  assert.deepEqual(r, want);
+});
+
+test('notify.send：内容规则的 reject 原因与先后顺序同宿主（vectors.json 由宿主实跑生成）', async (t) => {
+  const s = start('notify', { DEVRT_NOTIFY_CHANNELS: '0' });
+  t.after(s.stop);
+  const vectors = JSON.parse(fs.readFileSync(path.join(FIX('notify'), 'vectors.json'), 'utf-8'));
+  const got = await s.api('/vectors', JSON.stringify(vectors.map((v) => expandVector(v.msg))));
+  assert.equal(got.length, vectors.length);
+  for (let i = 0; i < vectors.length; i++) assert.equal(got[i], vectors[i].want, vectors[i].name);
+});
+
+test('notify.send：入队 resolve {queued, channels}（DEVRT_NOTIFY_CHANNELS，默认 1）；reject 是 Error，message 即原因；日志面板打出消息', async (t) => {
+  const s = start('notify');
+  t.after(s.stop);
+  const msg = { title: '同步完成', body: '更新了 **3** 个站点', image: 'https://img.example/p.png',
+    buttons: [{ label: 'a', url: 'https://a.example/' }, { label: 'b', url: 'https://b.example/' }, { label: 'c', url: 'https://c.example/' }] };
+  assert.deepEqual(await s.api('/send', JSON.stringify(msg)), { resolved: { queued: true, channels: 1 } });
+  const line = s.logs.map((l) => l.args.join(' ')).find((x) => x.startsWith('[notify.send] '));
+  const shown = JSON.parse(line.slice('[notify.send] '.length));
+  assert.equal(shown.prefix, '🧩 [devrt-notify]');
+  assert.equal(shown.channels, 1);
+  assert.equal(shown.title, '同步完成');
+  assert.deepEqual(shown.buttons.map((row) => row.map((b) => b.label)), [['a', 'b'], ['c']], 'flat buttons are laid out 2 per row');
+  assert.deepEqual(await s.api('/send', JSON.stringify({ title: ' ' })), { rejected: '缺少标题', name: 'GoError', isError: true });
+
+  const zero = start('notify', { DEVRT_NOTIFY_CHANNELS: '0' });
+  t.after(zero.stop);
+  assert.deepEqual(await zero.api('/send', JSON.stringify({ title: 't' })), { resolved: { queued: true, channels: 0 } });
+  const three = start('notify', { DEVRT_NOTIFY_CHANNELS: '3' });
+  t.after(three.stop);
+  assert.deepEqual(await three.api('/send', JSON.stringify({ title: 't' })), { resolved: { queued: true, channels: 3 } });
+});
+
+test('notify.send：每小时配额（DEVRT_NOTIFY_MAX_PER_HOUR，默认 300）；channels 为 0 与被拒的不计', async (t) => {
+  const s = start('notify', { DEVRT_NOTIFY_MAX_PER_HOUR: '2' });
+  t.after(s.stop);
+  const send = (m) => s.api('/send', JSON.stringify(m));
+  assert.equal((await send({ title: '' })).rejected, '缺少标题');
+  assert.ok((await send({ title: '1' })).resolved);
+  assert.ok((await send({ title: '2' })).resolved);
+  assert.deepEqual(await send({ title: '3' }), { rejected: '超出通知配额（每小时 2 条）', name: 'GoError', isError: true });
+  assert.equal((await send({ title: '' })).rejected, '缺少标题', 'content rules are checked before the quota');
+
+  const zero = start('notify', { DEVRT_NOTIFY_MAX_PER_HOUR: '1', DEVRT_NOTIFY_CHANNELS: '0' });
+  t.after(zero.stop);
+  for (let i = 0; i < 3; i++) assert.ok((await zero.api('/send', JSON.stringify({ title: 't' }))).resolved, 'channels 0 is not counted');
+});
+
+test('notify.send：Promise 在调用返回时已 settle（同宿主在 facade 内同步 settle），连续调用保持顺序', async (t) => {
+  const s = start('notify');
+  t.after(s.stop);
+  assert.deepEqual(await s.api('/sync-settle'), ['0:ok', '1:rej', '2:ok']);
+});
+
+test('notify.send：在 should_download 里调用（await 或不 await、resolve 或 reject）不影响裁决', async (t) => {
+  const s = start('notify');
+  t.after(s.stop);
+  const trig = async (mode) => (await s.rpc('trigger', { hook: 'should_download', data: { mode } })).result;
+  assert.equal((await trig('await-reject-veto')).verdict, 'veto');
+  assert.equal((await trig('unawaited-reject-veto')).verdict, 'veto');
+  assert.equal((await trig('await-ok-allow')).verdict, 'allow');
+});
