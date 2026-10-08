@@ -94,7 +94,7 @@ qBit / linker --->|  EventBus 同步分 |       |
 ### `permissions` 与 `hooks` 必须**双校验**
 
 权限白名单见 sdk.md，完整 hook 白名单见 sdk.md「Hook 列表」。其中 `should_download` 是**同步否决 hook**（读返回值可拦下载，需 `hook.download.write`——敏感权限，详见 sdk.md「同步否决 hook」），其余 `on_*` 都是只读通知 hook：
-`on_episode_found`, `on_download_done`, `on_download_failed`, `on_link_done`, `on_link_failed`, `on_episode_acquired`, `on_task_completed`, `on_task_reopened`。
+`on_episode_found`, `on_download_done`, `on_download_failed`, `on_link_done`, `on_link_failed`, `on_episode_acquired`, `on_task_completed`, `on_task_reopened`, `on_task_subscribed`。
 
 **关键点**：`plugin.on("on_link_done", fn)` 只有当 manifest 同时声明
 `"hooks": [..., "on_link_done", ...]` **且** `"permissions": [..., "hook.link.read", ...]`
@@ -105,11 +105,13 @@ qBit / linker --->|  EventBus 同步分 |       |
 | `on_episode_found`, `on_download_done`, `on_download_failed` | `hook.download.read` |
 | `should_download` | `hook.download.write` ⚠️ |
 | `on_link_done`, `on_link_failed` | `hook.link.read` |
-| `on_episode_acquired`, `on_task_completed`, `on_task_reopened` | `hook.task.read` |
+| `on_episode_acquired`, `on_task_completed`, `on_task_reopened`, `on_task_subscribed` | `hook.task.read` |
 
 > 2026-09-24 起 hook 权限一次性硬改名，**不留别名**：旧的 `hook.download` / `hook.link` / `hook.task` 声明直接解析失败；`hook.notify` 与 `on_notification_before_send` / `on_notification_after_send` 已删除。
 >
-> `on_task_completed` / `on_episode_acquired` / `on_task_reopened` 同时覆盖 Mikan 与豆瓣任务，按 `p.source`（`"mikan"` / `"douban"`）区分；`task_id` 只在各自命名空间内有意义。
+> `on_task_completed` / `on_episode_acquired` / `on_task_reopened` / `on_task_subscribed` 同时覆盖 Mikan 与豆瓣任务，按 `p.source`（`"mikan"` / `"douban"`）区分；`task_id` 只在各自命名空间内有意义。
+>
+> `on_task_subscribed` 在新建追踪任务后发，`p.trigger` 为 `"auto"`（Mikan 自动订阅、豆瓣自动任务第一次写入订阅记录）或 `"manual"`（手动订阅，含「一键订阅本季」逐个建的任务、豆瓣手动建任务）；委托导航锚、心愿单、站级任务不发。详见 sdk.md。
 >
 > `on_episode_acquired` 只在集数新入库（位图由灭变亮）时触发，覆盖自动整理 / 手动链接（含部分完成）/ 合集确认；重复整理已入库的集不触发。`p.episodes` 只含本次新亮的集（综艺按期为期号、电影为空数组且只在首次获取时发一次）。
 

@@ -714,7 +714,7 @@ const HOST_PERMISSIONS = [
 ];
 const HOST_HOOKS = [
   'on_episode_found', 'on_download_done', 'on_download_failed', 'on_link_done', 'on_link_failed',
-  'on_task_completed', 'on_task_reopened', 'on_episode_acquired', 'should_download',
+  'on_task_completed', 'on_task_reopened', 'on_episode_acquired', 'on_task_subscribed', 'should_download',
 ];
 
 function validateManifest(m) {
@@ -742,6 +742,7 @@ const HOOK_PERM_REQ = {
   on_episode_acquired: 'hook.task.read',
   on_task_completed: 'hook.task.read',
   on_task_reopened: 'hook.task.read',
+  on_task_subscribed: 'hook.task.read',
   should_download: 'hook.download.write',
 };
 

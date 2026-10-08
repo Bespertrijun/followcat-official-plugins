@@ -204,6 +204,14 @@ HOOK_SAMPLES: Dict[str, Dict[str, Any]] = {
         "new_total_ep": 13,
         "acquired_units": 12,
     },
+    "on_task_subscribed": {
+        "source": "mikan",
+        "trigger": "auto",
+        "task_id": 1,
+        "media_id": "1",
+        "media_title": "DevRT Sample Anime",
+        "site_id": "mikan-sample",
+    },
     "should_download": {
         "flow_id": "flow-1",
         "media": {

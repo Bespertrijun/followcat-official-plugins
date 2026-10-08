@@ -33,7 +33,7 @@ my-plugin/
 
 ---
 
-## Hook 列表（9 个：8 个通知 hook + 1 个同步否决 hook）
+## Hook 列表（10 个：9 个通知 hook + 1 个同步否决 hook）
 
 > JS 侧通过 `plugin.on("<hook_name>", function(data) { ... })` 订阅。同名 hook 多次注册以最后一次为准。所有 hook payload 字段命名见主仓 `internal/domain/event.go`（`on_task_completed` 的统一形态见 `internal/plugin/event_bridge.go`），并由 `internal/domain/event_payload_test.go` 锁定。hook 须同时在 `manifest.hooks` 声明、并持有对应权限（见下表与「权限」章）。
 >
@@ -49,13 +49,14 @@ my-plugin/
 | `on_episode_acquired` | `hook.task.read` | **集数新入库**：只在集数新入库（位图由灭变亮）时触发，覆盖自动整理 / 手动链接（含部分完成）/ 合集确认；重复整理已入库的集不触发 | `source`, `task_id`, `media_id`, `media_title`, `episodes`, `unit_kind`, `completed_units`, `total_units` |
 | `on_task_completed` | `hook.task.read` | 番剧或豆瓣任务完结（每次完结恰好一次） | `source`（`"mikan"`/`"douban"`）, `task_id`, `media_id`, `media_title`, `total_ep`；兼容旧字段 `anime_title`（同 `media_title`） |
 | `on_task_reopened` | `hook.task.read` | 已完成任务因总集数上调/新集出现被打回继续追更（done→tracking） | `source`（`"mikan"`/`"douban"`）, `task_id`, `media_id`, `media_title`, `old_total_ep`, `new_total_ep`, `acquired_units` |
+| `on_task_subscribed` | `hook.task.read` | 新建了一个追踪任务（自动或手动，见下方说明；每个任务恰好一次） | `source`（`"mikan"`/`"douban"`）, `trigger`（`"auto"`/`"manual"`）, `task_id`, `media_id`, `media_title`, `site_id` |
 | `should_download` | `hook.download.write` ⚠️敏感 | ruleflow 推种到 qBittorrent 之前（同步否决，见下节） | 见下节 `PreDownloadCheck` |
 
 > `?` 表示这个字段可能没有有效值：字段**恒在**，没有有效值时是**零值**（空串 `""` / `0` / 空数组 `[]`，个别为 `null`），不会变成 `undefined`。判断「有没有」看值本身（`if (p.size > 0)`、`if (p.files.length)`）；写成 `p.size || 0`、`p.files || []` 也无妨。`episode_end` 只在合集时有意义（`> 0`，与 `episode` 组成 `[episode, episode_end]` 区间），单集 / 电影时为 `0`。
 >
 > **payload 是你自己的一份普通 JS 对象**：宿主给每个订阅插件、每次投递各发一份独立拷贝（宿主数据 → JSON → 沙箱内置 `JSON.parse`），和你自己 `JSON.parse` 出来的对象没有区别——可以改、加字段、`delete` 字段，`"use strict"` 下也不报错；只影响你自己这一份，不影响宿主主流程与其它插件；`should_download` 超时放行之后插件续跑时再改，也改不到宿主那边的数据。时间类字段是 RFC3339 字符串。
 >
-> **`media_id`**（`on_episode_acquired` / `on_task_completed` / `on_task_reopened` 三个 hook 同名同义）：`source` 为 `"mikan"` 时是番剧 ID，`"douban"` 时是豆瓣条目 ID，统一是字符串。
+> **`media_id`**（`on_episode_acquired` / `on_task_completed` / `on_task_reopened` / `on_task_subscribed` 四个 hook 同名同义）：`source` 为 `"mikan"` 时是番剧 ID，`"douban"` 时是豆瓣条目 ID，统一是字符串。
 >
 > **`source` 决定 `task_id` 的命名空间**：`"mikan"` 时是番剧任务 ID，`"douban"` 时是豆瓣任务 ID，两者不通用。只关心番剧的插件（如按 `anime.get` 取元数据）应先 `if (p.source !== "mikan") return;`。
 >
@@ -66,13 +67,20 @@ my-plugin/
 > - 手动链接「部分完成」（种子仍待人工）也会触发（只含这次链上的集）；之后补完剩余文件只发剩下那几集。
 > - 与 `on_link_done` 并存：前者管「进度到哪」（全部入库路径），后者管「文件放哪」（仅自动整理路径；手动链接不发 `on_link_done` / `on_link_failed`）。
 >
+> **`on_task_subscribed`** 在追踪任务**落库之后**发，每个任务恰好一次。`trigger` 区分来源：
+>
+> - `"auto"`：Mikan 站开了自动订阅、新番入库时自动建的任务；豆瓣自动追踪任务在**第一次写入订阅记录**时（不论那条种子是通过还是被规则排除）。
+> - `"manual"`：在番剧页手动订阅（单个、或「一键订阅本季」里逐个建的每个任务）；在豆瓣条目页手动建任务。
+> - **不发**：已存在的任务（重复订阅 / 409）、建任务失败、普通成员的订阅请求（转成心愿单待审批）、心愿单审批建的任务、Mikan 委托种子在豆瓣侧的导航锚任务、RSS 站级任务。升级前就存在的豆瓣任务、以及在委托导航锚基础上被复用来自动追踪的豆瓣任务，也不会补发。
+> - `site_id` 是这个任务所属的追更配置（站点）ID。插件按任务收到事件；同一部作品在多个站被订阅会收到多次，按 `media_id` 自行去重。宿主自己的「已自动订阅」通知只发 `auto` 且按作品去重，与插件 hook 互不影响。
+>
 > **通知 hook 已删除**：旧的 `hook.notify` 与 `on_notification_before_send` / `on_notification_after_send`（把宿主发出的 Slack/Telegram 通知抄送给插件）已移除——manifest 声明它们会解析失败。「插件借宿主通知通道发通知」将另行设计。
 
 ---
 
 ## 同步否决 hook：`should_download`（需 `hook.download.write`，敏感）
 
-> ⚠️ 与上面 8 个 **fire-and-forget 通知 hook 不同**，`should_download` 是**同步、可否决**的 hook——宿主在每次 ruleflow 推送种子到 qBittorrent **之前**同步调用它，并**读取返回值**决定是否真的下载。典型用途：查询外部媒体库（Emby / Jellyfin / Plex），若该集已存在则拦下、不重复下载。
+> ⚠️ 与上面 9 个 **fire-and-forget 通知 hook 不同**，`should_download` 是**同步、可否决**的 hook——宿主在每次 ruleflow 推送种子到 qBittorrent **之前**同步调用它，并**读取返回值**决定是否真的下载。典型用途：查询外部媒体库（Emby / Jellyfin / Plex），若该集已存在则拦下、不重复下载。
 
 ### 注册与返回值契约
 
@@ -789,7 +797,7 @@ function compareCodePoints(a, b) {
 | `hook.download.read` | 订阅 `on_episode_found` / `on_download_done` / `on_download_failed`（只看） | 已实现 |
 | `hook.download.write` ⚠️敏感 | 注册同步否决 hook `should_download`（推送下载前可决定不下载） | 已实现 |
 | `hook.link.read` | 订阅 `on_link_done` / `on_link_failed` | 已实现 |
-| `hook.task.read` | 订阅 `on_episode_acquired` / `on_task_completed` / `on_task_reopened` | 已实现 |
+| `hook.task.read` | 订阅 `on_episode_acquired` / `on_task_completed` / `on_task_reopened` / `on_task_subscribed` | 已实现 |
 | `api.http` ⚠️敏感 | 注入全局 `http`（SSRF 守卫：放行局域网与 `100.64.0.0/10`（其中 `100.100.100.200` 仍拦），拦本机 / 链路本地） | 已实现 |
 | `api.anime.read` | `anime.get` | 已实现 |
 | `api.task.read` | `task.get/list` | 已实现 |
