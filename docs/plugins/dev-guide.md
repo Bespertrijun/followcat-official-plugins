@@ -587,7 +587,7 @@ setInterval(function () { startJob("timer"); }, 30 * 60000);             // 定�
 - 消息开头固定带 `🧩 [插件名]`；每小时默认最多 300 条（只算真正排上队的）。批量任务结束后汇总发一条，别每处理一项发一条。
 - 别在 `on_download_done` / `on_link_done` / `on_task_completed` 这类 hook 里转发宿主已经发过的内容，用户会收到两条。
 - 正文是 FC-Markdown：站点名、文件名这类动态文字放进 `body` 前先转义，免得 `*`、`[` 之类被当成格式。
-- 正文里别写带用户名的地址（`https://user@host`），连纯文字里的也会被拒；长度上限（标题、正文、地址、按钮 data）都按 **UTF-8 字节**算。
+- 正文和标题里别写带用户名的地址（`https://user@host`），连纯文字里的也会被拒，用 `**` 之类的标记把它拆开也一样（按一行显示出来的文字查）；中文、全角标点、空白、`/`、`?` 隔开的 `@` 不算（`官网https://fc.example，有问题@管理员` 没问题）。长度上限（标题、正文、地址、按钮 data）都按 **UTF-8 字节**算。
 - 按钮可以是链接按钮 `{label, url}`，也可以是**动作按钮** `{label, action, data?}`（`action` 必须在 `manifest.actions` 里声明，点了回调插件，见 §6.7）。
 
 cookiecloud 式的例子：同步跑完后发一条汇总（失败时多带一个跳到 CookieCloud 面板的按钮）：
@@ -632,9 +632,9 @@ async function syncTask(trigger) {
 
 ## 6.7 动作按钮与 bot 命令：`on_notify_action` / `on_bot_command`
 
-完整规则见 sdk.md「[通知交互 hook](./sdk.md#通知交互-hookon_notify_action--on_bot_command需-apinotifysend)」。这两个 hook 不是事件广播：用户在 Telegram 里点了你发的动作按钮、或在和 bot 的私聊里发了你声明的命令时，宿主**只调用你这个插件**，**返回值就是给用户看的内容**；10 秒内没结果用户看到「插件没有响应」，throw / reject 用户看到「插件出错」（你的错误文本只进日志）。
+完整规则见 sdk.md「[通知交互 hook](./sdk.md#通知交互-hookon_notify_action--on_bot_command需-apinotifysend)」。这两个 hook 不是事件广播：用户在 Telegram 里点了你发的动作按钮、或在和 bot 的私聊里发了你声明的命令时，宿主**只调用你这个插件**，**返回值就是给用户看的内容**；从排队起 10 秒内没结果用户看到「插件没有响应」（排队就用完 10 秒的不会再执行），throw / reject 用户看到「插件出错」（你的错误文本只进日志）。
 
-用户这边要做两件事才用得上：管理员在 FollowCat 里配好 Telegram bot（bot 在收消息）；用户在 FC 右上角个人卡里点「绑定 Telegram」，把自己的 Telegram 账号绑到 FC 账号。动作按钮只在 Telegram 上出现（发到 Slack 的那份不带），命令只在和 bot 的私聊里有效。
+用户这边要做两件事才用得上：管理员在 FollowCat 里配好 Telegram bot（bot 在收消息）；用户在 FC 右上角个人卡里点「绑定 Telegram」，把自己的 Telegram 账号绑到 FC 账号（绑定暂停了——比如屏蔽过 bot、管理员换了 bot——的人会被提示给 bot 发 `/start` 恢复）。动作按钮只在 Telegram 上出现（发到 Slack 的那份不带），命令只在和 bot 的私聊里有效。
 
 下面接着 §2 的 manifest（`retry` / `ignore` 两个动作，`/cookiecloud_sync`、`/cookiecloud_status` 两个命令）走一遍：同步有失败时发一条带「重试」按钮的通知 → 用户点了重试 → 插件重试并把结果显示在通知上；另外用户可以随时发 `/cookiecloud_sync` 让插件立即同步。
 
@@ -685,9 +685,9 @@ plugin.on("on_bot_command", async function (p) {
 要点：
 
 - **一条通知只处理一次**：第一个点击开始处理后，整条通知（含发到别的对话的副本）的动作按钮都去掉、末尾显示结果；之后再点只提示「已处理」。按钮 7 天后过期。
-- **谁能点 / 谁能用**：看 `actions[]` / `commands[]` 的 `requires`；没写就只有管理员。权限不够的人看到「没有权限」，你的代码不会被调用。上例 `ignore` 没写 `requires`，所以只有管理员能点「忽略」。
-- **10 秒墙钟**（含 `await`）：重活放后台、先回一句「已开始」也行（再用 `notify.send` 发结果）。别让用户干等。
-- 命令的回复发回同一个私聊（开头带 `🧩 [插件名]`），不占 `notify.send` 的每小时配额；返回 `undefined` 时用户看到「已处理」。回复里的 `body` / `buttons` 不合规（链接不是 http(s)、动作没声明……）时用户只看到「插件出错」——本地用 devrt 调试能看到具体原因。
+- **谁能点 / 谁能用**：看 `actions[]` / `commands[]` 的 `requires`（点按钮时按插件**当前** manifest 里的声明，升级收紧后旧按钮也按新的算）；没写就只有管理员。权限不够的人看到「没有权限」，你的代码不会被调用。上例 `ignore` 没写 `requires`，所以只有管理员能点「忽略」。
+- **10 秒墙钟**（从排进插件任务队列算起，含排队等待与 `await`）：重活放后台、先回一句「已开始」也行（再用 `notify.send` 发结果）。别让用户干等。
+- 命令的回复发回同一个私聊（开头带 `🧩 [插件名]`），不占 `notify.send` 的每小时配额；返回 `undefined`、空串，或 `body` 为空且一个按钮都没有（`buttons: [[]]` 也算没有）时用户看到「已处理」。回复里的 `body` / `buttons` 不合规（链接不是 http(s)、动作没声明……）时用户只看到「插件出错」——本地用 devrt 调试能看到具体原因。
 - 用户的 Telegram 身份、对话 ID 你拿不到；`p.user` 只有 FC 的 `username` / `role` / `permissions`。
 - devrt 里可以直接模拟点击和命令：侧栏「Hooks」点 `on_notify_action` / `on_bot_command`，或展开「编辑 payload」改 `action` / `data` / `user` / `args` 后触发，结果（用户会看到什么）显示在提示和日志面板里（见 [`devrt/README.md`](../../devrt/README.md)）。
 
@@ -739,7 +739,7 @@ plugin.on("on_bot_command", async function (p) {
 | 安装被拒（409）：`已安装同名插件「x」（来自 ...），请先卸载它` | 已经装了一个同名、但来源（`source_url`）不同的插件 | 先卸载那个；或者给你的插件换个 `name` |
 | `notify.send` reject `按钮动作未在 manifest 中声明` | 按钮的 `action` 不在 `manifest.actions` 里（大小写敏感） | 对照 manifest 改名或补声明 |
 | 点动作按钮后显示 `✗ 失败：插件没有响应` / bot 回「插件没有响应」 | `on_notify_action` / `on_bot_command` 10 秒内没结果 | 重活后台跑，先返回 |
-| 点动作按钮后显示 `✗ 失败：插件不可用` | 插件停用了、升级后删了这个动作、或没 `plugin.on("on_notify_action", ...)` | 检查 manifest 与注册 |
+| 点动作按钮后显示 `✗ 失败：插件不可用` | 插件停用了（含点击时正好在停用、因频繁崩溃被自动停用）、升级后删了这个动作、或没 `plugin.on("on_notify_action", ...)` | 检查 manifest 与注册 |
 | 用户说按钮一点就「没有权限」 | 动作的 `requires` 他没全有；没写 `requires` 时只有管理员能点 | 调整 `requires` |
 
 ### 本地迭代流程

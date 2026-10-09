@@ -546,3 +546,19 @@ test('on_bot_command：字符串按纯文字回、{body, buttons} 按 notify.sen
   assert.equal((await cmd('hi', { user: MEMBER })).reply, '没有权限', 'status has no requires → admin only');
   assert.equal((await cmd('hi', { command: 'echo', user: MEMBER })).reply.prefix, '🧩 [devrt-notify]', 'echo requires subscribe:any');
 });
+
+// fixtures/notify/reply-vectors.json：want 是主仓宿主 notify.Service.pluginCommandReply 实跑的结果——「已处理」（没有内容）、
+// 「插件出错」（返回值不合规）或 ok（发回复）
+test('on_bot_command：返回值 → 已处理 / 插件出错 / 发回复，同宿主（reply-vectors.json 由宿主实跑生成；body 空且一个按钮都没有——含 [[]]——是已处理）', async (t) => {
+  const s = start('notify');
+  t.after(s.stop);
+  const cases = JSON.parse(fs.readFileSync(path.join(FIX('notify'), 'reply-vectors.json'), 'utf-8'));
+  assert.ok(cases.some((c) => c.name === 'one empty row' && c.want === '已处理'), 'the [[]] case stays locked');
+  for (const c of cases) {
+    const r = (await s.rpc('trigger', { hook: 'on_bot_command', data: { command: 'status', args: 'json ' + JSON.stringify(c.reply),
+      user: ADMIN, chat: { id: 42, type: 'private' } } })).result;
+    assert.equal(r.called, true, c.name);
+    const got = typeof r.reply === 'string' ? r.reply : (r.reply && r.reply.prefix === '🧩 [devrt-notify]' ? 'ok' : JSON.stringify(r.reply));
+    assert.equal(got, c.want, c.name);
+  }
+});

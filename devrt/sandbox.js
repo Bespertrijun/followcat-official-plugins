@@ -71,9 +71,10 @@
 //   argument / wrong field types (text fields must be primitive strings; the button structure is read
 //   directly, only button data goes through JSON), same Chinese reject reasons in the host's order (an action
 //   button whose action is not in manifest.actions first, then title, body, body links, image, buttons, then
-//   the quota). The body is parsed with a port of the host's FC-Markdown parser: invalid [text](url) links,
-//   bare "scheme://userinfo@" in text nodes (not code) and over-long links. URLs are checked with a port of
-//   Go net/url + the host's IDNA chain — Node's domainToASCII stands in for the strict x/net/idna lookup
+//   the quota). The title is checked for a bare "scheme://userinfo@" too. The body is parsed with a port of the
+//   host's FC-Markdown parser: invalid [text](url) links, a bare "scheme://userinfo@" in a line's joined visible
+//   text (markup does not split it; inline code / code blocks are not text) and over-long links. URLs are
+//   checked with a port of Go net/url + the host's IDNA chain — Node's domainToASCII stands in for the strict x/net/idna lookup
 //   profile, so unusual internationalized hosts may differ. Nothing is delivered: an accepted message is
 //   printed to the log panel ("[notify.send] {...}", with the host's "🧩 [<name>]" prefix and the button
 //   rows) and resolves {queued: true, channels: N}. DEVRT_NOTIFY_CHANNELS sets N (default 1; 0 = nothing
@@ -1219,15 +1220,32 @@ function fcmdSomeNode(doc, pred) {
   const walk = (nodes) => nodes.some((node) => pred(node) || (node.children ? walk(node.children) : false));
   return doc.blocks.some((b) => b.lines.some(walk));
 }
-// notify bareUserinfoURL: Go RE2 \s is [\t\n\f\r ] (no \v, no Unicode spaces)
-const NOTIFY_BARE_USERINFO = /[A-Za-z][A-Za-z0-9+.\-]*:\/\/[^/\t\n\f\r ]*@/;
+// notify bareUserinfoURL: scheme://userinfo@ with the RFC 3986 userinfo character set (unreserved / pct-encoded /
+// sub-delims / ":"); any other character (a space, "/", "?", "#", "，", a CJK character…) ends it. ASCII only, so
+// JS UTF-16 and Go UTF-8 matching agree.
+const NOTIFY_BARE_USERINFO = /[A-Za-z][A-Za-z0-9+.\-]*:\/\/[A-Za-z0-9._~!$&'()*+,;=:%\-]*@/;
+// notify codeSeparator: stands in for an inline code span when a line's visible text is joined (not in the set
+// above, so the text on both sides of the code never joins into one address)
+const FCMD_CODE_SEPARATOR = ' ';
+// notify appendVisibleText: a line's visible text in order — text nodes as they are, the text inside bold / italic /
+// strike / underline / spoiler and link text joined in, an inline code span replaced by FCMD_CODE_SEPARATOR
+function fcmdVisibleText(nodes) {
+  let out = '';
+  for (const node of nodes) {
+    if (node.kind === 'text') out += node.text;
+    else if (node.kind === 'code') out += FCMD_CODE_SEPARATOR;
+    else if (node.children) out += fcmdVisibleText(node.children);
+  }
+  return out;
+}
 // Mirror of the body checks in notify.buildPluginContent, in the host's order: any invalid [text](url)
-// (Doc.Issues) → 'invalid'; a bare scheme://userinfo@ in a text node (not code) → 'bare_userinfo'; a link
-// whose re-serialized URL exceeds 2048 bytes → 'too_long'; else ''.
+// (Doc.Issues) → 'invalid'; a bare scheme://userinfo@ in a line's joined visible text (docHasBareUserinfoURL:
+// checked line by line, so markup splitting the address does not hide it; code blocks are not checked) →
+// 'bare_userinfo'; a link whose re-serialized URL exceeds 2048 bytes → 'too_long'; else ''.
 function fcmdBodyProblem(src) {
   const doc = fcmdParse(src);
   if (doc.issues > 0) return 'invalid';
-  if (fcmdSomeNode(doc, (node) => node.kind === 'text' && NOTIFY_BARE_USERINFO.test(node.text))) return 'bare_userinfo';
+  if (doc.blocks.some((b) => b.lines.some((line) => NOTIFY_BARE_USERINFO.test(fcmdVisibleText(line))))) return 'bare_userinfo';
   if (fcmdSomeNode(doc, (node) => node.kind === 'link' && node.href.length > NOTIFY_MAX_URL_LEN)) return 'too_long';
   return '';
 }
@@ -1245,6 +1263,7 @@ function fcmdEscape(s) {
 }
 
 const NOTIFY_REASON_UNDECLARED = '按钮动作未在 manifest 中声明';
+const NOTIFY_REASON_TITLE_USERINFO = '标题里的链接无效：不能带用户名和密码';
 // manifest.actions names: the only actions an action button may use (host: declaredActions of the facade,
 // and the notify service's lookup through the plugin's enabled manifest)
 const NOTIFY_DECLARED_ACTIONS = new Set((Array.isArray(manifest.actions) ? manifest.actions : [])
@@ -1254,6 +1273,8 @@ const NOTIFY_DECLARED_ACTIONS = new Set((Array.isArray(manifest.actions) ? manif
 function notifyContentReason(msg) {
   if (goIsBlank(msg.title)) return '缺少标题';
   if (utf8Len(msg.title) > NOTIFY_MAX_TITLE_BYTES) return '标题过长（上限 ' + NOTIFY_MAX_TITLE_BYTES + ' 字节）';
+  // the title is plain text: clients auto-link a bare address in it too (markup is literal there)
+  if (NOTIFY_BARE_USERINFO.test(msg.title)) return NOTIFY_REASON_TITLE_USERINFO;
   return notifyBodyReason(msg);
 }
 // Mirror of notify.buildPluginContent + buildPluginButtons (body, image, buttons; a bot command reply goes
@@ -1522,7 +1543,8 @@ function interactCommandReply(v) {
       if (rows === null) return { error: 'buttons shape' };
       buttons = rows;
     }
-    if (goIsBlank(body) && buttons.length === 0) return { reply: null };
+    // empty body and not a single button (buttons [] or only empty rows like [[]]) = nothing to send
+    if (goIsBlank(body) && buttons.every((row) => row.length === 0)) return { reply: null };
   } else {
     return { error: 'reply must be a string or {body, buttons}' };
   }

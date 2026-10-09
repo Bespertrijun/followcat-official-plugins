@@ -1704,7 +1704,7 @@
    "title": "t",
    "body": "https://u\u000b@h"
   },
-  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+  "want": ""
  },
  {
   "name": "nbsp before at",
@@ -1712,7 +1712,7 @@
    "title": "t",
    "body": "https://u\u00a0@h"
   },
-  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+  "want": ""
  },
  {
   "name": "ideographic space before at",
@@ -1720,7 +1720,7 @@
    "title": "t",
    "body": "https://u\u3000@h"
   },
-  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+  "want": ""
  },
  {
   "name": "ftp scheme",
@@ -1787,12 +1787,12 @@
   "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
  },
  {
-  "name": "split by bold ok",
+  "name": "split by bold is one visible address",
   "msg": {
    "title": "t",
    "body": "https://u.**x**.@h"
   },
-  "want": ""
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
  },
  {
   "name": "unpaired bold merges",
@@ -1819,12 +1819,12 @@
   "want": ""
  },
  {
-  "name": "split by link ok",
+  "name": "split by link text is one visible address",
   "msg": {
    "title": "t",
    "body": "https://u[x](https://a.example/)@h"
   },
-  "want": ""
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
  },
  {
   "name": "invalid link literal merges",
@@ -1921,12 +1921,12 @@
   "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
  },
  {
-  "name": "nested pairs split the text ok",
+  "name": "nested pairs are one visible address",
   "msg": {
    "title": "t",
    "body": "s://u.**.~~.~~.**.@"
   },
-  "want": ""
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
  },
  {
   "name": "same-kind nesting is literal",
@@ -1937,12 +1937,12 @@
   "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
  },
  {
-  "name": "different-kind nesting splits ok",
+  "name": "different-kind nesting is one visible address",
   "msg": {
    "title": "t",
    "body": "***s://u.~~.~~@h***"
   },
-  "want": ""
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
  },
  {
   "name": "declared action",
@@ -2761,7 +2761,7 @@
    "body": "https://汉*``(u@h)a.example",
    "title": "t"
   },
-  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+  "want": ""
  },
  {
   "name": "fuzz 48",
@@ -3665,7 +3665,7 @@
    "body": "\t/\thttp://h](h\\](a.example\\@汉ftp://(",
    "title": "t"
   },
-  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+  "want": ""
  },
  {
   "name": "fuzz 161",
@@ -3841,7 +3841,7 @@
    "body": "https://a.example/)xa.example*\\@`(- \\(ftp://:||](h[t](\\@",
    "title": "t"
   },
-  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+  "want": ""
  },
  {
   "name": "fuzz 183",
@@ -4745,7 +4745,7 @@
    "body": "```https://a.example/)ftp://``(u@h)[\n- ``ftp://",
    "title": "t"
   },
-  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+  "want": ""
  },
  {
   "name": "fuzz 296",
@@ -5137,7 +5137,7 @@
    "body": "`:\\\n(++ftp://)](*- https://**😀)\\@ftp://",
    "title": "t"
   },
-  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+  "want": ""
  },
  {
   "name": "fuzz 345",
@@ -5321,7 +5321,7 @@
    "body": "汉https://]:@https://- @@",
    "title": "t"
   },
-  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+  "want": ""
  },
  {
   "name": "fuzz 368",
@@ -5353,7 +5353,7 @@
    "body": "http://~~a.example***||h@\\\\++😀😀(\u00a0http://https://a.example/)[@",
    "title": "t"
   },
-  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+  "want": ""
  },
  {
   "name": "fuzz 372",
@@ -5578,5 +5578,377 @@
    "title": "t"
   },
   "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "bare userinfo split: bold @",
+  "msg": {
+   "title": "t",
+   "body": "https://bank.com**@**evil.cn"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "bare userinfo split: bold //",
+  "msg": {
+   "title": "t",
+   "body": "https:**//**bank.com@evil.cn"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "bare userinfo split: bold host",
+  "msg": {
+   "title": "t",
+   "body": "https://**bank.com**@evil.cn"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "bare userinfo split: italic scheme",
+  "msg": {
+   "title": "t",
+   "body": "*https*://u@h.example"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "bare userinfo split: strike @",
+  "msg": {
+   "title": "t",
+   "body": "https://bank.com~~@~~evil.cn"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "bare userinfo split: underline @",
+  "msg": {
+   "title": "t",
+   "body": "https://bank.com++@++evil.cn"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "bare userinfo split: spoiler @",
+  "msg": {
+   "title": "t",
+   "body": "https://bank.com||@||evil.cn"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "bare userinfo split: bold-italic userinfo",
+  "msg": {
+   "title": "t",
+   "body": "https://***u:p***@h.example"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "bare userinfo split: link text + following text",
+  "msg": {
+   "title": "t",
+   "body": "[https://bank.com](https://ok.example/)@evil.cn"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "bare userinfo split: text + link text",
+  "msg": {
+   "title": "t",
+   "body": "https://bank.com[@evil.cn](https://ok.example/)"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "bare userinfo split: escaped star stays visible",
+  "msg": {
+   "title": "t",
+   "body": "https://u\\*@h.example"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "bare userinfo split: in quote",
+  "msg": {
+   "title": "t",
+   "body": "> https://bank.com**@**evil.cn"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "bare userinfo split: in list",
+  "msg": {
+   "title": "t",
+   "body": "- https:**//**u@h.example"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "bare userinfo split: second line",
+  "msg": {
+   "title": "t",
+   "body": "ok\nhttps://**u**@h.example"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "bare userinfo split by inline code",
+  "msg": {
+   "title": "t",
+   "body": "https://u`x`@h.example"
+  },
+  "want": ""
+ },
+ {
+  "name": "bare userinfo code before @",
+  "msg": {
+   "title": "t",
+   "body": "`https://u`@h.example"
+  },
+  "want": ""
+ },
+ {
+  "name": "bare userinfo across lines",
+  "msg": {
+   "title": "t",
+   "body": "https://u\n@h.example"
+  },
+  "want": ""
+ },
+ {
+  "name": "bare userinfo inside code block",
+  "msg": {
+   "title": "t",
+   "body": "```\nhttps://u@h.example\n```"
+  },
+  "want": ""
+ },
+ {
+  "name": "bare userinfo inside code span",
+  "msg": {
+   "title": "t",
+   "body": "`https://bank.com@evil.cn`"
+  },
+  "want": ""
+ },
+ {
+  "name": "cjk: fullwidth comma then @",
+  "msg": {
+   "title": "t",
+   "body": "官网https://fc.example，有问题@管理员"
+  },
+  "want": ""
+ },
+ {
+  "name": "cjk: query then mail",
+  "msg": {
+   "title": "t",
+   "body": "https://fc.example?mail=a@b.cn"
+  },
+  "want": ""
+ },
+ {
+  "name": "cjk: path then @",
+  "msg": {
+   "title": "t",
+   "body": "https://fc.example/path@x"
+  },
+  "want": ""
+ },
+ {
+  "name": "cjk: fragment then @",
+  "msg": {
+   "title": "t",
+   "body": "https://fc.example#a@b"
+  },
+  "want": ""
+ },
+ {
+  "name": "cjk: space then @",
+  "msg": {
+   "title": "t",
+   "body": "访问 https://fc.example 联系 @管理员"
+  },
+  "want": ""
+ },
+ {
+  "name": "cjk: ideographic full stop then @",
+  "msg": {
+   "title": "t",
+   "body": "见https://fc.example。@所有人"
+  },
+  "want": ""
+ },
+ {
+  "name": "cjk: chinese userinfo chars",
+  "msg": {
+   "title": "t",
+   "body": "https://管理员@fc.example"
+  },
+  "want": ""
+ },
+ {
+  "name": "cjk: nbsp before @",
+  "msg": {
+   "title": "t",
+   "body": "https://u\u00a0@h.example"
+  },
+  "want": ""
+ },
+ {
+  "name": "cjk: chinese before scheme still rejected",
+  "msg": {
+   "title": "t",
+   "body": "联系https://u:p@h.example"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "rfc userinfo: percent-encoded",
+  "msg": {
+   "title": "t",
+   "body": "https://a%40b@h.example"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "rfc userinfo: sub-delims",
+  "msg": {
+   "title": "t",
+   "body": "https://u!$&'()*+,;=:@h.example"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "rfc userinfo: tilde dot dash",
+  "msg": {
+   "title": "t",
+   "body": "https://a.b-c_d~e@h.example"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "rfc userinfo: empty userinfo",
+  "msg": {
+   "title": "t",
+   "body": "https://@h.example"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "rfc userinfo: other scheme",
+  "msg": {
+   "title": "t",
+   "body": "ftp+x.y-z://u@h"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "title bare userinfo",
+  "msg": {
+   "title": "https://u@h.example"
+  },
+  "want": "标题里的链接无效：不能带用户名和密码"
+ },
+ {
+  "name": "title bare userinfo lookalike",
+  "msg": {
+   "title": "见 https://bank.com@evil.cn"
+  },
+  "want": "标题里的链接无效：不能带用户名和密码"
+ },
+ {
+  "name": "title bare userinfo user:pass",
+  "msg": {
+   "title": "ftp://u:p@h"
+  },
+  "want": "标题里的链接无效：不能带用户名和密码"
+ },
+ {
+  "name": "title markdown is literal",
+  "msg": {
+   "title": "https://u**@h.example"
+  },
+  "want": "标题里的链接无效：不能带用户名和密码"
+ },
+ {
+  "name": "title code is literal",
+  "msg": {
+   "title": "`https://u@h.example`"
+  },
+  "want": "标题里的链接无效：不能带用户名和密码"
+ },
+ {
+  "name": "title bare userinfo second line",
+  "msg": {
+   "title": "同步完成\nhttps://u@h.example"
+  },
+  "want": "标题里的链接无效：不能带用户名和密码"
+ },
+ {
+  "name": "title cjk comma then @ ok",
+  "msg": {
+   "title": "官网https://fc.example，有问题@管理员"
+  },
+  "want": ""
+ },
+ {
+  "name": "title query mail ok",
+  "msg": {
+   "title": "https://fc.example?mail=a@b.cn"
+  },
+  "want": ""
+ },
+ {
+  "name": "title plain url ok",
+  "msg": {
+   "title": "详情 https://fc.example/x"
+  },
+  "want": ""
+ },
+ {
+  "name": "title space before @ ok",
+  "msg": {
+   "title": "https://bank.com @evil.cn"
+  },
+  "want": ""
+ },
+ {
+  "name": "order: title too long before title userinfo",
+  "msg": {
+   "title": "https://u@h.example/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "want": "标题过长（上限 1024 字节）"
+ },
+ {
+  "name": "order: title userinfo before body",
+  "msg": {
+   "title": "https://u@h.example",
+   "body": "[x](ftp://a)"
+  },
+  "want": "标题里的链接无效：不能带用户名和密码"
+ },
+ {
+  "name": "order: title userinfo before image and buttons",
+  "msg": {
+   "title": "https://u@h.example",
+   "image": "ftp://x",
+   "buttons": [
+    [
+     {
+      "label": "",
+      "url": "javascript:x"
+     }
+    ]
+   ]
+  },
+  "want": "标题里的链接无效：不能带用户名和密码"
+ },
+ {
+  "name": "order: blank title before title userinfo",
+  "msg": {
+   "title": " "
+  },
+  "want": "缺少标题"
  }
 ]

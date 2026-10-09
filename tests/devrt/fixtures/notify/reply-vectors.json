@@ -1,0 +1,354 @@
+[
+ {
+  "name": "null",
+  "reply": null,
+  "want": "已处理"
+ },
+ {
+  "name": "empty string",
+  "reply": "",
+  "want": "已处理"
+ },
+ {
+  "name": "blank string",
+  "reply": " \t\n",
+  "want": "已处理"
+ },
+ {
+  "name": "ideographic space string",
+  "reply": "\u3000",
+  "want": "已处理"
+ },
+ {
+  "name": "plain string",
+  "reply": "已同步 **3** 个",
+  "want": "ok"
+ },
+ {
+  "name": "empty object",
+  "reply": {},
+  "want": "已处理"
+ },
+ {
+  "name": "blank body",
+  "reply": {
+   "body": " "
+  },
+  "want": "已处理"
+ },
+ {
+  "name": "null body",
+  "reply": {
+   "body": null
+  },
+  "want": "已处理"
+ },
+ {
+  "name": "null buttons",
+  "reply": {
+   "body": "",
+   "buttons": null
+  },
+  "want": "已处理"
+ },
+ {
+  "name": "empty buttons",
+  "reply": {
+   "body": "",
+   "buttons": []
+  },
+  "want": "已处理"
+ },
+ {
+  "name": "one empty row",
+  "reply": {
+   "body": "",
+   "buttons": [
+    []
+   ]
+  },
+  "want": "已处理"
+ },
+ {
+  "name": "two empty rows",
+  "reply": {
+   "buttons": [
+    [],
+    []
+   ]
+  },
+  "want": "已处理"
+ },
+ {
+  "name": "blank body and one empty row",
+  "reply": {
+   "body": " \n",
+   "buttons": [
+    []
+   ]
+  },
+  "want": "已处理"
+ },
+ {
+  "name": "body with one empty row",
+  "reply": {
+   "body": "x",
+   "buttons": [
+    []
+   ]
+  },
+  "want": "ok"
+ },
+ {
+  "name": "empty row then a button",
+  "reply": {
+   "buttons": [
+    [],
+    [
+     {
+      "label": "a",
+      "url": "https://a.example/"
+     }
+    ]
+   ]
+  },
+  "want": "ok"
+ },
+ {
+  "name": "flat link button",
+  "reply": {
+   "buttons": [
+    {
+     "label": "a",
+     "url": "https://a.example/"
+    }
+   ]
+  },
+  "want": "ok"
+ },
+ {
+  "name": "row link button",
+  "reply": {
+   "buttons": [
+    [
+     {
+      "label": "a",
+      "url": "https://a.example/"
+     }
+    ]
+   ]
+  },
+  "want": "ok"
+ },
+ {
+  "name": "declared action button",
+  "reply": {
+   "body": "x",
+   "buttons": [
+    {
+     "label": "重试",
+     "action": "retry",
+     "data": {
+      "n": 1
+     }
+    },
+    {
+     "label": "a",
+     "url": "https://a.example/"
+    }
+   ]
+  },
+  "want": "ok"
+ },
+ {
+  "name": "undeclared action button",
+  "reply": {
+   "body": "x",
+   "buttons": [
+    {
+     "label": "a",
+     "action": "nope"
+    }
+   ]
+  },
+  "want": "插件出错"
+ },
+ {
+  "name": "number",
+  "reply": 7,
+  "want": "插件出错"
+ },
+ {
+  "name": "true",
+  "reply": true,
+  "want": "插件出错"
+ },
+ {
+  "name": "array",
+  "reply": [],
+  "want": "插件出错"
+ },
+ {
+  "name": "array of strings",
+  "reply": [
+   "x"
+  ],
+  "want": "插件出错"
+ },
+ {
+  "name": "body number",
+  "reply": {
+   "body": 1
+  },
+  "want": "插件出错"
+ },
+ {
+  "name": "body object",
+  "reply": {
+   "body": {}
+  },
+  "want": "插件出错"
+ },
+ {
+  "name": "buttons string",
+  "reply": {
+   "buttons": "x"
+  },
+  "want": "插件出错"
+ },
+ {
+  "name": "buttons object",
+  "reply": {
+   "buttons": {}
+  },
+  "want": "插件出错"
+ },
+ {
+  "name": "buttons row not array",
+  "reply": {
+   "buttons": [
+    [
+     {
+      "label": "a",
+      "url": "https://a.example/"
+     }
+    ],
+    {
+     "label": "a",
+     "url": "https://a.example/"
+    }
+   ]
+  },
+  "want": "插件出错"
+ },
+ {
+  "name": "button not object",
+  "reply": {
+   "buttons": [
+    1
+   ]
+  },
+  "want": "插件出错"
+ },
+ {
+  "name": "label number",
+  "reply": {
+   "buttons": [
+    {
+     "label": 1,
+     "url": "https://a.example/"
+    }
+   ]
+  },
+  "want": "插件出错"
+ },
+ {
+  "name": "bad body link",
+  "reply": {
+   "body": "[x](ftp://a.example/)"
+  },
+  "want": "插件出错"
+ },
+ {
+  "name": "body bare userinfo split by bold",
+  "reply": {
+   "body": "https://bank.com**@**evil.cn"
+  },
+  "want": "插件出错"
+ },
+ {
+  "name": "body cjk comma then @ ok",
+  "reply": {
+   "body": "官网https://fc.example，有问题@管理员"
+  },
+  "want": "ok"
+ },
+ {
+  "name": "string with bare userinfo is escaped but still checked",
+  "reply": "https://bank.com@evil.cn",
+  "want": "插件出错"
+ },
+ {
+  "name": "string with split userinfo is escaped literally",
+  "reply": "https://bank.com**@**evil.cn",
+  "want": "插件出错"
+ },
+ {
+  "name": "too many buttons",
+  "reply": {
+   "buttons": [
+    {
+     "label": "a",
+     "url": "https://a.example/"
+    },
+    {
+     "label": "a",
+     "url": "https://a.example/"
+    },
+    {
+     "label": "a",
+     "url": "https://a.example/"
+    },
+    {
+     "label": "a",
+     "url": "https://a.example/"
+    },
+    {
+     "label": "a",
+     "url": "https://a.example/"
+    },
+    {
+     "label": "a",
+     "url": "https://a.example/"
+    },
+    {
+     "label": "a",
+     "url": "https://a.example/"
+    }
+   ]
+  },
+  "want": "插件出错"
+ },
+ {
+  "name": "empty-label button only",
+  "reply": {
+   "buttons": [
+    [
+     {
+      "label": " ",
+      "url": "https://a.example/"
+     }
+    ]
+   ]
+  },
+  "want": "插件出错"
+ },
+ {
+  "name": "title field ignored",
+  "reply": {
+   "title": "https://u@h",
+   "body": "x"
+  },
+  "want": "ok"
+ }
+]

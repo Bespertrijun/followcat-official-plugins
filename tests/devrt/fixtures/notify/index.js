@@ -146,6 +146,8 @@ plugin.on("on_notify_action", async function (p) {
   return "已" + p.action + "：" + JSON.stringify(p.data) + " by " + p.user.username + "/" + p.user.role + " via " + p.channel;
 });
 plugin.on("on_bot_command", function (p) {
+  // "json <JSON>": return that value as the reply (reply-vectors.json)
+  if (typeof p.args === "string" && p.args.indexOf("json ") === 0) return JSON.parse(p.args.slice(5));
   if (p.args === "md") return { body: "**加粗** [链接](https://a.example/)", buttons: [{ label: "重试", action: "retry", data: { n: 1 } }, { label: "打开", url: "https://a.example/" }] };
   if (p.args === "undeclared") return { body: "x", buttons: [{ label: "a", action: "nope" }] };
   if (p.args === "badlink") return { body: "[x](ftp://a.example/)" };
