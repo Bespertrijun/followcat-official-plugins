@@ -3,7 +3,7 @@
 本地调试 followcat 插件的轻量宿主，无需启动完整 FollowCat 服务即可：
 
 - 在 Node 沙箱里跑插件 `index.js`，注入与宿主一致的 `plugin / log / config / data / crypto / http / anime / task / ruleflow / ptsite / douban / notify` 全局与定时器（没有 `console`；`eval` / `Function` 为 `undefined`）
-- 模拟触发任意 hook（自带每个 hook 的示例 payload）
+- 模拟触发任意 hook（自带每个 hook 的示例 payload），包括模拟 Telegram 里点动作按钮（`on_notify_action`）和发 bot 命令（`on_bot_command`），回显用户会看到的结果
 - 调用插件通过 `plugin.registerAPI` 注册的端点
 - 在 iframe 里加载 `<plugin>/ui/`，`FC.*` SDK 与宿主桥和生产行为一致（见下文「iframe 桥」）
 - 编辑 mock 配置（含 secret 标记）
@@ -47,11 +47,19 @@ DEVRT_NOTIFY_CHANNELS=0 python devrt/server.py cookiecloud
 | 区域 | 说明 |
 |------|------|
 | Header | 插件名 / 版本 / http 模式 / 加载状态 |
-| Hooks | 每个已注册 hook 一个按钮，点击直接用示例 payload 触发；也可以展开 "编辑 payload" 用自定义 JSON。示例 payload 按宿主真实形态（`anime_id` / `task_id` 是数字、`media_id` 是字符串、`aka` 是数组、`tags.hdr` / `tags.dv` 是字符串，没识别到是 `"无"`；sdk.md 里标 `?` 的字段也恒在，没值时是零值）。`should_download` 触发后回显宿主会得出的裁决（按**导出后的值**算，同生产）：`allow` / `veto` / `have_bitmap`，超时、抛错或返回值导不出来时标 `fail_open` |
+| Hooks | 每个已注册 hook 一个按钮，点击直接用示例 payload 触发；也可以展开 "编辑 payload" 用自定义 JSON。示例 payload 按宿主真实形态（`anime_id` / `task_id` 是数字、`media_id` 是字符串、`aka` 是数组、`tags.hdr` / `tags.dv` 是字符串，没识别到是 `"无"`；sdk.md 里标 `?` 的字段也恒在，没值时是零值）。`should_download` 触发后回显宿主会得出的裁决（按**导出后的值**算，同生产）：`allow` / `veto` / `have_bitmap`，超时、抛错或返回值导不出来时标 `fail_open`。`on_notify_action` / `on_bot_command` 见下文「模拟点击与命令」 |
 | Plugin APIs | 列出所有 `plugin.registerAPI` 的端点，点击立即调用 |
 | Config | 当前 mock 配置（明文，secret 项标 `secret`）；「保存配置」只提交改过的键和新增项（没动的键不回写，不会把插件后端同时 `config.set` 的值冲回旧值）；`×` 走显式删除接口，立即生效；新增项可勾选标记为 secret |
 | Stage | iframe 加载 manifest `ui.entry`（缺省 `ui/index.html`），`sandbox="allow-scripts"`、src 带 `?fcSlot=plugin.settings`；高度由 `FC.resize` 决定（初始 400，clamp 200–1500） |
 | Logs | SSE 实时流，`log.info / warn / error` 均会在此显示 |
+
+## 模拟点击与命令（`on_notify_action` / `on_bot_command`）
+
+devrt 没有 Telegram：触发这两个 hook 就是「假装用户点了按钮 / 发了命令」，payload 由你给，devrt 按宿主的规则（`internal/notify/actions.go` / `commands.go`）算出用户会看到什么，显示在提示里，完整结果同时打进日志面板（`[devrt] on_notify_action → {...}`）。示例 payload 是一个绑定了 Telegram 的管理员，`action` / `command` 取 manifest 里声明的第一个。
+
+- **点按钮**（payload `{action, data, user: {username, role, permissions}, channel}`）：`action` 不在 `manifest.actions` 里 → `✗ 失败：插件不可用`（插件不被调用）；`user` 不满足这个动作的 `requires`（为空时 `role` 要是 `"admin"`）→ 提示「没有权限」、没有结果行；否则调用插件（10 秒墙钟），返回字符串 / `{text}` → `✓ <文字>`（换行折成空格、最多 200 字），其余 → `✓ 已处理`；throw / reject → `✗ 失败：插件出错`；10 秒没结果 → `✗ 失败：插件没有响应`。回显字段：`answer`（点按钮时的提示）、`line`（各副本末尾追加的结果行，没处理时为 `null`）、`called`（插件代码是否被调用）、`result`（插件返回值）、`error`（devrt 给出的具体原因，生产只进宿主日志）。
+- **发命令**（payload `{command（短名）, args, user, chat: {id, type}}`）：`chat.type` 不是 `"private"` → 不理（`ignored: true`）；短名不在 `manifest.commands` 里 →「不认识这个命令，发 /help 看看能用什么」；权限不够 →「没有权限」；否则调用插件：字符串 → 按纯文字回（`reply.text` 是原文，`reply.body` 是转义后的 FC-Markdown），`{body, buttons}` → 按 `notify.send` 的正文 / 按钮规则校验（动作按钮也要在 `manifest.actions` 里），不合规 →「插件出错」（`error` 里有具体原因）；空 →「已处理」。回复带 `🧩 [插件名]` 前缀（`reply.prefix`）。
+- 不模拟：绑定（假定点的人已绑定）、按钮 token 与消息副本的核对、「一条通知只处理一次」与 7 天过期、插件正忙。
 
 ## 架构
 
@@ -143,7 +151,7 @@ DEVRT_NOTIFY_CHANNELS=0 python devrt/server.py cookiecloud
 | `data.*` | 内存 blob（进程退出即丢，`--persist` 不管它）；`get` 回字节数组（`Array.isArray` 为真，不是 `ArrayBuffer`），`put` 收得回这个数组（同生产，它在宿主上仍是 Go `[]byte`），但不收自己写的数组字面量（同生产，报 `got []interface {}`；其它类型也报生产的 Go 类型名）；`put` 的名字按 `String(v)` 转（`undefined` → `"undefined"`，同生产）；名字校验、4 MiB / 16 MiB 配额与生产文案一致（可用 `DEVRT_BLOB_MAX_BYTES` / `DEVRT_BLOB_MAX_TOTAL` 调） | SQLite / Postgres + AES-256-GCM；配额 admin 可调 |
 | 配置存储 | 内存 / `--persist` 明文 JSON（记录 `is_secret` 与 `updated_at`） | SQLite + AES-256-GCM 加密；`is_secret` 只控制回读脱敏 |
 | `config.set` / `config.delete` | 同生产：`set` 的非字符串按 goja 规则转字符串（`null` / `undefined` → `""`、`5` → `"5"`）；键 / 值校验与每插件 500 条配额（新 key 才计）同生产文案（可用 `DEVRT_CONFIG_MAX_KEYS` 调）；配额只管插件后端的 `config.set`，侧栏与 iframe 桥写入不查。`delete` 同步、返回是否删到、键校验同 `set`，删掉的键侧栏同步消失 | 每插件条数有上限（可在设置里调），超出写入失败；`delete` 释放配额行 |
-| manifest | 权限 / hooks 按生产白名单校验，未知项 → 加载失败（Header 显示 `load error`），入口脚本不跑 | 解析失败，装不上 / 启用失败 |
+| manifest | 权限 / hooks 按生产白名单校验，未知项 → 加载失败（Header 显示 `load error`），入口脚本不跑；`actions` / `commands` 按生产 `manifest.go` 校验（命名、重复、长度、`requires` 是 FC 权限、需要 `api.notify.send` 与对应 hook、数量上限、字段类型），报错文案同生产（由主仓实跑生成的 62 条样例比对）。字段名按原样匹配（生产的 JSON 解码不分大小写，`"Actions"` 也认），类型检查只覆盖 `actions` / `commands` 两个字段 | 解析失败，装不上 / 启用失败 |
 | iframe 桥传输层 | 走本地 `/api/sandbox/*`，无鉴权；UI 从 `/plugin-ui/<file>` 加载 | 走 `/api/plugins/<id>/sandbox/*`，pluginToken 鉴权（过期 401 → 宿主换 token）；UI 从 `/api/plugins/<id>/ui/<token>/<file>` 加载 |
 | 插件报错文案 | 同步 throw 回 `Error: boom`（去掉 Node 栈，完整栈进日志面板）；超时是 `plugin runtime: execution timeout`（没有 `Error: ` 前缀），iframe 桥上回 **504**；返回值导不出来是 `plugin return value is not JSON-serializable: ...`（同生产）。devrt 没有「宿主内部错误」这一类（没有数据库 / 宿主 panic） | 同步 throw 是 goja 的 `Error: boom at <位置>`；async reject 两边都是 `Error: boom`；registerAPI 超时 504（`plugin runtime: execution timeout`，事件循环被占住没轮上时是 11s 兜底的 `plugin api: execution timeout`）；宿主自己的内部错误（数据库 / 存储、宿主 Go panic）在插件页只显示「宿主内部错误」 |
 | `config.put` 参数类型错误的文案 | 仿 Go `encoding/json` 的 `json: cannot unmarshal ...`，措辞可能与生产不逐字相同 | gin `ShouldBindJSON` 的原始错误 |
@@ -156,7 +164,7 @@ DEVRT_NOTIFY_CHANNELS=0 python devrt/server.py cookiecloud
 | 入口脚本 | 同步段 10s 超时 → 加载失败（`load error`：`run entry script: entry script exceeded 10s (interrupted)`，文案同生产）；入口脚本排的 `setImmediate` 等在它之后才跑，不算进这 10s | 10s 看门狗（含入口脚本执行期间触发的定时器回调、微任务）→ 启用失败，`run entry script: entry script exceeded 10s (interrupted)` 进日志与 `last_error_msg`；入口期宿主 Go panic 也只算启用失败（`run entry script: host panic: ...`）；数据库「已启用」标记不变，FollowCat 与其它插件照常起来 |
 | 返回值 / payload | 返回值按 JSON 导出成普通值（带环、`BigInt`、超过 1000 层 / 100 万个值 → 普通错误，文案同生产）；`should_download` 按导出后的值裁决；hook payload 每次触发由 server.py 重新发一份 | 同左（在循环线程上导出；每个插件拿自己的一份 payload） |
 | `ptsite` mock | 内存里 5 个 PT 站行（含带 / 不带 RSS、cookie / apikey / none 鉴权），`hosts` 由各行 mock RSS 链接算出；站点不能增删；只有 `setCookie`（`setAPIKey` 已随生产删除）；站点不存在时审计 target 记 `<invalid len=N>`、reject 文案不回显参数 | 真实 `site_configs`；`hosts` 由 `RssURLs` 算出 |
-| `notify.send` | 有 `api.notify.send` 才注入（同生产）。参数类型不对同步抛的 `TypeError`、内容规则的 reject 原因与检查顺序、每小时配额（默认 300，可用 `DEVRT_NOTIFY_MAX_PER_HOUR` 调；`channels: 0` 与被拒的不计）都同生产文案；调用返回时 Promise 已 settle（同生产）。**不真发**：接受的消息在日志面板打一行 `[notify.send] {...}`（带 `🧩 [插件名]` 前缀与排好的按钮行），resolve `{queued: true, channels: N}`，N 由 `DEVRT_NOTIFY_CHANNELS` 决定（默认 1，`0` 模拟没配通道）。不模拟队列满、图片下载、按钮文字截断与附域名。链接地址校验移植自 Go `net/url`，国际化域名用 Node 的 `domainToASCII` 近似宿主的 IDNA 转换，罕见域名的结论可能与生产不同。没人接的 reject 会在日志面板记一条 warn（devrt 通用行为，生产不记） | 借宿主已配置的 Telegram / Slack 真发；入队即 resolve；配额 admin 可调；最终发送失败计入插件详情页统计 |
+| `notify.send` | 有 `api.notify.send` 才注入（同生产）。参数类型不对同步抛的 `TypeError`（文本字段只收原始字符串，按钮结构直接读、不经 JSON）、内容规则的 reject 原因与检查顺序（动作按钮未声明最先查；正文文字里的裸 `协议://用户名@` 地址；长度单位是字节）、每小时配额（默认 300，可用 `DEVRT_NOTIFY_MAX_PER_HOUR` 调；`channels: 0` 与被拒的不计）都同生产文案，由主仓实跑生成的样例比对（`tests/devrt/fixtures/notify/vectors.json` 594 条、`jscases.json` 58 条）；调用返回时 Promise 已 settle（同生产）。动作按钮 `{label, action, data?}` 的 `action` 要在 fixture 自己的 `manifest.actions` 里。**不真发**：接受的消息在日志面板打一行 `[notify.send] {...}`（带 `🧩 [插件名]` 前缀与排好的按钮行，动作按钮带 `action` / `data`），resolve `{queued: true, channels: N}`，N 由 `DEVRT_NOTIFY_CHANNELS` 决定（默认 1，`0` 模拟没配通道）。不模拟队列满、图片下载与 Telegram 尺寸检查、按钮文字截断与附域名、Telegram 4096 字截短、动作按钮在 Slack / bot 不在线时被去掉。链接地址校验移植自 Go `net/url`，国际化域名用 Node 的 `domainToASCII` 近似宿主的 IDNA 转换，罕见域名的结论可能与生产不同；按钮 `data` 的字节数按 Go `encoding/json` 的写法算（键排序、U+2028 / U+2029 转义），`-0` 之类的数字写法可能差一两个字节。没人接的 reject 会在日志面板记一条 warn（devrt 通用行为，生产不记） | 借宿主已配置的 Telegram / Slack 真发；入队即 resolve；配额 admin 可调；最终发送失败计入插件详情页统计 |
 | `douban.setCookie` 的 opts | 同生产：任何 JS 对象（含函数）都收，只有原始值（数字 / 字符串 / 布尔）抛 `TypeError` | 同左 |
 | `crypto.base64Decode` | 同生产：忽略 `\r` / `\n`（Go `StdEncoding` 行为） | 同左 |
 | 队列 / 节流 / 超时 | 无队列；墙钟超时同生产（hook 10s / API 10s / `should_download` 3s fail-open，含 `await`），同步段死循环按超时打断，async 回调 reject 等同抛错 | 64 队列、墙钟超时（含 `await`）、每插件一个事件循环 |

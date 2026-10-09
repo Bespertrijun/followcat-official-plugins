@@ -56,7 +56,7 @@ qBit / linker --->|  EventBus 同步分 |       |
                   +------------------+       +--> config.set(...)
 ```
 
-- **Hook 是只读通知**：你看到的 `data` 是宿主给**你这个插件单独复制**的一份普通 JS 对象（和 `JSON.parse` 出来的一样），改它、加字段、`delete` 字段都行（`"use strict"` 下也不报错），不影响主流程，也不影响其它插件。facade 返回的结构化结果（`task.list()`、`ptsite.list()`、`http.*` 的响应等）同样每次都是新的一份普通对象。反过来也一样：你交给宿主的返回值、传给 facade 的参数，宿主都会先复制一份——跨边界的数据一律是拷贝，没有两边同时读写同一个对象的情况。
+- **Hook 是只读通知**（例外：`should_download` 读返回值决定下不下；`on_notify_action` / `on_bot_command` 读返回值作为回给用户的内容，见 §6.7）：你看到的 `data` 是宿主给**你这个插件单独复制**的一份普通 JS 对象（和 `JSON.parse` 出来的一样），改它、加字段、`delete` 字段都行（`"use strict"` 下也不报错），不影响主流程，也不影响其它插件。facade 返回的结构化结果（`task.list()`、`ptsite.list()`、`http.*` 的响应等）同样每次都是新的一份普通对象。反过来也一样：你交给宿主的返回值、传给 facade 的参数，宿主都会先复制一份——跨边界的数据一律是拷贝，没有两边同时读写同一个对象的情况。
 - **每个插件一个事件循环**：你的代码仍是单线程执行（不用加锁），同步代码段之间不会并发；但 `async` 回调在 `await`（比如 `await http.get(...)`）期间，同一插件的其它 hook / API 可以先跑。每次调用有墙钟上限（hook 10s / API 10s / `should_download` 3s，**含 `await`**），超时结果被丢弃。`index.js` 顶层（入口脚本）也只有 **10 秒**：没跑完 = 这次启用失败（原因进 `last_error_msg`），不会卡住 FollowCat 启动与其它插件。
 - **出网是异步的**：`http.*`、`ptsite.setCookie`、`douban.setCookie` 返回 Promise，所在函数写成 `async function` 并 `await`（见 §5）；其余 facade（`config` / `data` / `crypto` / `anime` / `task` / `ruleflow` / `ptsite` 读方法 / `douban.getCookie` / `log`）是同步的。
 - **凭证不会泄漏**：`anime.get` 返回的是脱敏 view，拿不到 `Server.Password` 之类；PT 站 / 豆瓣凭据只写不读，读侧只有「已配置」+ 指纹。
@@ -70,7 +70,7 @@ qBit / linker --->|  EventBus 同步分 |       |
 
 ```json
 {
-  "name": "notify",                                // 必填，[a-z0-9-]{3,64}，全局可重复
+  "name": "notify",                                // 必填，[a-z0-9-]{3,64}；同名插件只能装一个（见下）
   "version": "1.0.0",                              // 必填，semver-ish
   "source_url": "https://github.com/you/notify",   // 必填，与 name 联合派生 plugin_id
   "author": "you@example.com",                     // 可选，仅显示
@@ -89,11 +89,11 @@ qBit / linker --->|  EventBus 同步分 |       |
 `plugin_id = sha1(source_url + "\x00" + name)[:16]`，全局唯一。
 
 - 升级同一插件 → **保持 `name` 和 `source_url` 不变**，`plugin_id` 不变，配置不丢，自动重启 worker
-- 同一份代码两路发布 → 改 `source_url` 即可作为两个独立插件并存（不同配置不同状态）
+- **同名插件只能装一个**：已装了一个 `name` 相同、`source_url` 不同的插件时，再装会被拒（HTTP 409「已安装同名插件「<name>」（来自 <已装那个的 source_url>），请先卸载它」）。同一份代码要两路发布，就连 `name` 一起改
 
 ### `permissions` 与 `hooks` 必须**双校验**
 
-权限白名单见 sdk.md，完整 hook 白名单见 sdk.md「Hook 列表」。其中 `should_download` 是**同步否决 hook**（读返回值可拦下载，需 `hook.download.write`——敏感权限，详见 sdk.md「同步否决 hook」），其余 `on_*` 都是只读通知 hook：
+权限白名单见 sdk.md，完整 hook 白名单见 sdk.md「Hook 列表」。其中 `should_download` 是**同步否决 hook**（读返回值可拦下载，需 `hook.download.write`——敏感权限，详见 sdk.md「同步否决 hook」），`on_notify_action` / `on_bot_command` 是**通知交互 hook**（用户点了你的动作按钮 / 发了你的 bot 命令时同步调用，返回值回给用户，见 §6.7），其余 `on_*` 都是只读通知 hook：
 `on_episode_found`, `on_download_done`, `on_download_failed`, `on_link_done`, `on_link_failed`, `on_episode_acquired`, `on_task_completed`, `on_task_reopened`, `on_task_subscribed`。
 
 **关键点**：`plugin.on("on_link_done", fn)` 只有当 manifest 同时声明
@@ -106,6 +106,7 @@ qBit / linker --->|  EventBus 同步分 |       |
 | `should_download` | `hook.download.write` ⚠️ |
 | `on_link_done`, `on_link_failed` | `hook.link.read` |
 | `on_episode_acquired`, `on_task_completed`, `on_task_reopened`, `on_task_subscribed` | `hook.task.read` |
+| `on_notify_action`, `on_bot_command` | `api.notify.send`（另须在 `manifest.actions` / `manifest.commands` 声明动作 / 命令，见下） |
 
 > 2026-09-24 起 hook 权限一次性硬改名，**不留别名**：旧的 `hook.download` / `hook.link` / `hook.task` 声明直接解析失败；`hook.notify` 与 `on_notification_before_send` / `on_notification_after_send` 已删除。
 >
@@ -114,6 +115,34 @@ qBit / linker --->|  EventBus 同步分 |       |
 > `on_task_subscribed` 在新建追踪任务后发，`p.trigger` 为 `"auto"`（Mikan 自动订阅、豆瓣自动任务第一次有种子通过规则——只被规则排除过的不发）或 `"manual"`（手动订阅，含「一键订阅本季」逐个建的任务、豆瓣手动建任务）；委托导航锚、心愿单、站级任务不发。详见 sdk.md。
 >
 > `on_episode_acquired` 只在集数新入库（位图由灭变亮）时触发，覆盖自动整理 / 手动链接（含部分完成）/ 合集确认；重复整理已入库的集不触发。`p.episodes` 只含本次新亮的集（综艺按期为期号、电影为空数组且只在首次获取时发一次）。
+
+### `actions` / `commands`：动作按钮与 bot 命令（可选）
+
+要在 `notify.send` 的消息里放「点了回调插件」的**动作按钮**，或给 Telegram bot 加**命令**，先在 manifest 里声明（完整规则与全部报错文案见 sdk.md「manifest.actions / manifest.commands」）：
+
+```json
+{
+  "name": "cookiecloud",
+  "version": "1.3.0",
+  "source_url": "https://github.com/you/cookiecloud",
+  "permissions": ["api.notify.send", "api.http", "api.ptsite.write"],
+  "hooks": ["on_notify_action", "on_bot_command"],
+  "actions": [
+    { "name": "retry", "label": "重试失败的站点", "requires": ["sites:write"] },
+    { "name": "ignore", "label": "忽略这次失败" }
+  ],
+  "commands": [
+    { "name": "sync", "description": "立即同步一次 Cookie", "requires": ["sites:write"] },
+    { "name": "status", "description": "看上次同步的结果" }
+  ]
+}
+```
+
+- `actions[].name`：`[a-z0-9_]{1,32}`；`label` 必填（1–64 字，安装对话框里给管理员看）。
+- `commands[].name`：短名，`[a-z0-9]{1,32}`、**不许下划线**；用户发的完整名是「插件名的 `-` 换成 `_`」+ `_` + 短名（上例是 `/cookiecloud_sync`、`/cookiecloud_status`），完整名最多 32 个字符。`description` 必填（1–256 字，显示在 Telegram 命令菜单和 `/help` 里）。
+- `requires`：点按钮 / 用命令的人必须**全部**具备的 **FC 用户权限**（`settings:write`、`sites:write`、`logs:read`……，列表见 sdk.md）；**不写 = 只有管理员能用**。
+- 各最多 20 个；声明了 `actions` 就必须有 `api.notify.send` + `on_notify_action` hook，声明了 `commands` 就必须有 `api.notify.send` + `on_bot_command` hook，否则上传预览时就报错。
+- 它们只在 zip 里的 manifest 里，不进插件源的 `index.json`。
 
 ### facade 权限表
 
@@ -131,7 +160,7 @@ qBit / linker --->|  EventBus 同步分 |       |
 | `api.ptsite.write` ⚠️ | `ptsite.setCookie`（插件只能写 cookie；`setAPIKey` 已于 2026-09-25 删除） | 异步 |
 | `api.douban.cookie.read` | `douban.getCookie` | 同步 |
 | `api.douban.cookie.write` ⚠️ | `douban.setCookie(v, {validate})`（验活上限 8s，到点回 `rate_limited`） | 异步 |
-| `api.notify.send` | `notify.send(msg)`（借宿主已配置的 Telegram / Slack 发消息，开头固定标插件名；**必须 `await` 或 `.catch`**，见 §6.6） | 异步（只在本地入队，但返回 Promise） |
+| `api.notify.send` | `notify.send(msg)`（借宿主已配置的 Telegram / Slack 发消息，开头固定标插件名；可带动作按钮；**必须 `await` 或 `.catch`**，见 §6.6）；同时解锁 `on_notify_action` / `on_bot_command` 两个 hook（§6.7） | 异步（只在本地入队，但返回 Promise） |
 | `ui.embed` | 允许声明 `manifest.ui.entry` | — |
 
 hook 类权限（`hook.download.read` / `hook.download.write` ⚠️ / `hook.link.read` / `hook.task.read`）不注入对象，只决定能 `plugin.on` 哪些 hook，见上表。
@@ -558,6 +587,8 @@ setInterval(function () { startJob("timer"); }, 30 * 60000);             // 定�
 - 消息开头固定带 `🧩 [插件名]`；每小时默认最多 300 条（只算真正排上队的）。批量任务结束后汇总发一条，别每处理一项发一条。
 - 别在 `on_download_done` / `on_link_done` / `on_task_completed` 这类 hook 里转发宿主已经发过的内容，用户会收到两条。
 - 正文是 FC-Markdown：站点名、文件名这类动态文字放进 `body` 前先转义，免得 `*`、`[` 之类被当成格式。
+- 正文里别写带用户名的地址（`https://user@host`），连纯文字里的也会被拒；长度上限（标题、正文、地址、按钮 data）都按 **UTF-8 字节**算。
+- 按钮可以是链接按钮 `{label, url}`，也可以是**动作按钮** `{label, action, data?}`（`action` 必须在 `manifest.actions` 里声明，点了回调插件，见 §6.7）。
 
 cookiecloud 式的例子：同步跑完后发一条汇总（失败时多带一个跳到 CookieCloud 面板的按钮）：
 
@@ -596,6 +627,69 @@ async function syncTask(trigger) {
   }
 }
 ```
+
+---
+
+## 6.7 动作按钮与 bot 命令：`on_notify_action` / `on_bot_command`
+
+完整规则见 sdk.md「[通知交互 hook](./sdk.md#通知交互-hookon_notify_action--on_bot_command需-apinotifysend)」。这两个 hook 不是事件广播：用户在 Telegram 里点了你发的动作按钮、或在和 bot 的私聊里发了你声明的命令时，宿主**只调用你这个插件**，**返回值就是给用户看的内容**；10 秒内没结果用户看到「插件没有响应」，throw / reject 用户看到「插件出错」（你的错误文本只进日志）。
+
+用户这边要做两件事才用得上：管理员在 FollowCat 里配好 Telegram bot（bot 在收消息）；用户在 FC 右上角个人卡里点「绑定 Telegram」，把自己的 Telegram 账号绑到 FC 账号。动作按钮只在 Telegram 上出现（发到 Slack 的那份不带），命令只在和 bot 的私聊里有效。
+
+下面接着 §2 的 manifest（`retry` / `ignore` 两个动作，`/cookiecloud_sync`、`/cookiecloud_status` 两个命令）走一遍：同步有失败时发一条带「重试」按钮的通知 → 用户点了重试 → 插件重试并把结果显示在通知上；另外用户可以随时发 `/cookiecloud_sync` 让插件立即同步。
+
+```js
+// ① 同步有失败：发一条带动作按钮的通知。data 里放之后处理要用的信息（≤ 4096 字节，点的时候原样交回）
+async function notifyFailures(failed) {
+  try {
+    await notify.send({
+      title: "Cookie 同步有 " + failed.length + " 个站点失败",
+      body: failed.map(function (r) { return "- " + fcEscape(r.name) + "：" + fcEscape(r.message); }).join("\n"),
+      buttons: [[
+        { label: "重试", action: "retry", data: { sites: failed.map(function (r) { return r.id; }) } },
+        { label: "忽略", action: "ignore" },
+      ]],
+    });
+  } catch (e) {
+    log.warn("失败通知没发出去：" + e.message); // 比如 action 拼错了 →「按钮动作未在 manifest 中声明」
+  }
+}
+
+// ② 用户点了按钮。p.action 是按钮的 action，p.data 是发消息时写的 data，p.user 是点的人（FC 用户）
+plugin.on("on_notify_action", async function (p) {
+  if (p.action === "ignore") return "已忽略（" + p.user.username + "）";
+  if (p.action === "retry") {
+    var results = await runSync({ only: p.data && p.data.sites });   // 10 秒内要返回
+    var stillFailed = results.filter(function (r) { return r.status === "failed"; }).length;
+    // 返回值显示在这条通知的每一份副本末尾：「✓ 重试完成，仍失败 0 个」
+    return { text: "重试完成，仍失败 " + stillFailed + " 个" };
+  }
+});
+
+// ③ bot 命令：/cookiecloud_status 回纯文字；/cookiecloud_sync 回 FC-Markdown + 动作按钮
+plugin.on("on_bot_command", async function (p) {
+  if (p.command === "status") {                       // p.command 是短名
+    return "上次同步：" + (config.get("last_sync_at") || "还没同步过");   // 字符串按纯文字原样发
+  }
+  if (p.command === "sync") {
+    var results = await runSync({});
+    var failed = results.filter(function (r) { return r.status === "failed"; });
+    return {
+      body: "同步完成：写入 **" + (results.length - failed.length) + "** 个，失败 **" + failed.length + "** 个",
+      buttons: failed.length ? [{ label: "重试失败的", action: "retry", data: { sites: failed.map(function (r) { return r.id; }) } }] : [],
+    };
+  }
+});
+```
+
+要点：
+
+- **一条通知只处理一次**：第一个点击开始处理后，整条通知（含发到别的对话的副本）的动作按钮都去掉、末尾显示结果；之后再点只提示「已处理」。按钮 7 天后过期。
+- **谁能点 / 谁能用**：看 `actions[]` / `commands[]` 的 `requires`；没写就只有管理员。权限不够的人看到「没有权限」，你的代码不会被调用。上例 `ignore` 没写 `requires`，所以只有管理员能点「忽略」。
+- **10 秒墙钟**（含 `await`）：重活放后台、先回一句「已开始」也行（再用 `notify.send` 发结果）。别让用户干等。
+- 命令的回复发回同一个私聊（开头带 `🧩 [插件名]`），不占 `notify.send` 的每小时配额；返回 `undefined` 时用户看到「已处理」。回复里的 `body` / `buttons` 不合规（链接不是 http(s)、动作没声明……）时用户只看到「插件出错」——本地用 devrt 调试能看到具体原因。
+- 用户的 Telegram 身份、对话 ID 你拿不到；`p.user` 只有 FC 的 `username` / `role` / `permissions`。
+- devrt 里可以直接模拟点击和命令：侧栏「Hooks」点 `on_notify_action` / `on_bot_command`，或展开「编辑 payload」改 `action` / `data` / `user` / `args` 后触发，结果（用户会看到什么）显示在提示和日志面板里（见 [`devrt/README.md`](../../devrt/README.md)）。
 
 ---
 
@@ -640,6 +734,13 @@ async function syncTask(trigger) {
 | FollowCat 启动后插件没起来，最近错误：`插件文件与记录不一致，请重新安装后再启用（…）` | 安装 / 升级中途 FollowCat 被杀，插件目录里的 manifest（版本 / 权限）与数据库记录对不上；宿主启动时不会用新权限跑旧代码（只在 FollowCat 启动时核对，手动启用不核对） | 重新上传 / 安装一次该插件，再手动启用 |
 | `convert host value for plugin: nested deeper than 1000 levels ...` | 宿主把数据转给插件时超限，多半是插件改写了 `Object.prototype.toJSON` 之类的全局原型 | 别改写内置原型 |
 | 正则明明该匹配却返回 `false` / `null`，耗时约 5 秒 | 正则回溯超过 5 秒上限，按未匹配处理 | 改写正则（去掉嵌套量词 / 反向引用），或先截短输入 |
+| 上传预览报 `manifest.actions requires permission "api.notify.send" and hook "on_notify_action"`（`commands` 同理） | 声明了动作 / 命令，却没声明 `api.notify.send` 权限或对应 hook | 两个都加上 |
+| 上传预览报 `manifest.commands[0].name "x_y" invalid: must match ^[a-z0-9]{1,32}$` / `full command name ... max 32` | 命令短名带了下划线 / 大写，或「插件名 + 短名」太长 | 短名只用小写字母和数字，取短些 |
+| 安装被拒（409）：`已安装同名插件「x」（来自 ...），请先卸载它` | 已经装了一个同名、但来源（`source_url`）不同的插件 | 先卸载那个；或者给你的插件换个 `name` |
+| `notify.send` reject `按钮动作未在 manifest 中声明` | 按钮的 `action` 不在 `manifest.actions` 里（大小写敏感） | 对照 manifest 改名或补声明 |
+| 点动作按钮后显示 `✗ 失败：插件没有响应` / bot 回「插件没有响应」 | `on_notify_action` / `on_bot_command` 10 秒内没结果 | 重活后台跑，先返回 |
+| 点动作按钮后显示 `✗ 失败：插件不可用` | 插件停用了、升级后删了这个动作、或没 `plugin.on("on_notify_action", ...)` | 检查 manifest 与注册 |
+| 用户说按钮一点就「没有权限」 | 动作的 `requires` 他没全有；没写 `requires` 时只有管理员能点 | 调整 `requires` |
 
 ### 本地迭代流程
 

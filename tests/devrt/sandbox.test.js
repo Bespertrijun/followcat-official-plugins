@@ -369,38 +369,18 @@ test('notify：没声明 api.notify.send 时 notify 是 undefined；声明了才
   assert.equal((await n.ready).loadError, null, 'api.notify.send is in the host permission list');
 });
 
-test('notify.send：参数不是对象、字段类型不对 → 同步抛 TypeError，文案同宿主', async (t) => {
-  const s = start('notify');
+test('notify.send：参数不是对象、字段类型不对 → 同步抛 TypeError；文本字段只收原始字符串，按钮结构直接读（jscases.json 由宿主实跑生成）', async (t) => {
+  const s = start('notify', { DEVRT_NOTIFY_CHANNELS: '0' });
   t.after(s.stop);
-  const r = await s.api('/typeerrors');
-  const shape = 'TypeError: notify.send: buttons must be an array of button objects or an array of button rows';
-  const want = {
-    '': 'TypeError: notify.send: argument must be a message object',
-    'undefined': 'TypeError: notify.send: argument must be a message object',
-    'null': 'TypeError: notify.send: argument must be a message object',
-    'string': 'TypeError: notify.send: argument must be a message object',
-    'number': 'TypeError: notify.send: argument must be a message object',
-    'function': 'TypeError: notify.send: argument must be a message object',
-    'array': 'TypeError: notify.send: argument must be a message object',
-    'title number': 'TypeError: notify.send: title must be a string',
-    'title object': 'TypeError: notify.send: title must be a string',
-    'title function': 'TypeError: notify.send: title must be a string',
-    'body number': 'TypeError: notify.send: body must be a string',
-    'image array': 'TypeError: notify.send: image must be a string',
-    'buttons string': shape,
-    'buttons object': shape,
-    'rows then flat': shape,
-    'flat then row': shape,
-    'button number': 'TypeError: notify.send: each button must be an object',
-    'row button number': 'TypeError: notify.send: each button must be an object',
-    'label number': 'TypeError: notify.send: button label must be a string',
-    'url number': 'TypeError: notify.send: button url must be a string',
-    'action boolean': 'TypeError: notify.send: button action must be a string',
-    'title cyclic': 'TypeError: notify.send: title is not JSON-serializable',
-    'title bigint': 'TypeError: notify.send: title is not JSON-serializable',
-    'boxed string title ok': 'no throw',
-  };
-  assert.deepEqual(r, want);
+  const want = JSON.parse(fs.readFileSync(path.join(FIX('notify'), 'jscases.json'), 'utf-8'));
+  const got = await s.api('/jscases');
+  assert.deepEqual(Object.keys(got).sort(), Object.keys(want).sort(), 'fixture jsCases and jscases.json list the same cases');
+  for (const k of Object.keys(want)) assert.equal(got[k], want[k], k);
+  // the CF6 cases this file must keep locking (a String object / toJSON object used to be accepted)
+  assert.equal(want['title String object'], 'TypeError: notify.send: title must be a string');
+  assert.equal(want['title toJSON object'], 'TypeError: notify.send: title must be a string');
+  assert.equal(want['data cyclic'], 'TypeError: notify.send: button data is not JSON-serializable');
+  assert.equal(want['buttons array toJSON ignored'], 'rejected: 按钮链接无效：只允许 http / https，且不能带用户名和密码');
 });
 
 test('notify.send：内容规则的 reject 原因与先后顺序同宿主（vectors.json 由宿主实跑生成）', async (t) => {
@@ -424,6 +404,13 @@ test('notify.send：入队 resolve {queued, channels}（DEVRT_NOTIFY_CHANNELS，
   assert.equal(shown.channels, 1);
   assert.equal(shown.title, '同步完成');
   assert.deepEqual(shown.buttons.map((row) => row.map((b) => b.label)), [['a', 'b'], ['c']], 'flat buttons are laid out 2 per row');
+  assert.deepEqual(await s.api('/send', JSON.stringify({ title: 't', buttons: [{ label: '重试', action: 'retry', data: { id: 7 } }, { label: 'b', url: 'https://b.example/' }] })),
+    { resolved: { queued: true, channels: 1 } }, 'an action declared in manifest.actions is accepted');
+  const line2 = s.logs.map((l) => l.args.join(' ')).filter((x) => x.startsWith('[notify.send] ')).pop();
+  assert.deepEqual(JSON.parse(line2.slice('[notify.send] '.length)).buttons,
+    [[{ label: '重试', action: 'retry', data: { id: 7 } }, { label: 'b', url: 'https://b.example/' }]]);
+  assert.deepEqual(await s.api('/send', JSON.stringify({ title: '', buttons: [{ label: 'a', action: 'nope' }] })),
+    { rejected: '按钮动作未在 manifest 中声明', name: 'GoError', isError: true }, 'undeclared action: the facade rejects before the title check');
   assert.deepEqual(await s.api('/send', JSON.stringify({ title: ' ' })), { rejected: '缺少标题', name: 'GoError', isError: true });
 
   const zero = start('notify', { DEVRT_NOTIFY_CHANNELS: '0' });
@@ -462,4 +449,100 @@ test('notify.send：在 should_download 里调用（await 或不 await、resolve
   assert.equal((await trig('await-reject-veto')).verdict, 'veto');
   assert.equal((await trig('unawaited-reject-veto')).verdict, 'veto');
   assert.equal((await trig('await-ok-allow')).verdict, 'allow');
+});
+
+// ─── manifest.actions / manifest.commands：与宿主 internal/plugin/manifest.go Parse 对齐 ─────────────────────
+
+// fixtures/manifest-vectors.json：want 是主仓 plugin.Parse(manifest, auth.IsValidPermission) 实跑的错误文案（"" = 通过）
+test('manifest：actions / commands 的校验与报错文案同宿主（manifest-vectors.json 由宿主实跑生成）', { timeout: 120000 }, async (t) => {
+  const os = require('os');
+  const cases = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures', 'manifest-vectors.json'), 'utf-8'));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'devrt-manifest-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(dir, 'index.js'), '');
+  const startDir = () => {
+    const proc = spawn(process.execPath, [SANDBOX, dir]);
+    return new Promise((resolve) => {
+      readline.createInterface({ input: proc.stdout }).on('line', (line) => {
+        const m = JSON.parse(line);
+        if (m.event === 'ready') { proc.kill(); resolve(m.loadError); }
+      });
+      proc.stdin.write(JSON.stringify({ id: '1', method: 'configReplace', params: { entries: {} } }) + '\n');
+    });
+  };
+  for (const c of cases) {
+    fs.writeFileSync(path.join(dir, 'manifest.json'), JSON.stringify(c.manifest));
+    assert.equal((await startDir()) || '', c.want, c.name);
+  }
+});
+
+// ─── on_notify_action / on_bot_command：控制台模拟点击与命令（宿主 internal/notify/actions.go + commands.go 的插件侧契约）──
+
+const ADMIN = { username: 'admin', role: 'admin', permissions: ['settings:write', 'logs:read'] };
+const MEMBER = { username: 'bob', role: 'member', permissions: ['subscribe:any'] };
+
+test('hook 表：on_notify_action / on_bot_command 需 api.notify.send（不声明权限 → plugin.on 抛错）', async (t) => {
+  const s = start('notify');
+  t.after(s.stop);
+  const r = await s.ready;
+  assert.equal(r.loadError, null);
+  assert.deepEqual(r.hooks.sort(), ['on_bot_command', 'on_notify_action', 'should_download']);  const n = start('notify-hook-noperm');
+  t.after(n.stop);
+  assert.equal((await n.ready).loadError, null, 'declaring the hooks alone is a valid manifest');
+  const errs = await n.api('/errors');
+  for (const h of ['on_notify_action', 'on_bot_command']) assert.match(errs[h], new RegExp('hook "' + h + '" requires permission "api.notify.send"'), h);
+});
+
+test('on_notify_action：返回字符串 / {text} → 「✓ <文字>」（换行折成空格、去首尾空白、最多 200 字）；其余 → 「✓ 已处理」', async (t) => {
+  const s = start('notify');
+  t.after(s.stop);
+  const click = async (data, user, action) => (await s.rpc('trigger', { hook: 'on_notify_action',
+    data: { action: action || 'retry', data, user: user || ADMIN, channel: 'telegram' } })).result;
+  const ok = await click({ id: 7 });
+  assert.equal(ok.answer, '处理中…');
+  assert.equal(ok.line, '✓ 已retry：{"id":7} by admin/admin via telegram');
+  assert.equal((await click({ mode: 'obj' })).line, '✓ 第一行 第二行');
+  const long = (await click({ mode: 'long' })).line;
+  assert.equal(long, '✓ ' + '长'.repeat(199) + '…');
+  assert.equal((await click({ mode: 'none' })).line, '✓ 已处理');
+  assert.equal((await click({ mode: 'number' })).line, '✓ 已处理');
+  assert.equal((await click({ mode: 'throw' })).line, '✗ 失败：插件出错');
+  const sent = await click({ mode: 'send' });
+  assert.equal(sent.line, '✓ sent', 'notify.send works inside the action hook');
+  // ack requires logs:read; retry has no requires → admin only
+  const denied = await click(null, MEMBER);
+  assert.deepEqual([denied.answer, denied.line, denied.called], ['没有权限', null, false]);
+  assert.equal((await click(null, MEMBER, 'ack')).answer, '没有权限');
+  assert.equal((await click(null, { username: 'x', role: 'member', permissions: ['logs:read'] }, 'ack')).line.startsWith('✓ '), true);
+  const gone = await click(null, ADMIN, 'nope');
+  assert.deepEqual([gone.line, gone.called], ['✗ 失败：插件不可用', false]);
+});
+
+test('on_notify_action：10 秒没结果 → 「✗ 失败：插件没有响应」', { timeout: 20000 }, async (t) => {
+  const s = start('notify');
+  t.after(s.stop);
+  const r = (await s.rpc('trigger', { hook: 'on_notify_action', data: { action: 'retry', data: { mode: 'hang' }, user: ADMIN, channel: 'telegram' } })).result;
+  assert.equal(r.line, '✗ 失败：插件没有响应');
+});
+
+test('on_bot_command：字符串按纯文字回、{body, buttons} 按 notify.send 规则校验、不合规 → 插件出错；只认私聊；权限与未声明同宿主', async (t) => {
+  const s = start('notify');
+  t.after(s.stop);
+  const cmd = async (args, opts) => (await s.rpc('trigger', { hook: 'on_bot_command', data: Object.assign({ command: 'status', args,
+    user: ADMIN, chat: { id: 42, type: 'private' } }, opts || {}) })).result;
+  const plain = await cmd('hi');
+  assert.equal(plain.reply.prefix, '🧩 [devrt-notify]');
+  assert.equal(plain.reply.text, '收到 /status hi（admin，chat 42 private）**不解析**');
+  assert.equal(plain.reply.body, '收到 /status hi（admin，chat 42 private）\\*\\*不解析\\*\\*', 'a string reply is escaped: shown literally');
+  const md = await cmd('md');
+  assert.equal(md.reply.body, '**加粗** [链接](https://a.example/)');
+  assert.deepEqual(md.reply.buttons, [[{ label: '重试', action: 'retry', data: { n: 1 } }, { label: '打开', url: 'https://a.example/' }]]);
+  for (const bad of ['undeclared', 'badlink', 'bodytype', 'number', 'throw']) assert.equal((await cmd(bad)).reply, '插件出错', bad);
+  assert.match((await cmd('undeclared')).error, /按钮动作未在 manifest 中声明/);
+  assert.equal((await cmd('empty')).reply, '已处理');
+  assert.equal((await cmd('emptyobj')).reply, '已处理');
+  assert.equal((await cmd('hi', { chat: { id: -100, type: 'group' } })).ignored, true);
+  assert.equal((await cmd('hi', { command: 'nope' })).reply, '不认识这个命令，发 /help 看看能用什么');
+  assert.equal((await cmd('hi', { user: MEMBER })).reply, '没有权限', 'status has no requires → admin only');
+  assert.equal((await cmd('hi', { command: 'echo', user: MEMBER })).reply.prefix, '🧩 [devrt-notify]', 'echo requires subscribe:any');
 });

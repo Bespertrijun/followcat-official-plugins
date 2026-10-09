@@ -68,15 +68,23 @@
 //
 // notify.send (api.notify.send; mirror internal/plugin/host_api_notify.go + internal/notify/plugin.go):
 //   injected only with the permission. Same synchronous TypeErrors ("notify.send: ...") for a non-object
-//   argument / wrong field types, same Chinese reject reasons in the host's order (title, body, body links,
-//   image, buttons, then the quota). Body links are found with a port of the host's FC-Markdown link rules
-//   (code blocks / code spans / backslash escapes hide them) and URLs are checked with a port of Go net/url
-//   + the host's IDNA chain — Node's domainToASCII stands in for the strict x/net/idna lookup profile, so
-//   unusual internationalized hosts may differ. Nothing is delivered: an accepted message is printed to the
-//   log panel ("[notify.send] {...}", with the host's "🧩 [<name>]" prefix and the button rows) and resolves
-//   {queued: true, channels: N}. DEVRT_NOTIFY_CHANNELS sets N (default 1; 0 = nothing configured, which
-//   is not counted against the quota); DEVRT_NOTIFY_MAX_PER_HOUR sets the quota (default 300, like the host).
-//   The queue-full reject, image download and button label truncation are not simulated.
+//   argument / wrong field types (text fields must be primitive strings; the button structure is read
+//   directly, only button data goes through JSON), same Chinese reject reasons in the host's order (an action
+//   button whose action is not in manifest.actions first, then title, body, body links, image, buttons, then
+//   the quota). The body is parsed with a port of the host's FC-Markdown parser: invalid [text](url) links,
+//   bare "scheme://userinfo@" in text nodes (not code) and over-long links. URLs are checked with a port of
+//   Go net/url + the host's IDNA chain — Node's domainToASCII stands in for the strict x/net/idna lookup
+//   profile, so unusual internationalized hosts may differ. Nothing is delivered: an accepted message is
+//   printed to the log panel ("[notify.send] {...}", with the host's "🧩 [<name>]" prefix and the button
+//   rows) and resolves {queued: true, channels: N}. DEVRT_NOTIFY_CHANNELS sets N (default 1; 0 = nothing
+//   configured, which is not counted against the quota); DEVRT_NOTIFY_MAX_PER_HOUR sets the quota (default
+//   300, like the host). The queue-full reject, image download and button label truncation are not simulated.
+//
+// on_notify_action / on_bot_command (api.notify.send; mirror internal/notify/actions.go + commands.go and
+// the plugin side of internal/plugin/manager_interact.go): the "trigger" RPC plays a click / a command with
+// the payload it is given and replies with what the user would see (answer / line for a click, reply for a
+// command), applying the manifest declaration and requires checks, the 10s budget and the R10 reply rules.
+// manifest.actions / manifest.commands are validated like internal/plugin/manifest.go Parse.
 //
 // Timers (host opened them 2026-09-25): setTimeout / setInterval / setImmediate and the
 // clear* functions are Node's own. Like the host, a callback that throws or returns a
@@ -939,91 +947,327 @@ function notifyCheckURL(raw) {
   return href.length > NOTIFY_MAX_URL_LEN ? 'too_long' : '';
 }
 
-// Mirror of the link part of notify.ParseFCMarkdown (Doc.Issues) + docHasLongLink: 'invalid' when any
-// [text](url) has a URL the host refuses, else 'too_long' when a link's re-serialized URL exceeds 2048 bytes.
-// Code blocks / code spans / backslash escapes hide links exactly like the host parser.
-function fcmdLinkProblem(src) {
+// ── FC-Markdown parser port (internal/notify/fcmd.go ParseFCMarkdown) ──
+// Only what the plugin checks need: the block split (code fences hide their lines), and the inline tree —
+// text / code / link nodes and the emphasis wrappers. Works on UTF-16 code units: every structural character is
+// ASCII, and the only non-ASCII tests (unicode.IsSpace, ASCII alnum) give the same answer per code unit as per rune.
+// Result: { blocks: [{ lines: [[node]] }], issues: N } with nodes {kind: 'text', text} | {kind: 'code'} |
+// {kind: 'link', href (re-serialized, as a byte string), children} | {kind: 'wrap', children}.
+function fcmdParse(src) {
   const lines = src.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n');
-  const st = { invalid: false, long: false };
-  const fenceOpen = (l) => l.startsWith('```') && !Array.from(l.slice(3)).some((c) => c === '`' || goIsSpace(c.codePointAt(0)));
+  const doc = { blocks: [], issues: 0 };
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
-    if (fenceOpen(line)) {
+    if (fcmdFenceOpen(line)) {
       let end = -1;
       for (let j = i + 1; j < lines.length; j++) if (lines[j] === '```') { end = j; break; }
-      if (end < 0) break; // unclosed fence: the rest is literal text
+      if (end < 0) { // unclosed fence: from the opening line to the end, every line is literal text
+        for (const l of lines.slice(i)) doc.blocks.push({ lines: [l === '' ? [] : [{ kind: 'text', text: l }]] });
+        break;
+      }
+      doc.blocks.push({ lines: [] }); // BlockCode: no inline lines
       i = end;
       continue;
     }
     let seg = line;
     if (line.startsWith('>> ')) seg = line.slice(3);
     else if (line.startsWith('> ') || line.startsWith('- ')) seg = line.slice(2);
-    fcmdScanLinks(seg, st);
+    doc.blocks.push({ lines: [fcmdInlines(seg, true, doc)] });
   }
-  return st.invalid ? 'invalid' : (st.long ? 'too_long' : '');
+  return doc;
+}
+function fcmdFenceOpen(l) {
+  return l.startsWith('```') && !Array.from(l.slice(3)).some((c) => c === '`' || goIsSpace(c.codePointAt(0)));
 }
 function fcmdIsASCIIPunct(c) {
   return (c >= 33 && c <= 47) || (c >= 58 && c <= 64) || (c >= 91 && c <= 96) || (c >= 123 && c <= 126);
 }
-function fcmdScanLinks(seg, st) {
-  const runs = []; // maximal backtick runs [start, length]
-  for (let i = 0; i < seg.length;) {
-    if (seg[i] !== '`') { i++; continue; }
-    let n = 0;
-    while (seg[i + n] === '`') n++;
-    runs.push([i, n]);
-    i += n;
-  }
-  const runLen = (i) => { let n = 0; while (seg[i + n] === '`') n++; return n; };
-  // CommonMark code span: the closing run is the next maximal run of exactly n backticks
-  const codeSpanEnd = (i, n) => {
-    for (const r of runs) if (r[1] === n && r[0] >= i + n) return r[0] + n;
-    return -1;
-  };
-  const matchBracket = (i) => {
-    const stack = [];
-    for (let j = i; j < seg.length;) {
-      const c = seg[j];
-      if (c === '\\' && j + 1 < seg.length && fcmdIsASCIIPunct(seg.charCodeAt(j + 1))) { j += 2; continue; }
-      if (c === '`') { const n = runLen(j); const e = codeSpanEnd(j, n); j = e >= 0 ? e : j + n; continue; }
-      if (c === '[') stack.push(j);
-      else if (c === ']' && stack.length > 0 && stack.pop() === i) return j;
-      j++;
+function fcmdIsASCIIAlnum(c) { return (c >= 97 && c <= 122) || (c >= 65 && c <= 90) || (c >= 48 && c <= 57); }
+function fcmdRunLen(s, i, ch) { let n = 0; while (i + n < s.length && s[i + n] === ch) n++; return n; }
+function fcmdLowerBound(a, x) {
+  let lo = 0, hi = a.length;
+  while (lo < hi) { const mid = (lo + hi) >> 1; if (a[mid] < x) lo = mid + 1; else hi = mid; }
+  return lo;
+}
+// inlineParser.codeSpan: n backticks at i → {content, end}, or null when no closing run of exactly n backticks
+function fcmdCodeSpan(p, i, n) {
+  if (!p.ticks) {
+    p.ticks = new Map();
+    for (let k = 0; k < p.seg.length;) {
+      if (p.seg[k] !== '`') { k++; continue; }
+      const m = fcmdRunLen(p.seg, k, '`');
+      if (!p.ticks.has(m)) p.ticks.set(m, []);
+      p.ticks.get(m).push(k);
+      k += m;
     }
-    return -1;
-  };
+  }
+  const starts = p.ticks.get(n) || [];
+  const k = fcmdLowerBound(starts, i + n);
+  if (k === starts.length) return null;
+  const j = starts[k];
+  let content = p.seg.slice(i + n, j);
+  if (content.length >= 2 && content[0] === ' ' && content[content.length - 1] === ' ' && /[^ ]/.test(content)) {
+    content = content.slice(1, -1);
+  }
+  return { content, end: j + n };
+}
+// inlineParser.matchBracket, including its cache (a miss rescans from i and caches every '[' on the way)
+function fcmdMatchBracket(p, i) {
+  if (p.bracketMap && p.bracketMap.has(i)) return p.bracketMap.get(i);
+  p.bracketMap = new Map();
+  const seg = p.seg;
+  const stack = [];
+  for (let j = i; j < seg.length;) {
+    const c = seg[j];
+    if (c === '\\' && j + 1 < seg.length && fcmdIsASCIIPunct(seg.charCodeAt(j + 1))) { j += 2; continue; }
+    if (c === '`') {
+      const n = fcmdRunLen(seg, j, '`');
+      const cs = fcmdCodeSpan(p, j, n);
+      j = cs ? cs.end : j + n;
+      continue;
+    }
+    if (c === '[') {
+      stack.push(j);
+    } else if (c === ']' && stack.length > 0) {
+      const o = stack.pop();
+      p.bracketMap.set(o, j);
+      if (o === i) return j;
+    }
+    j++;
+  }
+  for (const o of stack) p.bracketMap.set(o, -1);
+  return p.bracketMap.get(i);
+}
+// inlineParser.tryLink: {res: 'none'} | {res: 'invalid', text, end} | {res: 'ok', node, end}
+function fcmdTryLink(p, i) {
+  const seg = p.seg;
+  const j = fcmdMatchBracket(p, i);
+  if (j < 0 || j + 1 >= seg.length || seg[j + 1] !== '(' || j === i + 1) return { res: 'none' };
+  if (!p.nextParen) {
+    const n = seg.length;
+    p.nextParen = new Int32Array(n + 1);
+    p.nextSpace = new Int32Array(n + 1);
+    p.nextParen[n] = n;
+    p.nextSpace[n] = n;
+    for (let k = n - 1; k >= 0; k--) {
+      p.nextParen[k] = seg[k] === ')' ? k : p.nextParen[k + 1];
+      p.nextSpace[k] = goIsSpace(seg.charCodeAt(k)) ? k : p.nextSpace[k + 1];
+    }
+  }
+  const k = p.nextParen[j + 2];
+  if (k >= seg.length || p.nextSpace[j + 2] < k) return { res: 'none' };
+  const urlSrc = seg.slice(j + 2, k);
+  const end = k + 1;
+  if (urlSrc.indexOf('`') >= 0) p.bracketMap = null; // same cache reset as the host
+  const href = notifyValidateLinkURL(urlSrc);
+  if (href === null) {
+    p.doc.issues++;
+    return { res: 'invalid', text: seg.slice(i, end), end };
+  }
+  return { res: 'ok', node: { kind: 'link', href, children: fcmdInlines(seg.slice(i + 1, j), false, p.doc) }, end };
+}
+const FCMD_DK = { '*1': 1, '*2': 2, '*3': 3, '~2': 4, '+2': 8, '|2': 16 }; // italic, bold, bold+italic, strike, underline, spoiler
+// parseInlines
+function fcmdInlines(seg, allowLinks, doc) {
+  const p = { seg, doc, ticks: null, nextParen: null, nextSpace: null, bracketMap: null };
+  const toks = [];
+  let buf = '';
+  const flush = function () { if (buf !== '') { toks.push({ kind: 'text', text: buf, pair: -1 }); buf = ''; } };
   for (let i = 0; i < seg.length;) {
     const c = seg[i];
-    if (c === '\\') { i += (i + 1 < seg.length && fcmdIsASCIIPunct(seg.charCodeAt(i + 1))) ? 2 : 1; continue; }
-    if (c === '`') { const n = runLen(i); const e = codeSpanEnd(i, n); i = e >= 0 ? e : i + n; continue; }
-    if (c !== '[') { i++; continue; }
-    const j = matchBracket(i);
-    if (j < 0 || j + 1 >= seg.length || seg[j + 1] !== '(' || j === i + 1) { i++; continue; }
-    const k = seg.indexOf(')', j + 2);
-    if (k < 0) { i++; continue; }
-    let spaced = false;
-    for (const ch of seg.slice(j + 2, k)) if (goIsSpace(ch.codePointAt(0))) { spaced = true; break; }
-    if (spaced) { i++; continue; }
-    const href = notifyValidateLinkURL(seg.slice(j + 2, k));
-    if (href === null) st.invalid = true;
-    else if (href.length > NOTIFY_MAX_URL_LEN) st.long = true;
-    i = k + 1; // link text never holds another link (inner [ ]( ) are literal)
+    if (c === '\\') {
+      if (i + 1 < seg.length && fcmdIsASCIIPunct(seg.charCodeAt(i + 1))) { buf += seg[i + 1]; i += 2; continue; }
+      buf += c;
+      i++;
+    } else if (c === '`') {
+      const n = fcmdRunLen(seg, i, '`');
+      const cs = fcmdCodeSpan(p, i, n);
+      if (cs) { flush(); toks.push({ kind: 'code', pair: -1 }); i = cs.end; continue; }
+      buf += seg.slice(i, i + n);
+      i += n;
+    } else if (c === '[' && allowLinks) {
+      const r = fcmdTryLink(p, i);
+      if (r.res === 'ok') { flush(); toks.push({ kind: 'link', node: r.node, pair: -1 }); i = r.end; }
+      else if (r.res === 'invalid') { buf += r.text; i = r.end; }
+      else { buf += c; i++; }
+    } else if (c === '*' || c === '~' || c === '+' || c === '|') {
+      const n = fcmdRunLen(seg, i, c);
+      const run = seg.slice(i, i + n);
+      const dk = FCMD_DK[c + n];
+      if (dk) {
+        // flanking
+        const hasBefore = i > 0, hasAfter = i + n < seg.length;
+        const before = hasBefore ? seg.charCodeAt(i - 1) : 0, after = hasAfter ? seg.charCodeAt(i + n) : 0;
+        let canOpen = false, canClose = false;
+        if (!(hasBefore && hasAfter && fcmdIsASCIIAlnum(before) && fcmdIsASCIIAlnum(after))) {
+          canOpen = hasAfter && !goIsSpace(after);
+          canClose = hasBefore && !goIsSpace(before);
+        }
+        if (canOpen || canClose) {
+          flush();
+          toks.push({ kind: 'delim', text: run, dk, canOpen, canClose, pair: -1 });
+          i += n;
+          continue;
+        }
+      }
+      buf += run;
+      i += n;
+    } else {
+      buf += c;
+      i++;
+    }
+  }
+  flush();
+  fcmdMatchDelims(toks);
+  return fcmdBuild(toks, 0, toks.length);
+}
+// matchDelims: per-kind nearest pairing; crossing pairs both literal; same-kind nesting (bold+italic overlaps
+// both) makes the inner pair literal
+function fcmdMatchDelims(toks) {
+  const stacks = new Map();
+  for (let i = 0; i < toks.length; i++) {
+    const t = toks[i];
+    if (t.kind !== 'delim') continue;
+    const st = stacks.get(t.dk) || [];
+    stacks.set(t.dk, st);
+    if (t.canClose && st.length > 0) {
+      const o = st.pop();
+      toks[o].pair = i;
+      t.pair = o;
+      continue;
+    }
+    if (t.canOpen) st.push(i);
+  }
+  const pairs = [];
+  for (let i = 0; i < toks.length; i++) if (toks[i].kind === 'delim' && toks[i].pair > i) pairs.push([i, toks[i].pair]);
+  if (pairs.length === 0) return;
+  for (const q of fcmdCrossingPairs(pairs)) { toks[q[0]].pair = -1; toks[q[1]].pair = -1; }
+  const open = new Array(8).fill(0);
+  for (let i = 0; i < toks.length; i++) {
+    const t = toks[i];
+    if (t.kind !== 'delim' || t.pair < 0) continue;
+    if (t.pair > i) {
+      let overlaps = false;
+      for (let b = 0; b < 8; b++) if ((t.dk & (1 << b)) && open[b] > 0) overlaps = true;
+      if (overlaps) { toks[t.pair].pair = -1; t.pair = -1; continue; }
+      for (let b = 0; b < 8; b++) if (t.dk & (1 << b)) open[b]++;
+      continue;
+    }
+    for (let b = 0; b < 8; b++) if (t.dk & (1 << b)) open[b]--;
   }
 }
+// crossingPairs: every pair that crosses another (p.open < q.open < p.close < q.close or the reverse); pairs
+// sorted by open. Sorted lists + a sparse table instead of the host's segment tree (same answer).
+function fcmdCrossingPairs(pairs) {
+  const n = pairs.length;
+  if (n < 2) return [];
+  const opens = pairs.map((q) => q[0]);
+  const byClose = pairs.slice().sort((a, b) => a[1] - b[1]);
+  const closes = byClose.map((q) => q[1]);
+  const rangeQuery = function (vals, f) {
+    const table = [vals.slice()];
+    for (let w = 1; (1 << w) <= vals.length; w++) {
+      const prev = table[w - 1], cur = [];
+      for (let i = 0; i + (1 << w) <= vals.length; i++) cur.push(f(prev[i], prev[i + (1 << (w - 1))]));
+      table.push(cur);
+    }
+    return function (l, r) { // [l, r), l < r
+      const w = 31 - Math.clz32(r - l);
+      return f(table[w][l], table[w][r - (1 << w)]);
+    };
+  };
+  const maxClose = rangeQuery(pairs.map((q) => q[1]), Math.max);
+  const minOpen = rangeQuery(byClose.map((q) => q[0]), Math.min);
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    const q = pairs[i];
+    let crossed = false;
+    const r = fcmdLowerBound(opens, q[1]);
+    if (i + 1 < r && maxClose(i + 1, r) > q[1]) crossed = true;
+    if (!crossed) {
+      const l = fcmdLowerBound(closes, q[0] + 1), r2 = fcmdLowerBound(closes, q[1]);
+      if (l < r2 && minOpen(l, r2) < q[0]) crossed = true;
+    }
+    if (crossed) out.push(q);
+  }
+  return out;
+}
+// buildInlines + mergeTexts (adjacent text nodes become one; empty text dropped)
+function fcmdBuild(toks, from, to) {
+  const out = [];
+  for (let i = from; i < to; i++) {
+    const t = toks[i];
+    if (t.kind === 'text') out.push({ kind: 'text', text: t.text });
+    else if (t.kind === 'code') out.push({ kind: 'code' });
+    else if (t.kind === 'link') out.push(t.node);
+    else if (t.pair > i && t.pair < to) {
+      out.push({ kind: 'wrap', children: fcmdBuild(toks, i + 1, t.pair) });
+      i = t.pair;
+    } else {
+      out.push({ kind: 'text', text: t.text });
+    }
+  }
+  const merged = [];
+  for (const node of out) {
+    const last = merged[merged.length - 1];
+    if (node.kind === 'text' && last && last.kind === 'text') last.text += node.text;
+    else merged.push(node);
+  }
+  return merged.filter((node) => node.kind !== 'text' || node.text !== '');
+}
+function fcmdSomeNode(doc, pred) {
+  const walk = (nodes) => nodes.some((node) => pred(node) || (node.children ? walk(node.children) : false));
+  return doc.blocks.some((b) => b.lines.some(walk));
+}
+// notify bareUserinfoURL: Go RE2 \s is [\t\n\f\r ] (no \v, no Unicode spaces)
+const NOTIFY_BARE_USERINFO = /[A-Za-z][A-Za-z0-9+.\-]*:\/\/[^/\t\n\f\r ]*@/;
+// Mirror of the body checks in notify.buildPluginContent, in the host's order: any invalid [text](url)
+// (Doc.Issues) → 'invalid'; a bare scheme://userinfo@ in a text node (not code) → 'bare_userinfo'; a link
+// whose re-serialized URL exceeds 2048 bytes → 'too_long'; else ''.
+function fcmdBodyProblem(src) {
+  const doc = fcmdParse(src);
+  if (doc.issues > 0) return 'invalid';
+  if (fcmdSomeNode(doc, (node) => node.kind === 'text' && NOTIFY_BARE_USERINFO.test(node.text))) return 'bare_userinfo';
+  if (fcmdSomeNode(doc, (node) => node.kind === 'link' && node.href.length > NOTIFY_MAX_URL_LEN)) return 'too_long';
+  return '';
+}
 
-// Mirror of notify.buildPluginNotification + buildPluginButtons: the reject reason, or null
+// Mirror of notify.EscapeFCMarkdown (a plain-text bot command reply is escaped with it)
+function fcmdEscape(s) {
+  let out = '';
+  let lineStart = true;
+  for (const c of s) {
+    if ('\\*~+|`[]'.includes(c) || ((c === '>' || c === '-') && lineStart)) out += '\\';
+    out += c;
+    lineStart = c === '\n' || c === '\r';
+  }
+  return out;
+}
+
+const NOTIFY_REASON_UNDECLARED = '按钮动作未在 manifest 中声明';
+// manifest.actions names: the only actions an action button may use (host: declaredActions of the facade,
+// and the notify service's lookup through the plugin's enabled manifest)
+const NOTIFY_DECLARED_ACTIONS = new Set((Array.isArray(manifest.actions) ? manifest.actions : [])
+  .map((a) => (a && typeof a.name === 'string' ? a.name : '')));
+
+// Mirror of notify.buildPluginNotification: the reject reason, or null
 function notifyContentReason(msg) {
   if (goIsBlank(msg.title)) return '缺少标题';
   if (utf8Len(msg.title) > NOTIFY_MAX_TITLE_BYTES) return '标题过长（上限 ' + NOTIFY_MAX_TITLE_BYTES + ' 字节）';
+  return notifyBodyReason(msg);
+}
+// Mirror of notify.buildPluginContent + buildPluginButtons (body, image, buttons; a bot command reply goes
+// through the same checks without a title)
+function notifyBodyReason(msg) {
   if (utf8Len(msg.body) > NOTIFY_MAX_BODY_BYTES) return '正文过长（上限 ' + NOTIFY_MAX_BODY_BYTES + ' 字节）';
   if (!goIsBlank(msg.body)) {
-    const p = fcmdLinkProblem(msg.body);
-    if (p === 'invalid') return '正文里的链接无效：' + NOTIFY_LINK_RULE;
-    if (p === 'too_long') return '正文里的链接过长（上限 ' + NOTIFY_MAX_URL_LEN + ' 字符）';
+    const p = fcmdBodyProblem(msg.body);
+    if (p === 'invalid' || p === 'bare_userinfo') return '正文里的链接无效：' + NOTIFY_LINK_RULE;
+    if (p === 'too_long') return '正文里的链接过长（上限 ' + NOTIFY_MAX_URL_LEN + ' 字节）';
   }
   if (msg.image !== '') {
     const p = notifyCheckURL(msg.image);
-    if (p === 'too_long') return '图片地址过长（上限 ' + NOTIFY_MAX_URL_LEN + ' 字符）';
+    if (p === 'too_long') return '图片地址过长（上限 ' + NOTIFY_MAX_URL_LEN + ' 字节）';
     if (p) return '图片地址无效：' + NOTIFY_LINK_RULE;
   }
   let total = 0;
@@ -1039,56 +1283,95 @@ function notifyContentReason(msg) {
       if (b.url === '' && b.action === '') return '按钮缺少链接（url）或动作（action）';
       if (b.data !== null && b.action === '') return '只有动作按钮可以带 data';
       if (b.data !== null && utf8Len(b.data) > NOTIFY_MAX_BUTTON_DATA_BYTES) return '按钮数据过大（上限 ' + NOTIFY_MAX_BUTTON_DATA_BYTES + ' 字节）';
-      // The manifest has no `actions` field yet, so every action button counts as undeclared (host stage C)
-      if (b.action !== '') return '按钮动作未在 manifest 中声明';
+      if (b.action !== '') {
+        if (!NOTIFY_DECLARED_ACTIONS.has(b.action)) return NOTIFY_REASON_UNDECLARED;
+        continue; // action buttons have no URL to check
+      }
       const p = notifyCheckURL(b.url);
-      if (p === 'too_long') return '按钮链接过长（上限 ' + NOTIFY_MAX_URL_LEN + ' 字符）';
+      if (p === 'too_long') return '按钮链接过长（上限 ' + NOTIFY_MAX_URL_LEN + ' 字节）';
       if (p) return '按钮链接无效：' + NOTIFY_LINK_RULE;
     }
   }
   return null;
 }
 
+// Go encoding/json Marshal of a decoded JSON value with SetEscapeHTML(false): object keys sorted (byte order ==
+// code point order), U+2028 / U+2029 still escaped. Used for button data, whose 4 KB limit counts these bytes.
+function goCompareCodePoints(a, b) {
+  let i = 0, j = 0;
+  while (i < a.length && j < b.length) {
+    const ca = a.codePointAt(i), cb = b.codePointAt(j);
+    if (ca !== cb) return ca < cb ? -1 : 1;
+    i += ca > 0xffff ? 2 : 1;
+    j += cb > 0xffff ? 2 : 1;
+  }
+  return (a.length - i) - (b.length - j);
+}
+function goJSONString(s) { return JSON.stringify(s).replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029'); }
+function goJSONEncode(v) {
+  if (v === null || typeof v === 'number' || typeof v === 'boolean') return JSON.stringify(v);
+  if (typeof v === 'string') return goJSONString(v);
+  if (Array.isArray(v)) return '[' + v.map(goJSONEncode).join(',') + ']';
+  return '{' + Object.keys(v).sort(goCompareCodePoints).map((k) => goJSONString(k) + ':' + goJSONEncode(v[k])).join(',') + '}';
+}
+
 // ── facade type checks (host: synchronous TypeError "notify.send: ...") ──
 function notifyTypeError(msg) { return typeError('notify.send: ' + msg); }
-// exportJSON: undefined / null → absent; not serializable (cycle, BigInt, too deep) → TypeError
-function notifyExport(v, field) {
-  try {
-    return exportValue(v);
-  } catch (e) {
-    throw notifyTypeError(field + ' is not JSON-serializable');
-  }
-}
+// Text fields must be primitive strings (host CF6: checked before any JSON export, so a String object or an
+// object with toJSON is refused instead of being turned into a string); undefined / null → absent
 function notifyStringField(v, field) {
   if (v === undefined || v === null) return '';
-  const x = notifyExport(v, field);
-  if (typeof x !== 'string') throw notifyTypeError(field + ' must be a string');
-  return x;
+  if (typeof v !== 'string') throw notifyTypeError(field + ' must be a string');
+  return v;
 }
+const NOTIFY_MAX_WALK = 1000000; // exportJSONMaxValues: array elements read for buttons, all levels together
+// The elements of a JS array (read by index, holes are undefined), or null when v is not an array. The button
+// structure is read directly (no JSON round trip, so a toJSON on the arrays does nothing).
+function notifyElements(walk, v) {
+  if (!Array.isArray(v)) return null;
+  const n = Math.trunc(Number(v.length)) || 0;
+  if (n > NOTIFY_MAX_WALK) throw notifyTypeError('buttons is not JSON-serializable');
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    if (++walk.count > NOTIFY_MAX_WALK) throw notifyTypeError('buttons is not JSON-serializable');
+    out.push(v[i]);
+  }
+  return out;
+}
+// One button object: label / url / action primitive strings (absent / null = ""); data any JSON value (absent /
+// null / exports to nothing = no data). Any non-function object counts as a button object (an array inside a
+// row too).
 function notifyButton(x) {
-  if (x === null || typeof x !== 'object' || Array.isArray(x)) throw notifyTypeError('each button must be an object');
-  const str = function (key) {
-    const v = Object.prototype.hasOwnProperty.call(x, key) ? x[key] : null;
-    if (v === null) return '';
-    if (typeof v !== 'string') throw notifyTypeError('button ' + key + ' must be a string');
-    return v;
+  if (x === null || typeof x !== 'object') throw notifyTypeError('each button must be an object');
+  const b = {
+    label: notifyStringField(x.label, 'button label'),
+    url: notifyStringField(x.url, 'button url'),
+    action: notifyStringField(x.action, 'button action'),
+    data: null,
   };
-  const b = { label: str('label'), url: str('url'), action: str('action'), data: null };
-  if (Object.prototype.hasOwnProperty.call(x, 'data') && x.data !== null) {
-    // Go encoding/json (SetEscapeHTML(false)) still escapes U+2028 / U+2029
-    b.data = JSON.stringify(x.data).replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029');
+  const d = x.data;
+  if (d !== undefined && d !== null) {
+    let ex;
+    try {
+      ex = exportValue(d);
+    } catch (e) {
+      throw notifyTypeError('button data is not JSON-serializable');
+    }
+    if (ex !== null) b.data = goJSONEncode(ex);
   }
   return b;
 }
 function notifyButtons(v) {
   const shape = 'buttons must be an array of button objects or an array of button rows';
   if (v === undefined || v === null) return [];
-  const arr = notifyExport(v, 'buttons');
-  if (!Array.isArray(arr)) throw notifyTypeError(shape);
+  const walk = { count: 0 };
+  const arr = notifyElements(walk, v);
+  if (arr === null) throw notifyTypeError(shape);
   if (arr.length === 0) return [];
   if (Array.isArray(arr[0])) {
-    return arr.map(function (row) {
-      if (!Array.isArray(row)) throw notifyTypeError(shape);
+    return arr.map(function (r) {
+      const row = notifyElements(walk, r);
+      if (row === null) throw notifyTypeError(shape);
       return row.map(notifyButton);
     });
   }
@@ -1096,6 +1379,9 @@ function notifyButtons(v) {
     if (Array.isArray(b)) throw notifyTypeError(shape);
     return notifyButton(b);
   });
+  return notifyLayoutFlat(flat);
+}
+function notifyLayoutFlat(flat) {
   const rows = [];
   for (let i = 0; i < flat.length; i += NOTIFY_AUTO_BUTTONS_PER_ROW) rows.push(flat.slice(i, i + NOTIFY_AUTO_BUTTONS_PER_ROW));
   return rows;
@@ -1109,6 +1395,16 @@ function notifyReadMessage(arg) {
     buttons: notifyButtons(arg.buttons),
   };
 }
+// The facade's own check (before the notify service is called): every action button names a declared action
+function notifyActionsDeclared(rows) {
+  return rows.every((row) => row.every((b) => b.action === '' || NOTIFY_DECLARED_ACTIONS.has(b.action)));
+}
+// Button rows as shown in the log panel
+function notifyShownButtons(rows) {
+  return rows.map((row) => row.map((b) => (b.action !== ''
+    ? { label: b.label, action: b.action, data: b.data === null ? null : JSON.parse(b.data) }
+    : { label: b.label, url: b.url })));
+}
 
 const notifySent = []; // ms timestamps of messages queued on at least one channel (rolling 60-minute window)
 
@@ -1119,6 +1415,8 @@ function buildNotify() {
     send: function (msg) {
       const m = notifyReadMessage(msg);
       return new CtxPromise(function (resolve, reject) {
+        // the facade refuses undeclared actions before the notify service sees the message (so before the title)
+        if (!notifyActionsDeclared(m.buttons)) return reject(goError(NOTIFY_REASON_UNDECLARED));
         const reason = notifyContentReason(m);
         if (reason) return reject(goError(reason));
         const now = Date.now();
@@ -1131,13 +1429,160 @@ function buildNotify() {
           prefix: '🧩 [' + manifest.name + ']', // the host puts this in front of every plugin message
           channels: NOTIFY_CHANNELS,
           title: m.title, body: m.body, image: m.image,
-          buttons: m.buttons.map((row) => row.map((b) => ({ label: b.label, url: b.url }))),
+          buttons: notifyShownButtons(m.buttons),
         };
         emitEvent('log', { level: 'info', args: [escapeLogText('[notify.send] ' + JSON.stringify(shown))], notify: shown });
         resolve(toPlugin({ queued: true, channels: NOTIFY_CHANNELS }));
       });
     },
   };
+}
+
+// ── interaction hooks (on_notify_action / on_bot_command; mirror internal/notify/actions.go + commands.go) ──
+// devrt has no Telegram: the "trigger" RPC plays the click / command with the payload it is given and reports what
+// the host would show. Checks that need a real chat (bound account, button token / message copy, one click per
+// notification) are not simulated; the manifest declaration and the clicker's permissions are.
+const ACTION_TIMEOUT_MS = 10000;             // workerActionTimeout (including await time)
+const ACTION_FEEDBACK_MAX = 200;             // actionFeedbackMax (characters)
+const INTERACT_ROLE_ADMIN = 'admin';
+
+function manifestList(key) { return Array.isArray(manifest[key]) ? manifest[key].filter((x) => x && typeof x === 'object') : []; }
+// userAllowed for a plugin button / command: every listed permission, or admin only when requires is empty
+function interactUserAllowed(user, requires) {
+  const u = user && typeof user === 'object' ? user : {};
+  const perms = Array.isArray(u.permissions) ? u.permissions : [];
+  const req = Array.isArray(requires) ? requires : [];
+  if (req.length === 0) return u.role === INTERACT_ROLE_ADMIN;
+  return req.every((p) => perms.indexOf(p) >= 0);
+}
+function goTrimSpace(s) {
+  const cps = Array.from(s);
+  let a = 0, b = cps.length;
+  while (a < b && goIsSpace(cps[a].codePointAt(0))) a++;
+  while (b > a && goIsSpace(cps[b - 1].codePointAt(0))) b--;
+  return cps.slice(a, b).join('');
+}
+function truncateRunes(s, max) {
+  const cps = Array.from(s);
+  return cps.length <= max ? s : cps.slice(0, max - 1).join('') + '…';
+}
+// feedbackText: plain text, line breaks folded into spaces, trimmed, at most 200 characters
+function interactFeedbackText(s) {
+  return truncateRunes(goTrimSpace(s.replace(/\r\n|\r|\n/g, ' ')), ACTION_FEEDBACK_MAX);
+}
+// pluginActionFeedback (R10): a string or {text: string}; anything else is "no feedback"
+function interactActionFeedback(v) {
+  if (typeof v === 'string') return interactFeedbackText(v);
+  if (v && typeof v === 'object' && !Array.isArray(v) && typeof v.text === 'string') return interactFeedbackText(v.text);
+  return '';
+}
+// pluginFailureReason: what the user sees when the plugin call itself failed
+function interactFailure(e) {
+  return e && e.devrtTimeout ? '插件没有响应' : '插件出错';
+}
+// replyButtons / replyButton (on the exported reply): same two layouts as notify.send; null = wrong shape
+function interactReplyButtons(v) {
+  if (!Array.isArray(v)) return null;
+  if (v.length === 0) return [];
+  const one = function (m) {
+    if (m === null || typeof m !== 'object' || Array.isArray(m)) return null;
+    const str = (k) => (m[k] === undefined || m[k] === null ? '' : (typeof m[k] === 'string' ? m[k] : null));
+    const b = { label: str('label'), url: str('url'), action: str('action'), data: null };
+    if (b.label === null || b.url === null || b.action === null) return null;
+    if (m.data !== undefined && m.data !== null) b.data = goJSONEncode(m.data);
+    return b;
+  };
+  if (Array.isArray(v[0])) {
+    const rows = [];
+    for (const r of v) {
+      if (!Array.isArray(r)) return null;
+      const row = r.map(one);
+      if (row.some((b) => b === null)) return null;
+      rows.push(row);
+    }
+    return rows;
+  }
+  const flat = v.map(one);
+  return flat.some((b) => b === null) ? null : notifyLayoutFlat(flat);
+}
+// pluginCommandReply (R10): {reply: null} = nothing to send ("已处理"), {error} = invalid reply ("插件出错"),
+// {reply: {body, buttons, text?}} = the message sent back (body is FC-Markdown; a string reply is escaped)
+function interactCommandReply(v) {
+  let body = '', buttons = [], text;
+  if (v === null) return { reply: null };
+  if (typeof v === 'string') {
+    if (goIsBlank(v)) return { reply: null };
+    body = fcmdEscape(v);
+    text = v;
+  } else if (typeof v === 'object' && !Array.isArray(v)) {
+    if (v.body !== undefined && v.body !== null && typeof v.body !== 'string') return { error: 'body must be a string' };
+    body = typeof v.body === 'string' ? v.body : '';
+    if (v.buttons !== undefined && v.buttons !== null) {
+      const rows = interactReplyButtons(v.buttons);
+      if (rows === null) return { error: 'buttons shape' };
+      buttons = rows;
+    }
+    if (goIsBlank(body) && buttons.length === 0) return { reply: null };
+  } else {
+    return { error: 'reply must be a string or {body, buttons}' };
+  }
+  const reason = notifyBodyReason({ body, image: '', buttons });
+  if (reason) return { error: reason };
+  return { reply: { body, buttons, text } };
+}
+
+// trigger on_notify_action / on_bot_command: reply {ok, hook, ...outcome}; also logged to the panel
+function triggerInteraction(hook, fn, data, reply) {
+  const report = function (out) {
+    const r = Object.assign({ ok: true, hook }, out);
+    log.info('[devrt] ' + hook + ' → ' + JSON.stringify(out));
+    reply(r);
+  };
+  const payload = data && typeof data === 'object' && !Array.isArray(data) ? data : {};
+  if (hook === 'on_notify_action') {
+    const name = typeof payload.action === 'string' ? payload.action : '';
+    const decl = manifestList('actions').find((a) => a.name === name);
+    if (!decl) {
+      // DispatchAction precondition: the manifest no longer declares it → plugin not called
+      return report({ answer: '处理中…', line: '✗ 失败：插件不可用', called: false,
+        error: 'manifest.actions does not declare "' + name + '"' });
+    }
+    if (!interactUserAllowed(payload.user, decl.requires)) {
+      return report({ answer: '没有权限', line: null, called: false });
+    }
+    invokeWithTimeout(fn, [toPlugin(payload)], ACTION_TIMEOUT_MS).then(function (res) {
+      let out;
+      try { out = exportValue(res); } catch (e) {
+        return report({ answer: '处理中…', line: '✗ 失败：插件出错', called: true, error: errString(e).replace(/^Error: /, '') });
+      }
+      const text = interactActionFeedback(out) || '已处理';
+      report({ answer: '处理中…', line: '✓ ' + text, called: true, result: out });
+    }, function (e) {
+      report({ answer: '处理中…', line: '✗ 失败：' + interactFailure(e), called: true,
+        error: e && e.devrtTimeout ? ERR_RUNTIME_TIMEOUT : errString(e) });
+    });
+    return;
+  }
+  // on_bot_command
+  const chat = payload.chat && typeof payload.chat === 'object' ? payload.chat : {};
+  if (chat.type !== 'private') return report({ ignored: true, reply: null, called: false, error: 'commands are handled in private chats only' });
+  const short = typeof payload.command === 'string' ? payload.command : '';
+  const decl = manifestList('commands').find((c) => c.name === short);
+  if (!decl) return report({ reply: '不认识这个命令，发 /help 看看能用什么', called: false });
+  if (!interactUserAllowed(payload.user, decl.requires)) return report({ reply: '没有权限', called: false });
+  invokeWithTimeout(fn, [toPlugin(payload)], ACTION_TIMEOUT_MS).then(function (res) {
+    let out;
+    try { out = exportValue(res); } catch (e) {
+      return report({ reply: '插件出错', called: true, error: errString(e).replace(/^Error: /, '') });
+    }
+    const r = interactCommandReply(out);
+    if (r.error) return report({ reply: '插件出错', called: true, error: 'invalid reply: ' + r.error, result: out });
+    if (r.reply === null) return report({ reply: '已处理', called: true, result: out });
+    report({ reply: { prefix: '🧩 [' + manifest.name + ']', body: r.reply.body, text: r.reply.text,
+      buttons: notifyShownButtons(r.reply.buttons) }, called: true, result: out });
+  }, function (e) {
+    report({ reply: interactFailure(e), called: true, error: e && e.devrtTimeout ? ERR_RUNTIME_TIMEOUT : errString(e) });
+  });
 }
 
 const anime = {
@@ -1243,9 +1688,143 @@ const HOST_PERMISSIONS = [
 const HOST_HOOKS = [
   'on_episode_found', 'on_download_done', 'on_download_failed', 'on_link_done', 'on_link_failed',
   'on_task_completed', 'on_task_reopened', 'on_episode_acquired', 'on_task_subscribed', 'should_download',
+  'on_notify_action', 'on_bot_command',
 ];
+// Mirror of auth.IsValidPermission (internal/module/auth/permissions.go allPerms): the FC user permission keys
+// that manifest.actions[].requires / manifest.commands[].requires may list
+const FC_PERMISSIONS = [
+  'settings:write', 'logs:read', 'mikan:refresh', 'series:recompute', 'subscribe:auto', 'subscribe:any',
+  'users:manage', 'resources:delete', 'sites:write', 'servers:write', 'downloads:write', 'linkrules:write',
+  'plugins:manage', 'manual_link:write', 'progress:write',
+];
+// manifest.go: actions / commands rules (notify stage D, R1)
+const MANIFEST_MAX_ACTIONS = 20;
+const MANIFEST_MAX_COMMANDS = 20;
+const MAX_BOT_COMMAND_LEN = 32;          // a plugin command's full name (bytes)
+const MAX_ACTION_LABEL_RUNES = 64;
+const MAX_COMMAND_DESCRIPTION_RUNES = 256;
+const ACTION_NAME_RE = /^[a-z0-9_]{1,32}$/;
+const COMMAND_NAME_RE = /^[a-z0-9]{1,32}$/;
+
+// Go strconv.Quote (%q): printable characters stay, the rest is escaped
+function goQuote(s) {
+  let out = '"';
+  for (const ch of s) {
+    const cp = ch.codePointAt(0);
+    if (ch === '"' || ch === '\\') out += '\\' + ch;
+    else if (cp === 7) out += '\\a';
+    else if (cp === 8) out += '\\b';
+    else if (cp === 12) out += '\\f';
+    else if (cp === 10) out += '\\n';
+    else if (cp === 13) out += '\\r';
+    else if (cp === 9) out += '\\t';
+    else if (cp === 11) out += '\\v';
+    else if (cp === 0x20 || /[\p{L}\p{M}\p{N}\p{P}\p{S}]/u.test(ch)) out += ch;
+    else if (cp < 0x80) out += '\\x' + cp.toString(16).padStart(2, '0');
+    else if (cp >= 0xd800 && cp <= 0xdfff) out += '\ufffd'; // JSON decoding already made a lone surrogate U+FFFD
+    else if (cp <= 0xffff) out += '\\u' + cp.toString(16).padStart(4, '0');
+    else out += '\\U' + cp.toString(16).padStart(8, '0');
+  }
+  return out + '"';
+}
+function goRuneCount(s) { return Array.from(s).length; }
+
+// encoding/json decode errors for the actions / commands fields (Parse reports the first one, in document order,
+// before any other check). Only these two fields are type-checked here; JSON null is the zero value (no error).
+function manifestJSONKind(v) {
+  if (Array.isArray(v)) return 'array';
+  if (typeof v === 'boolean') return 'bool';
+  return typeof v; // object / string / number
+}
+function manifestDecodeError(m) {
+  const specs = {
+    actions: { slice: '[]plugin.ManifestAction', elem: 'plugin.ManifestAction', struct: 'ManifestAction', fields: { name: 'string', label: 'string', requires: '[]string' } },
+    commands: { slice: '[]plugin.ManifestCommand', elem: 'plugin.ManifestCommand', struct: 'ManifestCommand', fields: { name: 'string', description: 'string', requires: '[]string' } },
+  };
+  const bad = (v, where, type) => 'parse manifest json: json: cannot unmarshal ' + manifestJSONKind(v) + ' into Go struct field ' + where + ' of type ' + type;
+  for (const key of Object.keys(m)) {
+    const spec = specs[key];
+    const list = m[key];
+    if (!spec || list === null) continue;
+    if (!Array.isArray(list)) return bad(list, 'Manifest.' + key, spec.slice);
+    for (const el of list) {
+      if (el === null) continue;
+      if (typeof el !== 'object' || Array.isArray(el)) return bad(el, 'Manifest.' + key, spec.elem);
+      for (const f of Object.keys(el)) {
+        const type = spec.fields[f];
+        const v = el[f];
+        if (!type || v === null) continue;
+        const where = spec.struct + '.' + key + '.' + f;
+        if (type === 'string' && typeof v !== 'string') return bad(v, where, 'string');
+        if (type === '[]string') {
+          if (!Array.isArray(v)) return bad(v, where, '[]string');
+          for (const item of v) if (item !== null && typeof item !== 'string') return bad(item, where, 'string');
+        }
+      }
+    }
+  }
+  return null;
+}
+function manifestRuneLen(field, s, max) {
+  const n = goRuneCount(s);
+  if (n === 0) return field + ' is required';
+  if (n > max) return field + ' is ' + n + ' characters, max ' + max;
+  return null;
+}
+function manifestRequires(field, requires) {
+  for (const p of requires || []) {
+    const key = p === null ? '' : p;
+    if (FC_PERMISSIONS.indexOf(key) < 0) return field + ' contains unknown permission ' + goQuote(key);
+  }
+  return null;
+}
+// validateActions / validateCommands + the rule that declaring them needs api.notify.send and the matching hook
+function manifestInteractionError(m) {
+  const str = (v) => (typeof v === 'string' ? v : '');
+  const actions = Array.isArray(m.actions) ? m.actions.map((a) => a || {}) : [];
+  const commands = Array.isArray(m.commands) ? m.commands.map((c) => c || {}) : [];
+  if (actions.length > MANIFEST_MAX_ACTIONS) return 'manifest.actions has ' + actions.length + ' entries, max ' + MANIFEST_MAX_ACTIONS;
+  const seenA = new Map();
+  for (let i = 0; i < actions.length; i++) {
+    const name = str(actions[i].name);
+    if (!ACTION_NAME_RE.test(name)) return 'manifest.actions[' + i + '].name ' + goQuote(name) + ' invalid: must match ' + ACTION_NAME_RE.source;
+    if (seenA.has(name)) return 'manifest.actions[' + i + '].name ' + goQuote(name) + ' duplicates manifest.actions[' + seenA.get(name) + ']';
+    seenA.set(name, i);
+    const e = manifestRuneLen('manifest.actions[' + i + '].label', str(actions[i].label), MAX_ACTION_LABEL_RUNES) ||
+      manifestRequires('manifest.actions[' + i + '].requires', actions[i].requires);
+    if (e) return e;
+  }
+  if (commands.length > MANIFEST_MAX_COMMANDS) return 'manifest.commands has ' + commands.length + ' entries, max ' + MANIFEST_MAX_COMMANDS;
+  const seenC = new Map();
+  const pluginName = str(m.name);
+  for (let i = 0; i < commands.length; i++) {
+    const name = str(commands[i].name);
+    if (!COMMAND_NAME_RE.test(name)) return 'manifest.commands[' + i + '].name ' + goQuote(name) + ' invalid: must match ' + COMMAND_NAME_RE.source;
+    if (seenC.has(name)) return 'manifest.commands[' + i + '].name ' + goQuote(name) + ' duplicates manifest.commands[' + seenC.get(name) + ']';
+    seenC.set(name, i);
+    const full = commandFullName(pluginName, name);
+    if (utf8Len(full) > MAX_BOT_COMMAND_LEN) {
+      return 'manifest.commands[' + i + ']: full command name ' + goQuote(full) + ' is ' + utf8Len(full) + ' characters, max ' + MAX_BOT_COMMAND_LEN;
+    }
+    const e = manifestRuneLen('manifest.commands[' + i + '].description', str(commands[i].description), MAX_COMMAND_DESCRIPTION_RUNES) ||
+      manifestRequires('manifest.commands[' + i + '].requires', commands[i].requires);
+    if (e) return e;
+  }
+  const perms = m.permissions || [], hooks = m.hooks || [];
+  if (actions.length > 0 && (perms.indexOf('api.notify.send') < 0 || hooks.indexOf('on_notify_action') < 0)) {
+    return 'manifest.actions requires permission "api.notify.send" and hook "on_notify_action"';
+  }
+  if (commands.length > 0 && (perms.indexOf('api.notify.send') < 0 || hooks.indexOf('on_bot_command') < 0)) {
+    return 'manifest.commands requires permission "api.notify.send" and hook "on_bot_command"';
+  }
+  return null;
+}
+// CommandFullName (R1): the plugin name with - → _, then _ and the short name (what users type after /)
+function commandFullName(pluginName, command) { return pluginName.replace(/-/g, '_') + '_' + command; }
 
 function validateManifest(m) {
+  const decodeErr = manifestDecodeError(m);
+  if (decodeErr) return decodeErr;
   const unknownPerms = (m.permissions || []).filter((p) => HOST_PERMISSIONS.indexOf(p) < 0);
   if (unknownPerms.length) {
     return 'manifest.permissions contains unknown entries [' + unknownPerms.join(' ') + ']; valid keys are [' + HOST_PERMISSIONS.join(' ') + ']';
@@ -1257,7 +1836,7 @@ function validateManifest(m) {
   if (m.ui && m.ui.entry && (m.permissions || []).indexOf('ui.embed') < 0) {
     return 'manifest.ui.entry requires "ui.embed" in permissions';
   }
-  return null;
+  return manifestInteractionError(m);
 }
 
 // Mirror of host internal/plugin/permission.go hookToPerm (2026-09-24 hard rename, no aliases)
@@ -1272,6 +1851,9 @@ const HOOK_PERM_REQ = {
   on_task_reopened: 'hook.task.read',
   on_task_subscribed: 'hook.task.read',
   should_download: 'hook.download.write',
+  // notify interaction (stage D): called by the host through Manager.DispatchAction / DispatchCommand, not bridged
+  on_notify_action: 'api.notify.send',
+  on_bot_command: 'api.notify.send',
 };
 
 const plugin = {
@@ -1649,6 +2231,10 @@ rl.on('line', function (line) {
       case 'trigger': {
         const fn = hooks[params.hook];
         if (!fn) return fail('hook not registered: ' + params.hook);
+        if (params.hook === 'on_notify_action' || params.hook === 'on_bot_command') {
+          triggerInteraction(params.hook, fn, params.data, reply);
+          break;
+        }
         const isFilter = params.hook === 'should_download';
         invokeWithTimeout(fn, [toPlugin(params.data || {})], isFilter ? FILTER_TIMEOUT_MS : HOOK_TIMEOUT_MS).then(function (result) {
           // should_download is the veto hook — echo what the host would conclude. The host decides on

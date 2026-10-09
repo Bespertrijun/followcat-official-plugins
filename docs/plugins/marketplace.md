@@ -35,6 +35,7 @@
    - Registry 声明的 entry 信息（name / version / source_url / permissions / hooks）
    - 实际从 zip 解析出的 manifest 内容
    - **manifest_diff**：对比两者的差异
+   - 插件声明的通知交互：动作按钮（名字、说明、谁能点）与 Telegram bot 命令（`/完整名`、说明、谁能用）；升级时标出新增、删除与权限要求的变化
 
 ### sha256 与 manifest 一致性说明
 
@@ -60,6 +61,10 @@
 ### zip 结构要求
 
 zip 内每个条目的路径都要安全（不能有 `..`、绝对路径），归一化之后**不能重名**（例如同时有 `manifest.json` 和 `./manifest.json`、或同名文件出现两次）——有任何重复，整个 zip 直接被拒绝（`duplicate entry "..."`），预览与安装都一样。`ui/` 下只允许界面资源（`.html` `.css` `.js` `.json` `.map` `.txt`、`.svg` `.png` `.jpg` `.jpeg` `.gif` `.webp`、`.woff` `.woff2`）；单文件 ≤ 5 MiB、解压总大小 ≤ 20 MiB、最多 200 个条目。
+
+### 同名插件只能装一个
+
+已经装了一个 `name` 相同、但来源（`source_url`）不同的插件时，预览和安装都会被拒（HTTP 409）：「已安装同名插件「<name>」（来自 <已装那个的 source_url>），请先卸载它」。先卸载旧的再装。同一来源的升级 / 重装不受影响。
 
 ---
 

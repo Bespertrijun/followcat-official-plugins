@@ -56,6 +56,8 @@
 | `zip_size` | `int64` | 可选 | 预估字节数（advisory），实际以 Content-Length 为准 |
 | `published_at` | `string` | 可选 | RFC3339 时间戳 |
 
+entry 只有上表这些字段。manifest.json 里的其它字段——`ui`、通知交互的 `actions` / `commands` 等——**不进 entry**：宿主解析 index.json 是严格的，entry 里多一个它不认识的字段，**整个源**都会解析失败。宿主安装 / 升级时从 zip 里的 manifest.json 读这些字段（预览对话框里展示插件声明的动作与命令）；本仓 `scripts/build.py` 生成的 entry 也只写上表的字段。
+
 ### 一个插件只能有一条 entry
 
 index 只描述每个插件**当前发布的那一个版本**：同一个 `name` 在 `entries` 里出现多次，FollowCat 解析这个源时**整个源失败**（与其它字段校验一样严格），报错点名重复的插件：

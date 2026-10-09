@@ -1,0 +1,1779 @@
+[
+ {
+  "name": "no actions no commands ok",
+  "manifest": {
+   "name": "devrt-notify",
+   "version": "0.0.1",
+   "source_url": "https://example.com/x",
+   "permissions": [
+    "api.notify.send"
+   ],
+   "hooks": [
+    "on_notify_action",
+    "on_bot_command"
+   ]
+  },
+  "want": ""
+ },
+ {
+  "name": "actions and commands ok",
+  "manifest": {
+   "name": "devrt-notify",
+   "version": "0.0.1",
+   "source_url": "https://example.com/x",
+   "permissions": [
+    "api.notify.send"
+   ],
+   "hooks": [
+    "on_notify_action",
+    "on_bot_command"
+   ],
+   "actions": [
+    {
+     "name": "retry",
+     "label": "重试"
+    },
+    {
+     "name": "ack",
+     "label": "知道了",
+     "requires": [
+      "logs:read",
+      "settings:write"
+     ]
+    }
+   ],
+   "commands": [
+    {
+     "name": "status",
+     "description": "看状态"
+    },
+    {
+     "name": "echo",
+     "description": "回显",
+     "requires": [
+      "subscribe:any"
+     ]
+    }
+   ]
+  },
+  "want": ""
+ },
+ {
+  "name": "empty arrays ok",
+  "manifest": {
+   "name": "devrt-notify",
+   "version": "0.0.1",
+   "source_url": "https://example.com/x",
+   "permissions": [
+    "api.notify.send"
+   ],
+   "hooks": [
+    "on_notify_action",
+    "on_bot_command"
+   ],
+   "actions": [],
+   "commands": []
+  },
+  "want": ""
+ },
+ {
+  "name": "null arrays ok",
+  "manifest": {
+   "name": "devrt-notify",
+   "version": "0.0.1",
+   "source_url": "https://example.com/x",
+   "permissions": [
+    "api.notify.send"
+   ],
+   "hooks": [
+    "on_notify_action",
+    "on_bot_command"
+   ],
+   "actions": null,
+   "commands": null
+  },
+  "want": ""
+ },
+ {
+  "name": "actions need api.notify.send",
+  "manifest": {
+   "name": "devrt-notify",
+   "version": "0.0.1",
+   "source_url": "https://example.com/x",
+   "permissions": [],
+   "hooks": [
+    "on_notify_action",
+    "on_bot_command"
+   ],
+   "actions": [
+    {
+     "name": "retry",
+     "label": "重试"
+    }
+   ]
+  },
+  "want": "manifest.actions requires permission \"api.notify.send\" and hook \"on_notify_action\""
+ },
+ {
+  "name": "actions need hook",
+  "manifest": {
+   "name": "devrt-notify",
+   "version": "0.0.1",
+   "source_url": "https://example.com/x",
+   "permissions": [
+    "api.notify.send"
+   ],
+   "hooks": [
+    "on_bot_command"
+   ],
+   "actions": [
+    {
+     "name": "retry",
+     "label": "重试"
+    }
+   ]
+  },
+  "want": "manifest.actions requires permission \"api.notify.send\" and hook \"on_notify_action\""
+ },
+ {
+  "name": "commands need api.notify.send",
+  "manifest": {
+   "name": "devrt-notify",
+   "version": "0.0.1",
+   "source_url": "https://example.com/x",
+   "permissions": [
+    "hook.task.read"
+   ],
+   "hooks": [
+    "on_bot_command"
+   ],
+   "commands": [
+    {
+     "name": "status",
+     "description": "看状态"
+    }
+   ]
+  },
+  "want": "manifest.commands requires permission \"api.notify.send\" and hook \"on_bot_command\""
+ },
+ {
+  "name": "commands need hook",
+  "manifest": {
+   "name": "devrt-notify",
+   "version": "0.0.1",
+   "source_url": "https://example.com/x",
+   "permissions": [
+    "api.notify.send"
+   ],
+   "hooks": [
+    "on_notify_action"
+   ],
+   "commands": [
+    {
+     "name": "status",
+     "description": "看状态"
+    }
+   ]
+  },
+  "want": "manifest.commands requires permission \"api.notify.send\" and hook \"on_bot_command\""
+ },
+ {
+  "name": "hooks without actions ok",
+  "manifest": {
+   "name": "devrt-notify",
+   "version": "0.0.1",
+   "source_url": "https://example.com/x",
+   "permissions": [
+    "api.notify.send"
+   ],
+   "hooks": [
+    "on_notify_action",
+    "on_bot_command"
+   ]
+  },
+  "want": ""
+ },
+ {
+  "name": "action name uppercase",
+  "manifest": {
+   "name": "devrt-notify",
+   "version": "0.0.1",
+   "source_url": "https://example.com/x",
+   "permissions": [
+    "api.notify.send"
+   ],
+   "hooks": [
+    "on_notify_action",
+    "on_bot_command"
+   ],
+   "actions": [
+    {
+     "name": "Retry",
+     "label": "重试"
+    }
+   ]
+  },
+  "want": "manifest.actions[0].name \"Retry\" invalid: must match ^[a-z0-9_]{1,32}$"
+ },
+ {
+  "name": "action name dash",
+  "manifest": {
+   "name": "devrt-notify",
+   "version": "0.0.1",
+   "source_url": "https://example.com/x",
+   "permissions": [
+    "api.notify.send"
+   ],
+   "hooks": [
+    "on_notify_action",
+    "on_bot_command"
+   ],
+   "actions": [
+    {
+     "name": "re-try",
+     "label": "重试"
+    }
+   ]
+  },
+  "want": "manifest.actions[0].name \"re-try\" invalid: must match ^[a-z0-9_]{1,32}$"
+ },
+ {
+  "name": "action name empty",
+  "manifest": {
+   "name": "devrt-notify",
+   "version": "0.0.1",
+   "source_url": "https://example.com/x",
+   "permissions": [
+    "api.notify.send"
+   ],
+   "hooks": [
+    "on_notify_action",
+    "on_bot_command"
+   ],
+   "actions": [
+    {
+     "name": "",
+     "label": "重试"
+    }
+   ]
+  },
+  "want": "manifest.actions[0].name \"\" invalid: must match ^[a-z0-9_]{1,32}$"
+ },
+ {
+  "name": "action name missing",
+  "manifest": {
+   "name": "devrt-notify",
+   "version": "0.0.1",
+   "source_url": "https://example.com/x",
+   "permissions": [
+    "api.notify.send"
+   ],
+   "hooks": [
+    "on_notify_action",
+    "on_bot_command"
+   ],
+   "actions": [
+    {
+     "label": "x"
+    }
+   ]
+  },
+  "want": "manifest.actions[0].name \"\" invalid: must match ^[a-z0-9_]{1,32}$"
+ },
+ {
+  "name": "action name underscore ok",
+  "manifest": {
+   "name": "devrt-notify",
+   "version": "0.0.1",
+   "source_url": "https://example.com/x",
+   "permissions": [
+    "api.notify.send"
+   ],
+   "hooks": [
+    "on_notify_action",
+    "on_bot_command"
+   ],
+   "actions": [
+    {
+     "name": "re_try_2",
+     "label": "重试"
+    }
+   ]
+  },
+  "want": ""
+ },
+ {
+  "name": "action name 32 ok",
+  "manifest": {
+   "name": "devrt-notify",
+   "version": "0.0.1",
+   "source_url": "https://example.com/x",
+   "permissions": [
+    "api.notify.send"
+   ],
+   "hooks": [
+    "on_notify_action",
+    "on_bot_command"
+   ],
+   "actions": [
+    {
+     "name": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "label": "重试"
+    }
+   ]
+  },
+  "want": ""
+ },
+ {
+  "name": "action name 33",
+  "manifest": {
+   "name": "devrt-notify",
+   "version": "0.0.1",
+   "source_url": "https://example.com/x",
+   "permissions": [
+    "api.notify.send"
+   ],
+   "hooks": [
+    "on_notify_action",
+    "on_bot_command"
+   ],
+   "actions": [
+    {
+     "name": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "label": "重试"
+    }
+   ]
+  },
+  "want": "manifest.actions[0].name \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\" invalid: must match ^[a-z0-9_]{1,32}$"
+ },
+ {
+  "name": "action name non-ascii",
+  "manifest": {
+   "name": "devrt-notify",
+   "version": "0.0.1",
+   "source_url": "https://example.com/x",
+   "permissions": [
+    "api.notify.send"
+   ],
+   "hooks": [
+    "on_notify_action",
+    "on_bot_command"
+   ],
+   "actions": [
+    {
+     "name": "重试",
+     "label": "重试"
+    }
+   ]
+  },
+  "want": "manifest.actions[0].name \"重试\" invalid: must match ^[a-z0-9_]{1,32}$"
+ },
+ {
+  "name": "action name with newline",
+  "manifest": {
+   "name": "devrt-notify",
+   "version": "0.0.1",
+   "source_url": "https://example.com/x",
+   "permissions": [
+    "api.notify.send"
+   ],
+   "hooks": [
+    "on_notify_action",
+    "on_bot_command"
+   ],
+   "actions": [
+    {
+     "name": "a\n",
+     "label": "重试"
+    }
+   ]
+  },
+  "want": "manifest.actions[0].name \"a\\n\" invalid: must match ^[a-z0-9_]{1,32}$"
+ },
+ {
+  "name": "action name nbsp",
+  "manifest": {
+   "name": "devrt-notify",
+   "version": "0.0.1",
+   "source_url": "https://example.com/x",
+   "permissions": [
+    "api.notify.send"
+   ],
+   "hooks": [
+    "on_notify_action",
+    "on_bot_command"
+   ],
+   "actions": [
+    {
+     "name": "a\u00a0",
+     "label": "重试"
+    }
+   ]
+  },
+  "want": "manifest.actions[0].name \"a\\u00a0\" invalid: must match ^[a-z0-9_]{1,32}$"
+ },
+ {
+  "name": "action duplicate",
+  "manifest": {
+   "name": "devrt-notify",
+   "version": "0.0.1",
+   "source_url": "https://example.com/x",
+   "permissions": [
+    "api.notify.send"
+   ],
+   "hooks": [
+    "on_notify_action",
+    "on_bot_command"
+   ],
+   "actions": [
+    {
+     "name": "retry",
+     "label": "重试"
+    },
+    {
+     "name": "ack",
+     "label": "x"
+    },
+    {
+     "name": "retry",
+     "label": "again"
+    }
+   ]
+  },
+  "want": "manifest.actions[2].name \"retry\" duplicates manifest.actions[0]"
+ },
+ {
+  "name": "action label empty",
+  "manifest": {
+   "name": "devrt-notify",
+   "version": "0.0.1",
+   "source_url": "https://example.com/x",
+   "permissions": [
+    "api.notify.send"
+   ],
+   "hooks": [
+    "on_notify_action",
+    "on_bot_command"
+   ],
+   "actions": [
+    {
+     "name": "retry",
+     "label": ""
+    }
+   ]
+  },
+  "want": "manifest.actions[0].label is required"
+ },
+ {
+  "name": "action label missing",
+  "manifest": {
+   "name": "devrt-notify",
+   "version": "0.0.1",
+   "source_url": "https://example.com/x",
+   "permissions": [
+    "api.notify.send"
+   ],
+   "hooks": [
+    "on_notify_action",
+    "on_bot_command"
+   ],
+   "actions": [
+    {
+     "name": "retry"
+    }
+   ]
+  },
+  "want": "manifest.actions[0].label is required"
+ },
+ {
+  "name": "action label 64 runes ok",
+  "manifest": {
+   "name": "devrt-notify",
+   "version": "0.0.1",
+   "source_url": "https://example.com/x",
+   "permissions": [
+    "api.notify.send"
+   ],
+   "hooks": [
+    "on_notify_action",
+    "on_bot_command"
+   ],
+   "actions": [
+    {
+     "name": "retry",
+     "label": "重重重重重重重重重重重重重重重重重重重重重重重重重重重重重重重重重重重重重重重重重重重重重重重重重重重重重重重重重重重重重重重重"
+    }
+   ]
+  },
+  "want": ""
+ },
+ {
+  "name": "action label 65 runes",
+  "manifest": {
+   "name": "devrt-notify",
+   "version": "0.0.1",
+   "source_url": "https://example.com/x",
+   "permissions": [
+    "api.notify.send"
+   ],
+   "hooks": [
+    "on_notify_action",
+    "on_bot_command"
+   ],
+   "actions": [
+    {
+     "name": "retry",
+     "label": "重重重重重重重重重重重重重重重重重重重重重重重重重重重重重重重重重重重重重重重重重重重重重重重重重重重重重重重重重重重重重重重重重"
+    }
+   ]
+  },
+  "want": "manifest.actions[0].label is 65 characters, max 64"
+ },
+ {
+  "name": "action label emoji 64 ok",
+  "manifest": {
+   "name": "devrt-notify",
+   "version": "0.0.1",
+   "source_url": "https://example.com/x",
+   "permissions": [
+    "api.notify.send"
+   ],
+   "hooks": [
+    "on_notify_action",
+    "on_bot_command"
+   ],
+   "actions": [
+    {
+     "name": "retry",
+     "label": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀"
+    }
+   ]
+  },
+  "want": ""
+ },
+ {
+  "name": "action label blank ok",
+  "manifest": {
+   "name": "devrt-notify",
+   "version": "0.0.1",
+   "source_url": "https://example.com/x",
+   "permissions": [
+    "api.notify.send"
+   ],
+   "hooks": [
+    "on_notify_action",
+    "on_bot_command"
+   ],
+   "actions": [
+    {
+     "name": "retry",
+     "label": " "
+    }
+   ]
+  },
+  "want": ""
+ },
+ {
+  "name": "action requires unknown",
+  "manifest": {
+   "name": "devrt-notify",
+   "version": "0.0.1",
+   "source_url": "https://example.com/x",
+   "permissions": [
+    "api.notify.send"
+   ],
+   "hooks": [
+    "on_notify_action",
+    "on_bot_command"
+   ],
+   "actions": [
+    {
+     "name": "retry",
+     "label": "重试",
+     "requires": [
+      "logs:read",
+      "nope"
+     ]
+    }
+   ]
+  },
+  "want": "manifest.actions[0].requires contains unknown permission \"nope\""
+ },
+ {
+  "name": "action requires plugin permission",
+  "manifest": {
+   "name": "devrt-notify",
+   "version": "0.0.1",
+   "source_url": "https://example.com/x",
+   "permissions": [
+    "api.notify.send"
+   ],
+   "hooks": [
+    "on_notify_action",
+    "on_bot_command"
+   ],
+   "actions": [
+    {
+     "name": "retry",
+     "label": "重试",
+     "requires": [
+      "api.http"
+     ]
+    }
+   ]
+  },
+  "want": "manifest.actions[0].requires contains unknown permission \"api.http\""
+ },
+ {
+  "name": "action requires empty string",
+  "manifest": {
+   "name": "devrt-notify",
+   "version": "0.0.1",
+   "source_url": "https://example.com/x",
+   "permissions": [
+    "api.notify.send"
+   ],
+   "hooks": [
+    "on_notify_action",
+    "on_bot_command"
+   ],
+   "actions": [
+    {
+     "name": "retry",
+     "label": "重试",
+     "requires": [
+      ""
+     ]
+    }
+   ]
+  },
+  "want": "manifest.actions[0].requires contains unknown permission \"\""
+ },
+ {
+  "name": "action requires null ok",
+  "manifest": {
+   "name": "devrt-notify",
+   "version": "0.0.1",
+   "source_url": "https://example.com/x",
+   "permissions": [
+    "api.notify.send"
+   ],
+   "hooks": [
+    "on_notify_action",
+    "on_bot_command"
+   ],
+   "actions": [
+    {
+     "name": "retry",
+     "label": "重试",
+     "requires": null
+    }
+   ]
+  },
+  "want": ""
+ },
+ {
+  "name": "action requires empty ok",
+  "manifest": {
+   "name": "devrt-notify",
+   "version": "0.0.1",
+   "source_url": "https://example.com/x",
+   "permissions": [
+    "api.notify.send"
+   ],
+   "hooks": [
+    "on_notify_action",
+    "on_bot_command"
+   ],
+   "actions": [
+    {
+     "name": "retry",
+     "label": "重试",
+     "requires": []
+    }
+   ]
+  },
+  "want": ""
+ },
+ {
+  "name": "21 actions",
+  "manifest": {
+   "name": "devrt-notify",
+   "version": "0.0.1",
+   "source_url": "https://example.com/x",
+   "permissions": [
+    "api.notify.send"
+   ],
+   "hooks": [
+    "on_notify_action",
+    "on_bot_command"
+   ],
+   "actions": [
+    {
+     "name": "a0",
+     "label": "重试"
+    },
+    {
+     "name": "a1",
+     "label": "重试"
+    },
+    {
+     "name": "a2",
+     "label": "重试"
+    },
+    {
+     "name": "a3",
+     "label": "重试"
+    },
+    {
+     "name": "a4",
+     "label": "重试"
+    },
+    {
+     "name": "a5",
+     "label": "重试"
+    },
+    {
+     "name": "a6",
+     "label": "重试"
+    },
+    {
+     "name": "a7",
+     "label": "重试"
+    },
+    {
+     "name": "a8",
+     "label": "重试"
+    },
+    {
+     "name": "a9",
+     "label": "重试"
+    },
+    {
+     "name": "a10",
+     "label": "重试"
+    },
+    {
+     "name": "a11",
+     "label": "重试"
+    },
+    {
+     "name": "a12",
+     "label": "重试"
+    },
+    {
+     "name": "a13",
+     "label": "重试"
+    },
+    {
+     "name": "a14",
+     "label": "重试"
+    },
+    {
+     "name": "a15",
+     "label": "重试"
+    },
+    {
+     "name": "a16",
+     "label": "重试"
+    },
+    {
+     "name": "a17",
+     "label": "重试"
+    },
+    {
+     "name": "a18",
+     "label": "重试"
+    },
+    {
+     "name": "a19",
+     "label": "重试"
+    },
+    {
+     "name": "a20",
+     "label": "重试"
+    }
+   ]
+  },
+  "want": "manifest.actions has 21 entries, max 20"
+ },
+ {
+  "name": "20 actions ok",
+  "manifest": {
+   "name": "devrt-notify",
+   "version": "0.0.1",
+   "source_url": "https://example.com/x",
+   "permissions": [
+    "api.notify.send"
+   ],
+   "hooks": [
+    "on_notify_action",
+    "on_bot_command"
+   ],
+   "actions": [
+    {
+     "name": "a0",
+     "label": "重试"
+    },
+    {
+     "name": "a1",
+     "label": "重试"
+    },
+    {
+     "name": "a2",
+     "label": "重试"
+    },
+    {
+     "name": "a3",
+     "label": "重试"
+    },
+    {
+     "name": "a4",
+     "label": "重试"
+    },
+    {
+     "name": "a5",
+     "label": "重试"
+    },
+    {
+     "name": "a6",
+     "label": "重试"
+    },
+    {
+     "name": "a7",
+     "label": "重试"
+    },
+    {
+     "name": "a8",
+     "label": "重试"
+    },
+    {
+     "name": "a9",
+     "label": "重试"
+    },
+    {
+     "name": "a10",
+     "label": "重试"
+    },
+    {
+     "name": "a11",
+     "label": "重试"
+    },
+    {
+     "name": "a12",
+     "label": "重试"
+    },
+    {
+     "name": "a13",
+     "label": "重试"
+    },
+    {
+     "name": "a14",
+     "label": "重试"
+    },
+    {
+     "name": "a15",
+     "label": "重试"
+    },
+    {
+     "name": "a16",
+     "label": "重试"
+    },
+    {
+     "name": "a17",
+     "label": "重试"
+    },
+    {
+     "name": "a18",
+     "label": "重试"
+    },
+    {
+     "name": "a19",
+     "label": "重试"
+    }
+   ]
+  },
+  "want": ""
+ },
+ {
+  "name": "21 actions first invalid",
+  "manifest": {
+   "name": "devrt-notify",
+   "version": "0.0.1",
+   "source_url": "https://example.com/x",
+   "permissions": [
+    "api.notify.send"
+   ],
+   "hooks": [
+    "on_notify_action",
+    "on_bot_command"
+   ],
+   "actions": [
+    {
+     "name": "BAD",
+     "label": "重试"
+    },
+    {
+     "name": "a0",
+     "label": "重试"
+    },
+    {
+     "name": "a1",
+     "label": "重试"
+    },
+    {
+     "name": "a2",
+     "label": "重试"
+    },
+    {
+     "name": "a3",
+     "label": "重试"
+    },
+    {
+     "name": "a4",
+     "label": "重试"
+    },
+    {
+     "name": "a5",
+     "label": "重试"
+    },
+    {
+     "name": "a6",
+     "label": "重试"
+    },
+    {
+     "name": "a7",
+     "label": "重试"
+    },
+    {
+     "name": "a8",
+     "label": "重试"
+    },
+    {
+     "name": "a9",
+     "label": "重试"
+    },
+    {
+     "name": "a10",
+     "label": "重试"
+    },
+    {
+     "name": "a11",
+     "label": "重试"
+    },
+    {
+     "name": "a12",
+     "label": "重试"
+    },
+    {
+     "name": "a13",
+     "label": "重试"
+    },
+    {
+     "name": "a14",
+     "label": "重试"
+    },
+    {
+     "name": "a15",
+     "label": "重试"
+    },
+    {
+     "name": "a16",
+     "label": "重试"
+    },
+    {
+     "name": "a17",
+     "label": "重试"
+    },
+    {
+     "name": "a18",
+     "label": "重试"
+    },
+    {
+     "name": "a19",
+     "label": "重试"
+    }
+   ]
+  },
+  "want": "manifest.actions has 21 entries, max 20"
+ },
+ {
+  "name": "command name underscore",
+  "manifest": {
+   "name": "devrt-notify",
+   "version": "0.0.1",
+   "source_url": "https://example.com/x",
+   "permissions": [
+    "api.notify.send"
+   ],
+   "hooks": [
+    "on_notify_action",
+    "on_bot_command"
+   ],
+   "commands": [
+    {
+     "name": "a_b",
+     "description": "看状态"
+    }
+   ]
+  },
+  "want": "manifest.commands[0].name \"a_b\" invalid: must match ^[a-z0-9]{1,32}$"
+ },
+ {
+  "name": "command name uppercase",
+  "manifest": {
+   "name": "devrt-notify",
+   "version": "0.0.1",
+   "source_url": "https://example.com/x",
+   "permissions": [
+    "api.notify.send"
+   ],
+   "hooks": [
+    "on_notify_action",
+    "on_bot_command"
+   ],
+   "commands": [
+    {
+     "name": "Status",
+     "description": "看状态"
+    }
+   ]
+  },
+  "want": "manifest.commands[0].name \"Status\" invalid: must match ^[a-z0-9]{1,32}$"
+ },
+ {
+  "name": "command name empty",
+  "manifest": {
+   "name": "devrt-notify",
+   "version": "0.0.1",
+   "source_url": "https://example.com/x",
+   "permissions": [
+    "api.notify.send"
+   ],
+   "hooks": [
+    "on_notify_action",
+    "on_bot_command"
+   ],
+   "commands": [
+    {
+     "name": "",
+     "description": "看状态"
+    }
+   ]
+  },
+  "want": "manifest.commands[0].name \"\" invalid: must match ^[a-z0-9]{1,32}$"
+ },
+ {
+  "name": "command name 32",
+  "manifest": {
+   "name": "devrt-notify",
+   "version": "0.0.1",
+   "source_url": "https://example.com/x",
+   "permissions": [
+    "api.notify.send"
+   ],
+   "hooks": [
+    "on_notify_action",
+    "on_bot_command"
+   ],
+   "commands": [
+    {
+     "name": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "description": "看状态"
+    }
+   ]
+  },
+  "want": "manifest.commands[0]: full command name \"devrt_notify_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\" is 45 characters, max 32"
+ },
+ {
+  "name": "command full name 32 ok",
+  "manifest": {
+   "name": "devrt-notify",
+   "version": "0.0.1",
+   "source_url": "https://example.com/x",
+   "permissions": [
+    "api.notify.send"
+   ],
+   "hooks": [
+    "on_notify_action",
+    "on_bot_command"
+   ],
+   "commands": [
+    {
+     "name": "aaaaaaaaaaaaaaaaaaa",
+     "description": "看状态"
+    }
+   ]
+  },
+  "want": ""
+ },
+ {
+  "name": "command full name 33",
+  "manifest": {
+   "name": "devrt-notify",
+   "version": "0.0.1",
+   "source_url": "https://example.com/x",
+   "permissions": [
+    "api.notify.send"
+   ],
+   "hooks": [
+    "on_notify_action",
+    "on_bot_command"
+   ],
+   "commands": [
+    {
+     "name": "aaaaaaaaaaaaaaaaaaaa",
+     "description": "看状态"
+    }
+   ]
+  },
+  "want": "manifest.commands[0]: full command name \"devrt_notify_aaaaaaaaaaaaaaaaaaaa\" is 33 characters, max 32"
+ },
+ {
+  "name": "command full name dash plugin 32 ok",
+  "manifest": {
+   "name": "my-very-long-plugin-name-abcd",
+   "version": "0.0.1",
+   "source_url": "https://example.com/x",
+   "permissions": [
+    "api.notify.send"
+   ],
+   "hooks": [
+    "on_notify_action",
+    "on_bot_command"
+   ],
+   "commands": [
+    {
+     "name": "go",
+     "description": "看状态"
+    }
+   ]
+  },
+  "want": ""
+ },
+ {
+  "name": "command full name dash plugin 33",
+  "manifest": {
+   "name": "my-very-long-plugin-name-abcde",
+   "version": "0.0.1",
+   "source_url": "https://example.com/x",
+   "permissions": [
+    "api.notify.send"
+   ],
+   "hooks": [
+    "on_notify_action",
+    "on_bot_command"
+   ],
+   "commands": [
+    {
+     "name": "go",
+     "description": "看状态"
+    }
+   ]
+  },
+  "want": "manifest.commands[0]: full command name \"my_very_long_plugin_name_abcde_go\" is 33 characters, max 32"
+ },
+ {
+  "name": "command duplicate",
+  "manifest": {
+   "name": "devrt-notify",
+   "version": "0.0.1",
+   "source_url": "https://example.com/x",
+   "permissions": [
+    "api.notify.send"
+   ],
+   "hooks": [
+    "on_notify_action",
+    "on_bot_command"
+   ],
+   "commands": [
+    {
+     "name": "status",
+     "description": "看状态"
+    },
+    {
+     "name": "status",
+     "description": "again"
+    }
+   ]
+  },
+  "want": "manifest.commands[1].name \"status\" duplicates manifest.commands[0]"
+ },
+ {
+  "name": "command description empty",
+  "manifest": {
+   "name": "devrt-notify",
+   "version": "0.0.1",
+   "source_url": "https://example.com/x",
+   "permissions": [
+    "api.notify.send"
+   ],
+   "hooks": [
+    "on_notify_action",
+    "on_bot_command"
+   ],
+   "commands": [
+    {
+     "name": "status",
+     "description": ""
+    }
+   ]
+  },
+  "want": "manifest.commands[0].description is required"
+ },
+ {
+  "name": "command description missing",
+  "manifest": {
+   "name": "devrt-notify",
+   "version": "0.0.1",
+   "source_url": "https://example.com/x",
+   "permissions": [
+    "api.notify.send"
+   ],
+   "hooks": [
+    "on_notify_action",
+    "on_bot_command"
+   ],
+   "commands": [
+    {
+     "name": "status"
+    }
+   ]
+  },
+  "want": "manifest.commands[0].description is required"
+ },
+ {
+  "name": "command description 256 ok",
+  "manifest": {
+   "name": "devrt-notify",
+   "version": "0.0.1",
+   "source_url": "https://example.com/x",
+   "permissions": [
+    "api.notify.send"
+   ],
+   "hooks": [
+    "on_notify_action",
+    "on_bot_command"
+   ],
+   "commands": [
+    {
+     "name": "status",
+     "description": "说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说"
+    }
+   ]
+  },
+  "want": ""
+ },
+ {
+  "name": "command description 257",
+  "manifest": {
+   "name": "devrt-notify",
+   "version": "0.0.1",
+   "source_url": "https://example.com/x",
+   "permissions": [
+    "api.notify.send"
+   ],
+   "hooks": [
+    "on_notify_action",
+    "on_bot_command"
+   ],
+   "commands": [
+    {
+     "name": "status",
+     "description": "说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说说"
+    }
+   ]
+  },
+  "want": "manifest.commands[0].description is 257 characters, max 256"
+ },
+ {
+  "name": "command requires unknown",
+  "manifest": {
+   "name": "devrt-notify",
+   "version": "0.0.1",
+   "source_url": "https://example.com/x",
+   "permissions": [
+    "api.notify.send"
+   ],
+   "hooks": [
+    "on_notify_action",
+    "on_bot_command"
+   ],
+   "commands": [
+    {
+     "name": "status",
+     "description": "看状态",
+     "requires": [
+      "users:manage",
+      "root"
+     ]
+    }
+   ]
+  },
+  "want": "manifest.commands[0].requires contains unknown permission \"root\""
+ },
+ {
+  "name": "21 commands",
+  "manifest": {
+   "name": "devrt-notify",
+   "version": "0.0.1",
+   "source_url": "https://example.com/x",
+   "permissions": [
+    "api.notify.send"
+   ],
+   "hooks": [
+    "on_notify_action",
+    "on_bot_command"
+   ],
+   "commands": [
+    {
+     "name": "c0",
+     "description": "看状态"
+    },
+    {
+     "name": "c1",
+     "description": "看状态"
+    },
+    {
+     "name": "c2",
+     "description": "看状态"
+    },
+    {
+     "name": "c3",
+     "description": "看状态"
+    },
+    {
+     "name": "c4",
+     "description": "看状态"
+    },
+    {
+     "name": "c5",
+     "description": "看状态"
+    },
+    {
+     "name": "c6",
+     "description": "看状态"
+    },
+    {
+     "name": "c7",
+     "description": "看状态"
+    },
+    {
+     "name": "c8",
+     "description": "看状态"
+    },
+    {
+     "name": "c9",
+     "description": "看状态"
+    },
+    {
+     "name": "c10",
+     "description": "看状态"
+    },
+    {
+     "name": "c11",
+     "description": "看状态"
+    },
+    {
+     "name": "c12",
+     "description": "看状态"
+    },
+    {
+     "name": "c13",
+     "description": "看状态"
+    },
+    {
+     "name": "c14",
+     "description": "看状态"
+    },
+    {
+     "name": "c15",
+     "description": "看状态"
+    },
+    {
+     "name": "c16",
+     "description": "看状态"
+    },
+    {
+     "name": "c17",
+     "description": "看状态"
+    },
+    {
+     "name": "c18",
+     "description": "看状态"
+    },
+    {
+     "name": "c19",
+     "description": "看状态"
+    },
+    {
+     "name": "c20",
+     "description": "看状态"
+    }
+   ]
+  },
+  "want": "manifest.commands has 21 entries, max 20"
+ },
+ {
+  "name": "20 commands ok",
+  "manifest": {
+   "name": "devrt-notify",
+   "version": "0.0.1",
+   "source_url": "https://example.com/x",
+   "permissions": [
+    "api.notify.send"
+   ],
+   "hooks": [
+    "on_notify_action",
+    "on_bot_command"
+   ],
+   "commands": [
+    {
+     "name": "c0",
+     "description": "看状态"
+    },
+    {
+     "name": "c1",
+     "description": "看状态"
+    },
+    {
+     "name": "c2",
+     "description": "看状态"
+    },
+    {
+     "name": "c3",
+     "description": "看状态"
+    },
+    {
+     "name": "c4",
+     "description": "看状态"
+    },
+    {
+     "name": "c5",
+     "description": "看状态"
+    },
+    {
+     "name": "c6",
+     "description": "看状态"
+    },
+    {
+     "name": "c7",
+     "description": "看状态"
+    },
+    {
+     "name": "c8",
+     "description": "看状态"
+    },
+    {
+     "name": "c9",
+     "description": "看状态"
+    },
+    {
+     "name": "c10",
+     "description": "看状态"
+    },
+    {
+     "name": "c11",
+     "description": "看状态"
+    },
+    {
+     "name": "c12",
+     "description": "看状态"
+    },
+    {
+     "name": "c13",
+     "description": "看状态"
+    },
+    {
+     "name": "c14",
+     "description": "看状态"
+    },
+    {
+     "name": "c15",
+     "description": "看状态"
+    },
+    {
+     "name": "c16",
+     "description": "看状态"
+    },
+    {
+     "name": "c17",
+     "description": "看状态"
+    },
+    {
+     "name": "c18",
+     "description": "看状态"
+    },
+    {
+     "name": "c19",
+     "description": "看状态"
+    }
+   ]
+  },
+  "want": ""
+ },
+ {
+  "name": "actions checked before commands",
+  "manifest": {
+   "name": "devrt-notify",
+   "version": "0.0.1",
+   "source_url": "https://example.com/x",
+   "permissions": [
+    "api.notify.send"
+   ],
+   "hooks": [
+    "on_notify_action",
+    "on_bot_command"
+   ],
+   "actions": [
+    {
+     "name": "BAD",
+     "label": "重试"
+    }
+   ],
+   "commands": [
+    {
+     "name": "BAD",
+     "description": "看状态"
+    }
+   ]
+  },
+  "want": "manifest.actions[0].name \"BAD\" invalid: must match ^[a-z0-9_]{1,32}$"
+ },
+ {
+  "name": "commands checked before perm/hook rule",
+  "manifest": {
+   "name": "devrt-notify",
+   "version": "0.0.1",
+   "source_url": "https://example.com/x",
+   "permissions": [],
+   "hooks": [
+    "on_notify_action",
+    "on_bot_command"
+   ],
+   "commands": [
+    {
+     "name": "BAD",
+     "description": "看状态"
+    }
+   ]
+  },
+  "want": "manifest.commands[0].name \"BAD\" invalid: must match ^[a-z0-9]{1,32}$"
+ },
+ {
+  "name": "actions perm rule before commands perm rule",
+  "manifest": {
+   "name": "devrt-notify",
+   "version": "0.0.1",
+   "source_url": "https://example.com/x",
+   "permissions": [],
+   "hooks": [],
+   "actions": [
+    {
+     "name": "retry",
+     "label": "重试"
+    }
+   ],
+   "commands": [
+    {
+     "name": "status",
+     "description": "看状态"
+    }
+   ]
+  },
+  "want": "manifest.actions requires permission \"api.notify.send\" and hook \"on_notify_action\""
+ },
+ {
+  "name": "actions not an array",
+  "manifest": {
+   "name": "devrt-notify",
+   "version": "0.0.1",
+   "source_url": "https://example.com/x",
+   "permissions": [
+    "api.notify.send"
+   ],
+   "hooks": [
+    "on_notify_action",
+    "on_bot_command"
+   ],
+   "actions": {
+    "name": "retry"
+   }
+  },
+  "want": "parse manifest json: json: cannot unmarshal object into Go struct field Manifest.actions of type []plugin.ManifestAction"
+ },
+ {
+  "name": "action not an object",
+  "manifest": {
+   "name": "devrt-notify",
+   "version": "0.0.1",
+   "source_url": "https://example.com/x",
+   "permissions": [
+    "api.notify.send"
+   ],
+   "hooks": [
+    "on_notify_action",
+    "on_bot_command"
+   ],
+   "actions": [
+    "retry"
+   ]
+  },
+  "want": "parse manifest json: json: cannot unmarshal string into Go struct field Manifest.actions of type plugin.ManifestAction"
+ },
+ {
+  "name": "action name number",
+  "manifest": {
+   "name": "devrt-notify",
+   "version": "0.0.1",
+   "source_url": "https://example.com/x",
+   "permissions": [
+    "api.notify.send"
+   ],
+   "hooks": [
+    "on_notify_action",
+    "on_bot_command"
+   ],
+   "actions": [
+    {
+     "name": 1,
+     "label": "x"
+    }
+   ]
+  },
+  "want": "parse manifest json: json: cannot unmarshal number into Go struct field ManifestAction.actions.name of type string"
+ },
+ {
+  "name": "action label number",
+  "manifest": {
+   "name": "devrt-notify",
+   "version": "0.0.1",
+   "source_url": "https://example.com/x",
+   "permissions": [
+    "api.notify.send"
+   ],
+   "hooks": [
+    "on_notify_action",
+    "on_bot_command"
+   ],
+   "actions": [
+    {
+     "name": "a",
+     "label": 1
+    }
+   ]
+  },
+  "want": "parse manifest json: json: cannot unmarshal number into Go struct field ManifestAction.actions.label of type string"
+ },
+ {
+  "name": "action requires string",
+  "manifest": {
+   "name": "devrt-notify",
+   "version": "0.0.1",
+   "source_url": "https://example.com/x",
+   "permissions": [
+    "api.notify.send"
+   ],
+   "hooks": [
+    "on_notify_action",
+    "on_bot_command"
+   ],
+   "actions": [
+    {
+     "name": "a",
+     "label": "x",
+     "requires": "logs:read"
+    }
+   ]
+  },
+  "want": "parse manifest json: json: cannot unmarshal string into Go struct field ManifestAction.actions.requires of type []string"
+ },
+ {
+  "name": "action requires number item",
+  "manifest": {
+   "name": "devrt-notify",
+   "version": "0.0.1",
+   "source_url": "https://example.com/x",
+   "permissions": [
+    "api.notify.send"
+   ],
+   "hooks": [
+    "on_notify_action",
+    "on_bot_command"
+   ],
+   "actions": [
+    {
+     "name": "a",
+     "label": "x",
+     "requires": [
+      1
+     ]
+    }
+   ]
+  },
+  "want": "parse manifest json: json: cannot unmarshal number into Go struct field ManifestAction.actions.requires of type string"
+ },
+ {
+  "name": "commands not an array",
+  "manifest": {
+   "name": "devrt-notify",
+   "version": "0.0.1",
+   "source_url": "https://example.com/x",
+   "permissions": [
+    "api.notify.send"
+   ],
+   "hooks": [
+    "on_notify_action",
+    "on_bot_command"
+   ],
+   "commands": "status"
+  },
+  "want": "parse manifest json: json: cannot unmarshal string into Go struct field Manifest.commands of type []plugin.ManifestCommand"
+ },
+ {
+  "name": "command description bool",
+  "manifest": {
+   "name": "devrt-notify",
+   "version": "0.0.1",
+   "source_url": "https://example.com/x",
+   "permissions": [
+    "api.notify.send"
+   ],
+   "hooks": [
+    "on_notify_action",
+    "on_bot_command"
+   ],
+   "commands": [
+    {
+     "name": "a",
+     "description": true
+    }
+   ]
+  },
+  "want": "parse manifest json: json: cannot unmarshal bool into Go struct field ManifestCommand.commands.description of type string"
+ },
+ {
+  "name": "command extra field ignored",
+  "manifest": {
+   "name": "devrt-notify",
+   "version": "0.0.1",
+   "source_url": "https://example.com/x",
+   "permissions": [
+    "api.notify.send"
+   ],
+   "hooks": [
+    "on_notify_action",
+    "on_bot_command"
+   ],
+   "commands": [
+    {
+     "name": "status",
+     "description": "看状态",
+     "label": "x",
+     "hidden": true
+    }
+   ]
+  },
+  "want": ""
+ }
+]

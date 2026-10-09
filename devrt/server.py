@@ -304,6 +304,41 @@ HOOK_SAMPLES: Dict[str, Dict[str, Any]] = {
     },
 }
 
+# 通知交互 hook 的示例 payload（宿主 internal/notify/actions.go dispatchAction / commands.go runPluginCommand 组装的形状）。
+# 点击人 / 发命令的人是一个绑定了 Telegram 的管理员：admin 角色的默认权限（internal/module/auth/permissions.go）。
+# action / command 在 /api/state 里换成 manifest 声明的第一个（hook_samples_for）。
+DEVRT_ADMIN_USER: Dict[str, Any] = {
+    "username": "admin",
+    "role": "admin",
+    "permissions": [
+        "settings:write", "logs:read", "mikan:refresh", "series:recompute", "subscribe:auto", "subscribe:any",
+        "users:manage", "resources:delete", "sites:write", "servers:write", "downloads:write", "linkrules:write",
+        "plugins:manage", "manual_link:write", "progress:write",
+    ],
+}
+HOOK_SAMPLES["on_notify_action"] = {
+    "action": "retry",
+    "data": {},
+    "user": DEVRT_ADMIN_USER,
+    "channel": "telegram",
+}
+HOOK_SAMPLES["on_bot_command"] = {
+    "command": "status",
+    "args": "",
+    "user": DEVRT_ADMIN_USER,
+    "chat": {"id": 123456789, "type": "private"},
+}
+
+
+def hook_samples_for(manifest: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    """示例 payload；on_notify_action / on_bot_command 用 manifest 声明的第一个动作 / 命令（短名）。"""
+    samples = json.loads(json.dumps(HOOK_SAMPLES))
+    for hook, key, field_name in (("on_notify_action", "actions", "action"), ("on_bot_command", "commands", "command")):
+        items = manifest.get(key) if isinstance(manifest, dict) else None
+        if isinstance(items, list) and items and isinstance(items[0], dict) and isinstance(items[0].get("name"), str):
+            samples[hook][field_name] = items[0]["name"]
+    return samples
+
 
 class PluginTimeout(RuntimeError):
     """插件调用超过宿主墙钟（sandbox.js 回 {error, timeout: true}）；生产宿主对应 ErrRuntimeTimeout → HTTP 504。"""
@@ -664,7 +699,7 @@ def build_app(sandbox: NodeSandbox, persist_path: Optional[Path]) -> FastAPI:
             "hooks_registered": sandbox.state.hooks_registered,
             "apis_registered": sandbox.state.apis_registered,
             "load_error": sandbox.state.load_error,
-            "hook_samples": HOOK_SAMPLES,
+            "hook_samples": hook_samples_for(sandbox.state.manifest),
             "config": sandbox.get_config(),
             "config_secrets": sandbox.get_config_secrets(),
             "ui_available": ui_dir.exists(),
@@ -715,6 +750,12 @@ def build_app(sandbox: NodeSandbox, persist_path: Optional[Path]) -> FastAPI:
             if hook == "should_download" and isinstance(res, dict):
                 # 回显宿主会得出的裁决：verdict ∈ allow / veto / have_bitmap；fail_open = 超时 / 抛错 / reject 放行
                 for k in ("result", "verdict", "fail_open", "error"):
+                    if k in res:
+                        out[k] = res[k]
+            if hook in ("on_notify_action", "on_bot_command") and isinstance(res, dict):
+                # 回显宿主会给用户看的结果：点击 → answer（点按钮时的提示）+ line（各副本末尾追加的结果行）；
+                # 命令 → reply（回到同一私聊的消息）；ignored = 非私聊不理；called = 插件代码是否被调用
+                for k in ("answer", "line", "reply", "ignored", "called", "result", "error"):
                     if k in res:
                         out[k] = res[k]
             return out

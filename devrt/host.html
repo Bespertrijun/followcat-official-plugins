@@ -257,6 +257,19 @@ async function sendTrigger(hook, data) {
       pushLog({ts: Date.now()/1000, level: 'info', args: ['[devrt] ' + line]});
       return;
     }
+    // 通知交互（sandbox 已把完整结果打进日志面板）：点击 → answer = 点按钮时的提示，line = 各副本末尾追加的结果行
+    // （null = 没处理，如没有权限）；命令 → reply = 回到同一私聊的消息（字符串是宿主自己的提示，对象是插件的回复）
+    if (hook === 'on_notify_action') {
+      toast(out.line && out.line.indexOf('✓') === 0 ? 'success' : 'warning',
+        'on_notify_action → 提示「' + out.answer + '」' + (out.line ? '，结果行「' + out.line + '」' : ''));
+      return;
+    }
+    if (hook === 'on_bot_command') {
+      var r = out.ignored ? '（非私聊，不理）' : (typeof out.reply === 'string' ? out.reply
+        : out.reply.prefix + ' ' + (out.reply.text !== undefined ? out.reply.text : out.reply.body));
+      toast(out.error ? 'warning' : 'success', 'on_bot_command → ' + r);
+      return;
+    }
     toast('success', 'fired ' + hook);
   } catch (e) {
     toast('error', String(e));

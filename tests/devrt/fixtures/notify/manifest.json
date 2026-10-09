@@ -1,3 +1,5 @@
 {"name":"devrt-notify","version":"0.0.1","source_url":"https://example.com/devrt-notify",
  "permissions":["api.notify.send","hook.download.write"],
- "hooks":["should_download"]}
+ "hooks":["should_download","on_notify_action","on_bot_command"],
+ "actions":[{"name":"retry","label":"重试"},{"name":"ack","label":"知道了","requires":["logs:read"]}],
+ "commands":[{"name":"status","description":"看状态"},{"name":"echo","description":"原样回一句","requires":["subscribe:any"]}]}

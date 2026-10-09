@@ -1,0 +1,2 @@
+{"name":"devrt-notify-hook-noperm","version":"0.0.1","source_url":"https://example.com/devrt-notify-hook-noperm",
+ "permissions":[],"hooks":["on_notify_action","on_bot_command"]}

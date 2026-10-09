@@ -29,13 +29,86 @@ my-plugin/
 | `permissions` | 全部需在白名单内（见下） |
 | `hooks` | 全部需在白名单内（见下） |
 
-可选字段：`author`、`description`。
+可选字段：`author`、`description`、`ui`（见[「Plugin UI」](#plugin-uiiframe-嵌入)）、`actions` / `commands`（通知交互，见下节）。
+
+> **同名插件只能装一个**：已经装了一个 `name` 相同、但来源（`source_url`）不同的插件时，再装（上传预览、市场预览、确认安装都算）会被拒：HTTP 409「已安装同名插件「<name>」（来自 <已装那个的 source_url>），请先卸载它」。同一来源的升级 / 重装不受影响。
+
+### manifest.actions / manifest.commands（通知交互，可选）
+
+插件要在 [`notify.send`](#notify--借宿主的通知通道发消息需-apinotifysend异步) 的消息里放**动作按钮**（用户点了回调插件），或提供 Telegram **bot 命令**，必须先在 manifest 里声明：
+
+```json
+{
+  "name": "cookiecloud",
+  "permissions": ["api.notify.send"],
+  "hooks": ["on_notify_action", "on_bot_command"],
+  "actions": [
+    { "name": "retry", "label": "重试同步", "requires": ["settings:write"] },
+    { "name": "ack", "label": "知道了" }
+  ],
+  "commands": [
+    { "name": "sync", "description": "立即同步一次 Cookie", "requires": ["settings:write"] },
+    { "name": "status", "description": "看上次同步的结果" }
+  ]
+}
+```
+
+| 字段 | 规则 |
+|------|------|
+| `actions` | 最多 20 个。声明了就必须同时有权限 `api.notify.send` 和 hook `on_notify_action` |
+| `actions[].name` | `[a-z0-9_]{1,32}`，不能重复。`notify.send` 按钮的 `action` 写的就是它（大小写敏感） |
+| `actions[].label` | 必填，1–64 个字符。FC 的安装 / 升级对话框与插件详情页用它介绍这个动作；消息里按钮上显示的文字是 `notify.send` 按钮自己的 `label` |
+| `actions[].requires` | 可选。点按钮的人必须**全部**具备的 FC 用户权限（见下表）；**不写或为空 = 只有管理员能点**（角色是 admin 的用户；单独授予的额外权限不算管理员） |
+| `commands` | 最多 20 个。声明了就必须同时有权限 `api.notify.send` 和 hook `on_bot_command` |
+| `commands[].name` | 短名，`[a-z0-9]{1,32}`（**不许下划线**），不能重复。用户在 Telegram 里发的是**完整名**：插件 `name` 里的 `-` 换成 `_`，再接 `_` 和短名（`cookiecloud` + `sync` → `/cookiecloud_sync`；`my-plugin` + `run` → `/my_plugin_run`）。完整名不能超过 32 个字符 |
+| `commands[].description` | 必填，1–256 个字符。显示在 Telegram 的命令菜单和 `/help` 里 |
+| `commands[].requires` | 同 `actions[].requires`：全部具备才能用，为空 = 只有管理员 |
+
+`requires` 里写的是 **FC 用户的权限**（决定「谁能点 / 谁能用」），不是插件权限（决定「插件能做什么」）。可用的 key：
+
+| key | 含义 | key | 含义 |
+|---|---|---|---|
+| `settings:write` | 修改全局设置 | `sites:write` | 写站点 / 规则流配置 |
+| `logs:read` | 读应用日志 | `servers:write` | 写服务器配置 |
+| `mikan:refresh` | 触发 Mikan 全站刷新 | `downloads:write` | 写下载器配置 |
+| `series:recompute` | 同剧聚类重算 | `linkrules:write` | 写链接规则 |
+| `subscribe:auto` | 订阅免审批 | `plugins:manage` | 安装 / 启用 / 卸载 / 配置插件 |
+| `subscribe:any` | 可订阅 | `manual_link:write` | 手动链接 |
+| `users:manage` | 管理用户 | `progress:write` | 手工校正任务进度 / 总集数 |
+| `resources:delete` | 级联删除资源 | | |
+
+管理员默认拥有全部；普通成员（member）默认只有 `subscribe:any`；访客（guest）没有。管理员可以在用户管理里给某个用户单独加权限。
+
+不合规的 manifest 在**预览时**就被拒（上传预览与市场预览都一样；上传预览的提示是 `invalid plugin package: <原因>`），原因是下面之一（引号里是你写的原文）：
+
+| 原因 | 什么时候 |
+|---|---|
+| `manifest.actions has N entries, max 20` / `manifest.commands has N entries, max 20` | 超过 20 个 |
+| `manifest.actions[i].name "x" invalid: must match ^[a-z0-9_]{1,32}$` | 动作名不合规（含没写 name） |
+| `manifest.actions[i].name "x" duplicates manifest.actions[j]` | 动作名重复 |
+| `manifest.actions[i].label is required` / `manifest.actions[i].label is N characters, max 64` | label 为空 / 太长 |
+| `manifest.actions[i].requires contains unknown permission "x"` | requires 里有上表以外的 key |
+| `manifest.commands[i].name "x" invalid: must match ^[a-z0-9]{1,32}$` | 命令短名不合规（带下划线、大写等） |
+| `manifest.commands[i].name "x" duplicates manifest.commands[j]` | 命令短名重复 |
+| `manifest.commands[i]: full command name "x_y" is N characters, max 32` | 完整名超过 32 个字符（插件名太长时把短名取短些） |
+| `manifest.commands[i].description is required` / `manifest.commands[i].description is N characters, max 256` | 说明为空 / 太长 |
+| `manifest.commands[i].requires contains unknown permission "x"` | 同上 |
+| `manifest.actions requires permission "api.notify.send" and hook "on_notify_action"` | 声明了 actions，却没声明这个权限或 hook |
+| `manifest.commands requires permission "api.notify.send" and hook "on_bot_command"` | 声明了 commands，却没声明这个权限或 hook |
+| `parse manifest json: json: cannot unmarshal ...` | 字段类型不对（如 `actions` 不是数组、`name` 是数字） |
+
+检查顺序：先整份 JSON 的字段类型，再 `name` / `version` / `source_url` / `permissions` / `hooks` / `ui`，再逐个 `actions`、逐个 `commands`，最后「要求权限和 hook」这两条（actions 的在前）。只报第一条。
+
+- 安装 / 升级对话框会列出插件声明的动作（label + requires）和命令（`/完整名` + 说明 + requires）；升级时标出新增、删除和 `requires` 的变化。
+- `actions` / `commands` **只在 zip 里的 manifest.json 里**，不进插件源的 `index.json`（见 [`registry-schema.md`](./registry-schema.md)）。
 
 ---
 
-## Hook 列表（10 个：9 个通知 hook + 1 个同步否决 hook）
+## Hook 列表（12 个：9 个通知 hook + 1 个同步否决 hook + 2 个通知交互 hook）
 
 > JS 侧通过 `plugin.on("<hook_name>", function(data) { ... })` 订阅。同名 hook 多次注册以最后一次为准。所有 hook payload 字段命名见主仓 `internal/domain/event.go`（`on_task_completed` 的统一形态见 `internal/plugin/event_bridge.go`），并由 `internal/domain/event_payload_test.go` 锁定。hook 须同时在 `manifest.hooks` 声明、并持有对应权限（见下表与「权限」章）。
+>
+> 三类 hook 的区别：**通知 hook**（前 9 个）是宿主事件的广播，fire-and-forget，返回值没人看；**`should_download`** 在推种前同步调用、读返回值决定下不下；**`on_notify_action` / `on_bot_command`** 不是事件广播——用户在 Telegram 里点了你发的动作按钮、或发了你声明的命令时，宿主同步调用**这一个插件**的处理函数，**返回值就是回给用户的内容**（见下文[「通知交互 hook」](#通知交互-hookon_notify_action--on_bot_command需-apinotifysend)）。
 >
 > 类型：`anime_id` / `task_id` / `episode*` / `total_*` 是**数字**，`media_id` 是**字符串**，`episodes` 是数字数组。
 
@@ -51,6 +124,8 @@ my-plugin/
 | `on_task_reopened` | `hook.task.read` | 已完成任务因总集数上调/新集出现被打回继续追更（done→tracking） | `source`（`"mikan"`/`"douban"`）, `task_id`, `media_id`, `media_title`, `old_total_ep`, `new_total_ep`, `acquired_units` |
 | `on_task_subscribed` | `hook.task.read` | 新建了一个追踪任务（自动或手动，见下方说明；每个任务最多一次） | `source`（`"mikan"`/`"douban"`）, `trigger`（`"auto"`/`"manual"`）, `task_id`, `media_id`, `media_title?`, `site_id` |
 | `should_download` | `hook.download.write` ⚠️敏感 | ruleflow 推种到 qBittorrent 之前（同步否决，见下节） | 见下节 `PreDownloadCheck` |
+| `on_notify_action` | `api.notify.send` | 用户点了本插件消息上的动作按钮（同步调用、读返回值，见下文） | `action`, `data`, `user: {username, role, permissions}`, `channel` |
+| `on_bot_command` | `api.notify.send` | 用户在和 bot 的私聊里发了本插件声明的命令（同步调用、读返回值，见下文） | `command`, `args`, `user: {username, role, permissions}`, `chat: {id, type}` |
 
 > `?` 表示这个字段可能没有有效值：字段**恒在**，没有有效值时是**零值**（空串 `""` / `0` / 空数组 `[]`，个别为 `null`），不会变成 `undefined`。判断「有没有」看值本身（`if (p.size > 0)`、`if (p.files.length)`）；写成 `p.size || 0`、`p.files || []` 也无妨。`episode_end` 只在合集时有意义（`> 0`，与 `episode` 组成 `[episode, episode_end]` 区间），单集 / 电影时为 `0`。
 >
@@ -194,6 +269,105 @@ plugin.on("should_download", function(p) {
 
 ---
 
+## 通知交互 hook：`on_notify_action` / `on_bot_command`（需 `api.notify.send`）
+
+> 与上面 9 个通知 hook 不同，这两个 hook **不是事件广播**：宿主事件总线不发它们。用户在 Telegram 里**点了你发的动作按钮**、或**发了你声明的 bot 命令**时，宿主**同步调用这一个插件**的处理函数并**读返回值**——返回值就是回给用户看的内容。和 `should_download` 一样是「同步调用、看返回值」，但没有 fail-open 一说：出错就告诉用户出错了。
+
+前提（缺一不可）：
+
+1. manifest：`permissions` 里有 `api.notify.send`；`hooks` 里有对应 hook；`actions` / `commands` 里声明了这个动作 / 命令（见[「manifest.actions / manifest.commands」](#manifestactions--manifestcommands通知交互可选)）。
+2. `index.js` 里 `plugin.on("on_notify_action", fn)` / `plugin.on("on_bot_command", fn)` 注册了处理函数。
+3. FollowCat 的 Telegram 通道开着，且 bot 正在收消息（通知设置里「接收方式」是长轮询或 webhook，状态正常）。收不到消息时动作按钮发不出去（从消息里去掉，链接按钮照常），命令也没人应答。**Slack 没有动作按钮和命令**：发到 Slack 的那份消息只是不带动作按钮。
+4. 点按钮 / 发命令的人在 FC 里**绑定了 Telegram**：FC 右上角个人卡 →「绑定 Telegram」→ 打开链接或扫二维码 → 在 bot 里点 Start（链接 10 分钟内有效）。没绑定的人点按钮只看到「请先在 FC 绑定 Telegram」，发命令只收到「请先在 FC 个人卡里绑定 Telegram」，插件不会被调用。
+
+谁能用：动作 / 命令的 `requires` 非空时，用户必须具备**全部**列出的 FC 权限；为空时**只有管理员**（角色是 admin；单独授予的额外权限不算）。权限不够时插件不会被调用，用户看到「没有权限」。动作按钮的 `requires` 取的是**消息发出那一刻** manifest 里的声明（之后升级改了 `requires`，已经发出去的按钮仍按旧的算）。通知发到群里时（Telegram 填了群的 Chat ID），群里谁都能点，同样要绑定且权限够。
+
+两者共同的调用规则：
+
+- 每次调用一个 **10 秒**墙钟（含 `await`）；回调可以是 `async function`。payload 是你自己的一份普通对象。
+- 返回值按 JSON 导出成拷贝后再解释（同 registerAPI：`toJSON` 生效，函数被丢掉）。
+- 用户看到的失败原因（你 throw 的内容**不会**给用户看，只进宿主日志）：
+
+| 用户看到 | 什么时候 |
+|---|---|
+| `插件没有响应` | 10 秒内没有结果（同步段超时、Promise 一直没 settle） |
+| `插件正忙` | 插件的任务队列满，50 毫秒内排不进去 |
+| `插件不可用` | 插件没在运行、manifest 已不再声明这个动作（比如升级后删了）、或没 `plugin.on` 注册这个 hook——插件代码没被调用。（命令的情况：插件停用或不再声明这个命令时，用户收到的是「不认识这个命令，发 /help 看看能用什么」） |
+| `插件出错` | 回调 throw / reject、返回值导不出 JSON、宿主侧出错；命令的返回值不合规（见下） |
+
+### `on_notify_action`：动作按钮被点击
+
+先用 [`notify.send`](#notify--借宿主的通知通道发消息需-apinotifysend异步) 发一条带动作按钮的消息（`{label, action, data?}`，`action` 必须在 `manifest.actions` 里）。用户点了按钮：
+
+1. 用户立刻看到提示「处理中…」，宿主调用你的 `on_notify_action`：
+
+```js
+{
+  action: "retry",                  // 按钮的 action（manifest.actions[].name）
+  data: { site_id: 3 },             // 按钮的 data（JSON 拷贝）；按钮没带 data 时是 null
+  user: {                           // 点按钮的 FC 用户（经 Telegram 绑定找到）
+    username: "alice",
+    role: "admin",                  // "admin" | "member" | "guest"
+    permissions: ["settings:write", "logs:read"]   // 角色默认权限 + 单独授予的权限
+  },
+  channel: "telegram"
+}
+```
+
+2. 返回值：返回**字符串**或 **`{text: 字符串}`** = 给用户的反馈，按纯文本处理：换行折成空格、去掉首尾空白、超过 200 个字符截到 199 个加「…」。没返回、返回空串、或返回别的（数字、`{text}` 不是字符串…）= 「已处理」。
+3. 这条通知的**每一份副本**（发到几个对话就有几份）都被编辑：正文不变，去掉动作按钮（链接按钮保留），末尾加一行结果——成功是 `✓ <你的反馈>`，失败是 `✗ 失败：<上表的原因>`。
+
+- **一条通知只处理一次**：同一条消息上不管有几个动作按钮、发到了几个对话，第一个点击开始处理后整条通知就「关」了；之后再点任何一份副本的按钮，只提示「已处理」（正在处理时是「处理中…」）。所以一条通知适合放「二选一」式的按钮（重试 / 忽略），不适合放可以反复点的按钮。
+- **7 天过期**：发出 7 天后点按钮提示「已过期」，不会调用插件。FollowCat 重启不影响（7 天内的按钮重启后照样能点）。
+- 一次点击从开始到结束最多 15 秒，超过就按「处理超时」失败。
+- 你拿不到用户的 Telegram 身份、对话或消息 ID，只有上面的 FC 用户信息；`data` 由你发消息时自己写，宿主原样带回（最多 4 KB，见 `notify.send` 的按钮规则）。
+- 回调里可以再 `notify.send`（比如处理完发一条新消息），配额照算。
+
+### `on_bot_command`：bot 命令
+
+用户在**和 bot 的私聊**里发 `/<完整名> [参数]`（完整名的规则见 `manifest.commands`；`/cookiecloud_sync@你的bot 参数` 这种带 `@bot名` 的写法也认，命令名不分大小写）。群 / 频道里的任何消息 bot 都不理。
+
+```js
+{
+  command: "sync",                  // 短名（manifest.commands[].name），不是完整名
+  args: "pt1 pt2",                  // 命令后面的原文（第一个空格之后，去掉首尾空白；没有就是 ""）
+  user: { username: "alice", role: "admin", permissions: [...] },   // 同上
+  chat: { id: 123456789, type: "private" }                         // 私聊的 chat id（数字）
+}
+```
+
+返回值决定回复，回复发回**同一个私聊**，开头同样加 `🧩 [插件名]`：
+
+| 返回值 | 回复 |
+|---|---|
+| 字符串 | 按**纯文字**原样发（`*`、`[` 之类不当格式） |
+| `{body, buttons}` | `body` 是 FC-Markdown，`buttons` 同 `notify.send`（链接按钮 / 动作按钮，动作必须在 `manifest.actions` 里声明）；内容规则同 `notify.send`（没有标题、不能带图） |
+| `undefined` / `null` / 空串 / `body` 为空且没有按钮 | 「已处理」 |
+| 其它（数字、数组…）、`body` 不是字符串、`buttons` 写法不对、内容不合规（如链接不是 http/https、动作没声明） | 「插件出错」（具体原因只进宿主日志；在 devrt 里能看到） |
+
+- 命令回复直接发出，不排 `notify.send` 的发送队列，**不计入**每小时配额。回复里的动作按钮与 `notify.send` 发的完全一样（点了回调 `on_notify_action`）。
+- 没绑定的人：「请先在 FC 个人卡里绑定 Telegram」；不认识的命令（含插件停用后）：「不认识这个命令，发 /help 看看能用什么」；权限不够：「没有权限」。
+- **菜单按人**：每个绑定了 Telegram 的用户，bot 的命令菜单（输入框旁的「/」菜单）里只列**他能用的**命令，说明取 `commands[].description`；`/help` 列同样的内容。插件启用 / 停用 / 升级 / 卸载、用户绑定 / 解绑、用户权限变化后，菜单在约 2 秒内刷新。
+- 万一装了两个同名插件（同名插件安装限制之前装上的），完整名会撞：只有先启用的那个的命令生效，后启用的被跳过。
+
+```js
+plugin.on("on_bot_command", async function (p) {
+  if (p.command === "status") {
+    var last = config.get("last_sync") || "还没同步过";
+    return "上次同步：" + last;                       // 字符串：纯文字原样发
+  }
+  if (p.command === "sync") {
+    var r = await runSync();
+    return {
+      body: "同步完成，写入 **" + r.written + "** 个站点",
+      buttons: r.failed ? [{ label: "重试失败的", action: "retry", data: { only: "failed" } }] : [],
+    };
+  }
+});
+```
+
+---
+
 ## 宿主 API 参考
 
 > 未声明对应权限时，对应全局对象为 `undefined`，插件可用 `typeof xxx === "object"` 自检。
@@ -229,7 +403,7 @@ plugin.on("should_download", function(p) {
 
 #### 回调可以是 `async`
 
-`plugin.on` / `plugin.registerAPI` / `should_download` 的回调都可以返回 Promise（写成 `async function` 即可），宿主等它 settle：resolve 的值等同同步 `return`，reject 等同抛错。非 async 回调行为不变。
+`plugin.on` / `plugin.registerAPI` / `should_download` / `on_notify_action` / `on_bot_command` 的回调都可以返回 Promise（写成 `async function` 即可），宿主等它 settle：resolve 的值等同同步 `return`，reject 等同抛错。非 async 回调行为不变。
 
 ```js
 // hook：await 期间同一插件的其它任务可以先跑
@@ -261,7 +435,7 @@ plugin.on("should_download", async function (p) {
 
 #### 超时语义
 
-- 每次调用一个**墙钟**，**含 `await` 期间**：hook **10s** / `should_download` **3s** / registerAPI **10s**。超时即丢弃该次调用的结果（之后 Promise 才 settle 也被忽略），插件继续运行。
+- 每次调用一个**墙钟**，**含 `await` 期间**：hook **10s** / `should_download` **3s** / registerAPI **10s** / `on_notify_action`、`on_bot_command` **10s**（超时用户看到「插件没有响应」）。超时即丢弃该次调用的结果（之后 Promise 才 settle 也被忽略），插件继续运行。
 - registerAPI 超时：HTTP 调用方（含插件 UI 的 `FC.api`）收到 **504**。错误信息有两种：通常是 `plugin runtime: execution timeout`（这次调用的 10s 墙钟到了）；插件事件循环被别的任务占住、这次调用根本没轮上时是宿主 11s 兜底的 `plugin api: execution timeout`。两种都按超时处理。
 - **入口脚本 10s**：`index.js` 顶层代码（连同它执行期间就触发的定时器回调、微任务）必须在 **10 秒**内跑完。到点没跑完（同步死循环、一直 `setImmediate` 自己续命、顶层一个很慢的内置操作都算）= 该插件本次**启用失败**：错误 `run entry script: entry script exceeded 10s (interrupted)` 写进宿主日志与插件的 `last_error_msg`（插件列表 / 详情页可见），插件保持停用状态；数据库里的「已启用」标记不变（下次 FollowCat 启动还会再试）。入口脚本执行期间宿主自己出了 Go panic 同样只算该插件启用失败（`run entry script: host panic: <原因>`），进程不崩。宿主启动时照常加载其它插件，**FollowCat 正常起来，不会被一个坏插件卡住**。耗时的初始化别放在顶层同步跑，放进定时器 / 首次调用里。
 - 入口脚本执行期间就触发的定时器 / `setImmediate` 回调（及其 `await` 之后的续体）里出了宿主 Go panic，按定时器的规则处理（记 `last_error_msg`、计入自动停用），**不影响这次启用**；只有顶层代码本身（含它跑的微任务）里、或脱离了事件循环的宿主 panic 才让启用失败。
@@ -666,7 +840,7 @@ try {
 |---|---|
 | 签名 | `notify.send(msg) → Promise<{queued: true, channels: N}>`；`msg = {title, body?, image?, buttons?}`，其它字段忽略 |
 | resolve | 消息**进了发送队列**就 resolve。`channels` = 实际排上队的通道数：一个通道都没配、或每个通道都没勾「插件消息」时是 `0`（照样 resolve，不算错）。发送结果不回给插件：真正发送失败的条数与最近一次失败原因在插件详情页「运行状态」里看 |
-| 收件人 | 插件不能指定通道、也不能指定收件人：发给每个通道里所有已配置的对话（通知设置里每个通道都有「插件消息」勾选，默认勾上） |
+| 收件人 | 插件不能指定通道、也不能指定收件人：每个勾了「插件消息」的通道都发一份（默认勾上）。Telegram 填了 Chat ID 就发到那个对话；**没填就私聊每一个绑定了 Telegram 的管理员**（角色是 admin、绑定状态正常的）。Slack 发到 webhook 的频道 |
 | 前缀 | 消息开头固定加 `🧩 [插件名]`（插件名 = manifest 的 `name`），插件去不掉 |
 | 链接预览 | 插件消息一律不展开链接预览（Telegram 关预览，Slack 不 unfurl） |
 | 时机 | 调用时就在宿主里校验并入队，返回的 Promise 已经 settle（连续几次 `send` 的入队顺序就是调用顺序），在 `should_download` 里调用也不增加延迟；返回的 Promise 不影响任何 hook 的结果（`should_download` 的裁决只看它自己的返回值） |
@@ -676,24 +850,27 @@ try {
 
 | 情形 | `e.message` |
 |---|---|
-| 参数不是普通对象（不传、`null`、字符串、数字、函数、数组） | `notify.send: argument must be a message object` |
-| `title` / `body` / `image` 不是字符串（`undefined` / `null` 当没给） | `notify.send: title must be a string`（`body` / `image` 同理） |
-| 字段值导不出 JSON（带环、`BigInt`、嵌套过深） | `notify.send: title is not JSON-serializable`（字段名随之变） |
-| `buttons` 不是数组，或一维、二维写法混用 | `notify.send: buttons must be an array of button objects or an array of button rows` |
-| 某个按钮不是对象 | `notify.send: each button must be an object` |
-| 按钮的 `label` / `url` / `action` 不是字符串 | `notify.send: button label must be a string`（`url` / `action` 同理） |
+| 参数不是对象（不传、`null`、字符串、数字、函数、数组） | `notify.send: argument must be a message object` |
+| `title` / `body` / `image` 不是**原始字符串**（`undefined` / `null` 当没给）。`new String("x")`、带 `toJSON` 的对象也算不是 | `notify.send: title must be a string`（`body` / `image` 同理） |
+| `buttons` 不是数组，或一维、二维写法混用，或分行写法里某一行不是数组 | `notify.send: buttons must be an array of button objects or an array of button rows` |
+| `buttons` 的元素（行与按钮合计）超过 100 万个 | `notify.send: buttons is not JSON-serializable` |
+| 某个按钮不是对象（数字、字符串、函数、数组空位） | `notify.send: each button must be an object` |
+| 按钮的 `label` / `url` / `action` 不是原始字符串（同上，`undefined` / `null` 当没给） | `notify.send: button label must be a string`（`url` / `action` 同理） |
+| 按钮的 `data` 导不出 JSON（带环、`BigInt`、嵌套超过 1000 层、`toJSON` 抛错） | `notify.send: button data is not JSON-serializable` |
 
-**内容不合规 / 超配额 / 队列满 → reject**，`e.message` 是下面的原因之一。宿主按这个顺序检查，报**第一条**不满足的：标题 → 正文长度 → 正文里的链接 → 图片 → 按钮（先查每行个数，再查总数，再逐个按钮按顺序查）→ 配额 → 队列。
+按钮结构（数组、行、按钮对象）按 JS 值直接读：数组或按钮对象上的 `toJSON` 不起作用，getter 照常执行；分行写法里，行内的数组也被当成一个按钮对象（没有 `label` → 下表「按钮文字不能为空」）。只有 `data` 按 JSON 导出（`toJSON` 生效，函数 / 导出为空 = 没有 data）。
+
+**内容不合规 / 超配额 / 队列满 → reject**，`e.message` 是下面的原因之一。宿主按这个顺序检查，报**第一条**不满足的：动作按钮是否都已声明（在标题等内容检查之前）→ 标题 → 正文长度 → 正文里的链接（先查 `[文字](url)` 的地址，再查文字里的裸 userinfo 地址，再查链接长度）→ 图片 → 按钮（先查每行个数，再查总数，再逐个按钮按顺序查）→ 配额 → 队列。
 
 | 原因（`e.message`） | 什么时候 |
 |---|---|
 | `缺少标题` | `title` 没给、为空或全是空白 |
 | `标题过长（上限 1024 字节）` | `title` 超过 1024 字节（UTF-8，一个汉字 3 字节） |
 | `正文过长（上限 16384 字节）` | `body` 超过 16 KB |
-| `正文里的链接无效：只允许 http / https，且不能带用户名和密码` | 正文里某个 `[文字](url)` 的地址不合规（见下文「链接与按钮」） |
-| `正文里的链接过长（上限 2048 字符）` | 正文里某个链接的地址超过 2048 字节（按百分号编码后的长度算：路径里一个汉字算 9 字节） |
+| `正文里的链接无效：只允许 http / https，且不能带用户名和密码` | 正文里某个 `[文字](url)` 的地址不合规（见下文「链接与按钮」）；或正文的**文字**里出现 `协议://用户名@主机` 形式的裸地址（如 `https://bank.com@evil.cn`、`ftp://u:p@h`），行内代码和代码块里的不算 |
+| `正文里的链接过长（上限 2048 字节）` | 正文里某个链接的地址超过 2048 字节（按百分号编码后的长度算：路径里一个汉字算 9 字节） |
 | `图片地址无效：只允许 http / https，且不能带用户名和密码` | `image` 不合规 |
-| `图片地址过长（上限 2048 字符）` | `image` 超过 2048 字节（原文或编码后） |
+| `图片地址过长（上限 2048 字节）` | `image` 超过 2048 字节（原文或编码后） |
 | `每行按钮最多 3 个` | 自己分行时某一行超过 3 个 |
 | `按钮最多 6 个` | 按钮合计超过 6 个 |
 | `按钮文字不能为空` | `label` 为空或全是空白 |
@@ -701,9 +878,9 @@ try {
 | `按钮缺少链接（url）或动作（action）` | 两个都没给 |
 | `只有动作按钮可以带 data` | 链接按钮带了 `data` |
 | `按钮数据过大（上限 4096 字节）` | `data` 序列化成 JSON 后超过 4 KB |
-| `按钮动作未在 manifest 中声明` | 带 `action` 的按钮——**当前版本还不能用动作按钮**，任何 `action` 都按「未声明」拒绝；动作按钮（点了回调插件）在后续版本开放 |
+| `按钮动作未在 manifest 中声明` | 某个按钮的 `action` 不在本插件的 `manifest.actions` 里（大小写敏感）。这一条在标题等所有内容检查**之前**查 |
 | `按钮链接无效：只允许 http / https，且不能带用户名和密码` | 按钮的 `url` 不合规 |
-| `按钮链接过长（上限 2048 字符）` | 按钮的 `url` 超过 2048 字节（原文或编码后） |
+| `按钮链接过长（上限 2048 字节）` | 按钮的 `url` 超过 2048 字节（原文或编码后） |
 | `超出通知配额（每小时 N 条）` | 近 60 分钟已入队的条数达到配额（见下文「配额」） |
 | `通知队列已满` | 每个该收的通道的插件队列都满了（只要还有一个通道排上队就 resolve，`channels` 是排上的个数） |
 | `plugin worker stopped` | 插件已停用 / 卸载 / 升级，旧代码还在跑 |
@@ -731,23 +908,47 @@ try {
 - 不支持：`# 标题`、表格、`@所有人`（故意不做）。没有闭合的标记按原文显示；`*` 两侧都是字母或数字时不当定界符（`2*3*4` 原样），`C++` 不会被当成下划线。
 - 动态文字（站点名、文件名、错误信息）放进 `body` 前要转义：`` \ * ~ + | ` [ ] `` 在任何位置前面加 `\`，行首的 `>` / `-` 也加（参考实现：dev-guide §6.6 的 `fcEscape`，与主仓 `EscapeFCMarkdown` 同规则）。
 - 截断（不 reject）：标题折成一行、超过 100 字截断；正文按**显示出来的文字**超过 1000 字截断（不会切出半个链接）；按钮文字超过 64 字截断成「…」结尾（Slack 按钮另有 75 字上限）。
+- Telegram 一条消息最多 4096 字（按 UTF-16 计，emoji 算 2；链接后附的「 (域名)」也算在内）：链接多、域名长时上面的 1000 字截断还不够，宿主会继续把正文截短直到放得下；极端情况（比如一个链接本身就特别长）去掉链接、只留链接文字。
 
 #### 链接与按钮
 
-- 正文链接、链接按钮、图片地址都只允许 `http` / `https`；**带用户名 / 密码的地址（如 `https://bank.com@evil.cn/`）一律拒绝**；国际化域名会转成 punycode。
+- 正文链接、链接按钮、图片地址都只允许 `http` / `https`；**带用户名 / 密码的地址（如 `https://bank.com@evil.cn/`）一律拒绝**；国际化域名会转成 punycode。正文的普通文字里写裸地址（不用 `[文字](url)`）也可以，客户端会自动识别成链接——但带用户名的裸地址同样拒绝（任何协议，`协议://…@` 形式都算）；要原样展示这类文字就放进行内代码 `` `…` ``。
+- 长度上限的单位都是**字节**（UTF-8）：地址原文、以及按百分号编码重新拼出来的地址都不能超过 2048 字节。
 - 显示时附域名：正文链接显示成「文字 (域名)」，链接按钮显示成「文字 (域名)」，域名取可注册域（`https://bank.com.evil.cn/x` 显示 `evil.cn`），非默认端口一起显示。插件改不掉。
-- 按钮写法：`{label, url}` 是链接按钮；`{label, action, data?}` 是动作按钮（**本版本不可用**，见上表）。
+- 按钮写法：`{label, url}` 是链接按钮；`{label, action, data?}` 是**动作按钮**（见下文「动作按钮」）。
 - 合计最多 6 个。可以自己分行（二维数组 `[[b1, b2], [b3]]`），每行最多 3 个；不分行（一维数组 `[b1, b2, b3]`）时宿主每行排 2 个。Slack 没有分行，按顺序平铺。
+
+#### 动作按钮
+
+```js
+await notify.send({
+  title: "3 个站点 Cookie 同步失败",
+  body: "- pt1：登录失效\n- pt2：超时",
+  buttons: [[
+    { label: "重试", action: "retry", data: { sites: ["pt1", "pt2"] } },  // 动作按钮
+    { label: "打开面板", url: "https://example.com/" }                    // 链接按钮
+  ]]
+});
+```
+
+- `action` 必须是本插件 `manifest.actions` 里声明的名字，否则整条消息 reject「按钮动作未在 manifest 中声明」。`data` 可选，任意 JSON 值，序列化后（不做 HTML 转义）不超过 **4096 字节**；点击时原样交回给你（`on_notify_action` 的 `p.data`）。
+- 用户点了 → 宿主调用本插件的 [`on_notify_action`](#on_notify_action动作按钮被点击)，返回值作为结果显示在这条通知的每一份副本末尾（`✓ <文字>`）。**一条通知只处理一次**，7 天后过期。
+- 谁能点：按钮所属动作的 `requires`（全部具备）；为空 = 只有管理员。点的人必须在 FC 里绑定了 Telegram。
+- 只有 Telegram、且 bot 此刻在收消息（通知设置里 Telegram 的接收状态是「运行中」或 webhook）时动作按钮才发出去；发到 Slack 的那份、或 bot 收不到消息时（比如这个 bot 被别的程序占用而停了），动作按钮从消息里去掉，消息照发、链接按钮照常。
+- 动作按钮的文字后面不附域名（链接按钮才附）。
 
 #### 图片
 
 <!-- C-2 依赖段：以 FollowCat 阶段 C-2（通知图片）最终实现为准 -->
 - 地址本身不合规（不是 http / https、带用户名密码、过长）在调用时就 reject（见上表）；图片能不能下载、内容合不合规要到**发送时**才检查，这一步出问题**不会 reject**：这条消息照发、只是不带图（不算发送失败）。
-- 限制：最大 **10 MB**；只收 **JPEG / PNG / WebP / GIF**（按内容判断，不看扩展名）；像素数不超过 4000 万；最多 3 次重定向；单张下载 15 秒超时。
+- 限制：最大 **10,000,000 字节**（10 MB）；只收 **JPEG / PNG / WebP / GIF**（按内容判断，不看扩展名）；像素数不超过 4000 万；最多 3 次重定向；单张下载 15 秒超时。
 - 内网地址：插件声明了 `api.http` 才能用局域网 / Tailscale 地址的图（放行规则同 `http.*`；本机回环、链路本地、云厂商元数据地址始终拦截）；没声明只能用公网地址。
 - 宿主下载图片**不走环境代理**（`HTTPS_PROXY` 等）：FollowCat 只能经代理出网时，公网图片可能下不来，消息会退回纯文字。
+- 图片在消息入队时就开始在后台下载（同时最多下 2 张），**不卡发送队列**：发往别的对话的消息照常发；同一个对话里排在这条后面的消息会等它，保持先后顺序。
 - Telegram：宿主下载后上传；带图消息的说明文字上限 1024 字，超出时先发图（只带标题），再单独发正文和按钮。
-- Slack：由 Slack 自己去拉图，只能是 Slack 访问得到的公网地址；Slack 拉不到就去掉图重发一次。豆瓣等有防盗链的图片站，目前在 Slack 上不发图。
+- Telegram 另有尺寸要求：**宽 + 高 ≤ 10000，长边 ÷ 短边 ≤ 20**。不满足的图下载后就不上传，这条消息按纯文字发（不算发送失败）。
+- Telegram 拒收这张图（图片处理失败、尺寸不对、文件太大之类）时，宿主在同一次发送里改成纯文字再发一次（同样的正文和按钮），以这次的结果为准；上传超时 / 网络出错时，这张图记为失败，重试只发文字、不再传图。
+- Slack：由 Slack 自己去拉图，只能是 Slack 访问得到的公网地址；Slack 拉不到就去掉图重发一次。豆瓣等有防盗链的图片站：管理员在设置里填了「FC 访问地址」时经 FollowCat 中转给 Slack，没填就不发图。
 
 #### 配额
 
@@ -781,6 +982,7 @@ async function notifyDone(n) {
 | `log.*` / `config.*` | 文件系统、子进程、数据库句柄 |
 | `plugin.on` 订阅 hook | 抛错中断主流程（一律被隔离） |
 | `plugin.registerAPI` 暴露端点 | 默认网络（须显式 `api.http`） |
+| `notify.send` 发带动作按钮的消息、提供 Telegram bot 命令（需 `api.notify.send`） | 拿到用户的 Telegram 身份、指定发给谁 |
 
 ---
 
@@ -890,7 +1092,7 @@ async function notifyDone(n) {
 ## MVP 限制（请知悉）
 
 - **iframe 为 admin-only**：`ui.embed` 插件 UI 只在管理员视图下可见，普通用户看不到设置标签。
-- **仅一个可否决 hook**：`should_download` 是当前唯一的同步可否决 hook（读返回值、可拦下载）；其余 `on_*` 都是只读通知（fire-and-forget），无其它 `on_before_*`。
+- **仅一个可否决 hook**：`should_download` 是当前唯一的同步可否决 hook（读返回值、可拦下载）；`on_notify_action` / `on_bot_command` 也读返回值，但只决定回给用户什么（见「通知交互 hook」）；其余 `on_*` 都是只读通知（fire-and-forget），无其它 `on_before_*`。
 - **无热重载**：插件代码改动需重新上传/启用；配置改动是热生效。
 - **单 hook 仅最后注册有效**：同一 plugin 内重复 `plugin.on("x", ...)` 后者覆盖前者。
 - **manifest 大小** ≤ 64 KiB，单文件 ≤ 5 MiB，zip 总解压 ≤ 20 MiB / ≤ 200 条目；zip 内条目路径归一化后**不得重名**（有重复整个 zip 被拒，预览与安装都一样）。
@@ -937,7 +1139,7 @@ async function notifyDone(n) {
 | `api.ptsite.write` ⚠️敏感 | `ptsite.setCookie`（只写 cookie；批次 3 补 `create/update/delete`） | 已实现（凭据写入） |
 | `api.douban.cookie.read` | `douban.getCookie` | 已实现 |
 | `api.douban.cookie.write` ⚠️敏感 | `douban.setCookie(v, {validate})` | 已实现 |
-| `api.notify.send` | `notify.send`（借宿主已配置的 Telegram / Slack 通道发消息，开头固定标插件名；不能指定通道或收件人） | 已实现 |
+| `api.notify.send` | `notify.send`（借宿主已配置的 Telegram / Slack 通道发消息，开头固定标插件名；不能指定通道或收件人；可带动作按钮）；注册 `on_notify_action` / `on_bot_command`；声明 `manifest.actions` / `manifest.commands` | 已实现 |
 | `api.rsssite.read` | `rsssite.list/get` | 规划中 |
 | `api.rsssite.write` ⚠️敏感 | `rsssite.create/update/delete` | 规划中 |
 | `api.douban.read` | `douban.listMedias/getMedia/listTasks/getTask` | 规划中 |

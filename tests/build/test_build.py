@@ -14,6 +14,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 
 BUILD_PY = Path(__file__).resolve().parents[2] / "scripts" / "build.py"
@@ -145,6 +146,29 @@ class BuildScriptTest(unittest.TestCase):
         self.assertEqual(entry["hooks"], ["on_link_done"])
         self.assertEqual(entry["source_url"], "https://plugins.followcat.io/demo")
         self.assertEqual(entry["name"], "demo")
+
+    def test_manifest_actions_and_commands_stay_out_of_the_index(self) -> None:
+        # 通知交互（主仓阶段 D）：manifest.actions / commands 只随 zip 走（宿主安装 / 升级预览从 zip 里的 manifest 读），
+        # 不进 index.json entry——宿主解析 index 是 DisallowUnknownFields，多一个字段整个源都会解析失败
+        m = _manifest("1.0.0", ["api.notify.send"])
+        m.update({"hooks": ["on_notify_action", "on_bot_command"],
+                  "actions": [{"name": "retry", "label": "重试", "requires": ["logs:read"]}],
+                  "commands": [{"name": "status", "description": "看状态"}]})
+        self.write_plugin(m, "// v1\n")
+        self.write_index(m)
+        self.commit("v1")
+        self.git("tag", "demo/v1.0.0")
+        check = self.run_build("--check")
+        self.assertEqual(check.returncode, 0, check.stdout + check.stderr)
+        res = self.run_build()
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        entry = json.loads((self.dir / "dist" / "index.json").read_text(encoding="utf-8"))["entries"][0]
+        self.assertEqual(set(entry), {"name", "version", "author", "description", "source_url", "homepage_url", "icon",
+                                      "zip_url", "zip_size", "zip_sha256", "permissions", "hooks", "published_at"})
+        with zipfile.ZipFile(self.dir / "dist" / "packages" / "demo" / "1.0.0" / "plugin.zip") as zf:
+            packed = json.loads(zf.read("manifest.json").decode("utf-8"))
+        self.assertEqual(packed["actions"], m["actions"])
+        self.assertEqual(packed["commands"], m["commands"])
 
     def test_check_uses_committed_head_not_the_working_tree(self) -> None:
         # G3：只在工作树里把版本号改大（没提交）骗不过 --check——比较的是已提交的 HEAD

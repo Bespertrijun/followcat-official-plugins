@@ -323,7 +323,7 @@
   "name": "link control char",
   "msg": {
    "title": "t",
-   "body": "[x](https://a.example/\u007f)"
+   "body": "[x](https://a.example/)"
   },
   "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
  },
@@ -590,7 +590,7 @@
     ]
    }
   },
-  "want": "正文里的链接过长（上限 2048 字符）"
+  "want": "正文里的链接过长（上限 2048 字节）"
  },
  {
   "name": "link CJK path escaped ok",
@@ -628,7 +628,7 @@
     ]
    }
   },
-  "want": "正文里的链接过长（上限 2048 字符）"
+  "want": "正文里的链接过长（上限 2048 字节）"
  },
  {
   "name": "link CJK query verbatim",
@@ -647,7 +647,7 @@
     ]
    }
   },
-  "want": "正文里的链接过长（上限 2048 字符）"
+  "want": "正文里的链接过长（上限 2048 字节）"
  },
  {
   "name": "link CJK fragment escaped",
@@ -666,7 +666,7 @@
     ]
    }
   },
-  "want": "正文里的链接过长（上限 2048 字符）"
+  "want": "正文里的链接过长（上限 2048 字节）"
  },
  {
   "name": "link path with percent-encoded ok",
@@ -807,7 +807,7 @@
     ]
    }
   },
-  "want": "图片地址过长（上限 2048 字符）"
+  "want": "图片地址过长（上限 2048 字节）"
  },
  {
   "name": "image spaces escaped ok",
@@ -843,7 +843,7 @@
     ]
    }
   },
-  "want": "图片地址过长（上限 2048 字符）"
+  "want": "图片地址过长（上限 2048 字节）"
  },
  {
   "name": "image relative",
@@ -1133,7 +1133,7 @@
     ]
    ]
   },
-  "want": "按钮只能是链接（url）或动作（action）其中一种"
+  "want": "按钮动作未在 manifest 中声明"
  },
  {
   "name": "neither url nor action",
@@ -1210,7 +1210,7 @@
     ]
    ]
   },
-  "want": "按钮动作未在 manifest 中声明"
+  "want": ""
  },
  {
   "name": "action with small data",
@@ -1228,7 +1228,7 @@
     ]
    ]
   },
-  "want": "按钮动作未在 manifest 中声明"
+  "want": ""
  },
  {
   "name": "action data too big",
@@ -1293,7 +1293,7 @@
     ]
    ]
   },
-  "want": "按钮动作未在 manifest 中声明"
+  "want": ""
  },
  {
   "name": "label blank before action",
@@ -1352,7 +1352,7 @@
     ]
    ]
   },
-  "want": "按钮链接无效：只允许 http / https，且不能带用户名和密码"
+  "want": "按钮动作未在 manifest 中声明"
  },
  {
   "name": "button javascript url",
@@ -1392,7 +1392,7 @@
     ]
    ]
   },
-  "want": "按钮链接过长（上限 2048 字符）"
+  "want": "按钮链接过长（上限 2048 字节）"
  },
  {
   "name": "button url userinfo",
@@ -1489,5 +1489,4094 @@
    }
   },
   "want": "正文过长（上限 16384 字节）"
+ },
+ {
+  "name": "bare userinfo plain",
+  "msg": {
+   "title": "t",
+   "body": "see https://user@evil.cn/x"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "bare userinfo lookalike",
+  "msg": {
+   "title": "t",
+   "body": "https://bank.com@evil.cn"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "bare userinfo user:pass",
+  "msg": {
+   "title": "t",
+   "body": "http://u:p@h.example/"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "bare userinfo in quote",
+  "msg": {
+   "title": "t",
+   "body": "> https://u@h.example"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "bare userinfo in expandable quote",
+  "msg": {
+   "title": "t",
+   "body": ">> https://u@h.example"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "bare userinfo in list",
+  "msg": {
+   "title": "t",
+   "body": "- https://u@h.example"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "bare userinfo in bold",
+  "msg": {
+   "title": "t",
+   "body": "**https://u@h.example**"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "bare userinfo in italic",
+  "msg": {
+   "title": "t",
+   "body": "*https://u@h.example*"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "bare userinfo in strike",
+  "msg": {
+   "title": "t",
+   "body": "~~https://u@h.example~~"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "bare userinfo in spoiler",
+  "msg": {
+   "title": "t",
+   "body": "||https://u@h.example||"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "bare userinfo in link text",
+  "msg": {
+   "title": "t",
+   "body": "[https://u@h.example](https://ok.example/)"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "bare userinfo second line",
+  "msg": {
+   "title": "t",
+   "body": "ok\nhttps://u@h.example"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "bare userinfo after CRLF",
+  "msg": {
+   "title": "t",
+   "body": "ok\r\nhttps://u@h.example"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "bare userinfo in code span ok",
+  "msg": {
+   "title": "t",
+   "body": "`https://u@h.example`"
+  },
+  "want": ""
+ },
+ {
+  "name": "bare userinfo in double-tick code span ok",
+  "msg": {
+   "title": "t",
+   "body": "``a ` https://u@h.example``"
+  },
+  "want": ""
+ },
+ {
+  "name": "bare userinfo in code block ok",
+  "msg": {
+   "title": "t",
+   "body": "```\nhttps://u@h.example\n```"
+  },
+  "want": ""
+ },
+ {
+  "name": "bare userinfo in code block with lang ok",
+  "msg": {
+   "title": "t",
+   "body": "```txt\nhttps://u@h.example\n```"
+  },
+  "want": ""
+ },
+ {
+  "name": "bare userinfo in unclosed fence",
+  "msg": {
+   "title": "t",
+   "body": "```\nhttps://u@h.example"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "bare userinfo after closed fence",
+  "msg": {
+   "title": "t",
+   "body": "```\nx\n```\nhttps://u@h.example"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "bare https ok",
+  "msg": {
+   "title": "t",
+   "body": "https://a.example/x?y=1"
+  },
+  "want": ""
+ },
+ {
+  "name": "bare email ok",
+  "msg": {
+   "title": "t",
+   "body": "mail a@b.example"
+  },
+  "want": ""
+ },
+ {
+  "name": "mailto ok",
+  "msg": {
+   "title": "t",
+   "body": "mailto:a@b.example"
+  },
+  "want": ""
+ },
+ {
+  "name": "at after slash ok",
+  "msg": {
+   "title": "t",
+   "body": "https://a.example/@user"
+  },
+  "want": ""
+ },
+ {
+  "name": "space before at ok",
+  "msg": {
+   "title": "t",
+   "body": "https://a.example @u"
+  },
+  "want": ""
+ },
+ {
+  "name": "tab before at ok",
+  "msg": {
+   "title": "t",
+   "body": "https://u\t@h"
+  },
+  "want": ""
+ },
+ {
+  "name": "form feed before at ok",
+  "msg": {
+   "title": "t",
+   "body": "https://u\f@h"
+  },
+  "want": ""
+ },
+ {
+  "name": "vertical tab before at",
+  "msg": {
+   "title": "t",
+   "body": "https://u\u000b@h"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "nbsp before at",
+  "msg": {
+   "title": "t",
+   "body": "https://u\u00a0@h"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "ideographic space before at",
+  "msg": {
+   "title": "t",
+   "body": "https://u\u3000@h"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "ftp scheme",
+  "msg": {
+   "title": "t",
+   "body": "ftp://u@h"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "custom scheme",
+  "msg": {
+   "title": "t",
+   "body": "x+y.z-w://u@h"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "digit prefix still matches",
+  "msg": {
+   "title": "t",
+   "body": "1http://u@h"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "digit scheme ok",
+  "msg": {
+   "title": "t",
+   "body": "1://u@h"
+  },
+  "want": ""
+ },
+ {
+  "name": "empty userinfo",
+  "msg": {
+   "title": "t",
+   "body": "a://@"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "uppercase",
+  "msg": {
+   "title": "t",
+   "body": "HTTPS://U@H"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "escaped at",
+  "msg": {
+   "title": "t",
+   "body": "https://u\\@h"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "escaped slash",
+  "msg": {
+   "title": "t",
+   "body": "https:/\\/u@h"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "split by bold ok",
+  "msg": {
+   "title": "t",
+   "body": "https://u.**x**.@h"
+  },
+  "want": ""
+ },
+ {
+  "name": "unpaired bold merges",
+  "msg": {
+   "title": "t",
+   "body": "https://u.**x.@h"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "alnum stars are literal",
+  "msg": {
+   "title": "t",
+   "body": "https://u**x**@h"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "split by code span ok",
+  "msg": {
+   "title": "t",
+   "body": "https://u`x`@h"
+  },
+  "want": ""
+ },
+ {
+  "name": "split by link ok",
+  "msg": {
+   "title": "t",
+   "body": "https://u[x](https://a.example/)@h"
+  },
+  "want": ""
+ },
+ {
+  "name": "invalid link literal merges",
+  "msg": {
+   "title": "t",
+   "body": "https://u[x](ftp://a)@h"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "userinfo-like in link query ok",
+  "msg": {
+   "title": "t",
+   "body": "[x](https://a.example/p?u=https://u@h)"
+  },
+  "want": ""
+ },
+ {
+  "name": "bare userinfo before long link",
+  "msg": {
+   "title": "t",
+   "body": {
+    "$cat": [
+     "[x](https://a.example/",
+     {
+      "$repeat": [
+       "p",
+       2048
+      ]
+     },
+     ") https://u@h"
+    ]
+   }
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "long link alone",
+  "msg": {
+   "title": "t",
+   "body": {
+    "$cat": [
+     "[x](https://a.example/",
+     {
+      "$repeat": [
+       "p",
+       2048
+      ]
+     },
+     ")"
+    ]
+   }
+  },
+  "want": "正文里的链接过长（上限 2048 字节）"
+ },
+ {
+  "name": "bare userinfo in quote second line",
+  "msg": {
+   "title": "t",
+   "body": "> ok\n> https://u@h"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "bare userinfo in bold italic",
+  "msg": {
+   "title": "t",
+   "body": "***https://u@h***"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "crossing pairs literal",
+  "msg": {
+   "title": "t",
+   "body": "**a ~~b** https://u@h~~"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "emoji then bare",
+  "msg": {
+   "title": "t",
+   "body": "😀https://u@h"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "crossing pairs merge into one text",
+  "msg": {
+   "title": "t",
+   "body": "s://u.**.~~.**.@~~"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "nested pairs split the text ok",
+  "msg": {
+   "title": "t",
+   "body": "s://u.**.~~.~~.**.@"
+  },
+  "want": ""
+ },
+ {
+  "name": "same-kind nesting is literal",
+  "msg": {
+   "title": "t",
+   "body": "***s://u.**.**@h***"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "different-kind nesting splits ok",
+  "msg": {
+   "title": "t",
+   "body": "***s://u.~~.~~@h***"
+  },
+  "want": ""
+ },
+ {
+  "name": "declared action",
+  "msg": {
+   "title": "t",
+   "buttons": [
+    {
+     "label": "重试",
+     "action": "retry"
+    }
+   ]
+  },
+  "want": ""
+ },
+ {
+  "name": "declared action with data",
+  "msg": {
+   "title": "t",
+   "buttons": [
+    {
+     "label": "重试",
+     "action": "retry",
+     "data": {
+      "id": 7,
+      "s": "x"
+     }
+    }
+   ]
+  },
+  "want": ""
+ },
+ {
+  "name": "declared action with requires",
+  "msg": {
+   "title": "t",
+   "buttons": [
+    {
+     "label": "知道了",
+     "action": "ack"
+    }
+   ]
+  },
+  "want": ""
+ },
+ {
+  "name": "undeclared action",
+  "msg": {
+   "title": "t",
+   "buttons": [
+    {
+     "label": "a",
+     "action": "nope"
+    }
+   ]
+  },
+  "want": "按钮动作未在 manifest 中声明"
+ },
+ {
+  "name": "action name is case-sensitive",
+  "msg": {
+   "title": "t",
+   "buttons": [
+    {
+     "label": "a",
+     "action": "Retry"
+    }
+   ]
+  },
+  "want": "按钮动作未在 manifest 中声明"
+ },
+ {
+  "name": "undeclared action before missing title",
+  "msg": {
+   "title": "",
+   "buttons": [
+    {
+     "label": "a",
+     "action": "nope"
+    }
+   ]
+  },
+  "want": "按钮动作未在 manifest 中声明"
+ },
+ {
+  "name": "undeclared action before body too long",
+  "msg": {
+   "title": "t",
+   "buttons": [
+    {
+     "label": "a",
+     "action": "nope"
+    }
+   ],
+   "body": {
+    "$repeat": [
+     "a",
+     16385
+    ]
+   }
+  },
+  "want": "按钮动作未在 manifest 中声明"
+ },
+ {
+  "name": "undeclared action before row size",
+  "msg": {
+   "title": "t",
+   "buttons": [
+    [
+     {
+      "label": "a",
+      "url": "https://a.example/"
+     },
+     {
+      "label": "b",
+      "url": "https://a.example/"
+     },
+     {
+      "label": "c",
+      "url": "https://a.example/"
+     },
+     {
+      "label": "d",
+      "action": "nope"
+     }
+    ]
+   ]
+  },
+  "want": "按钮动作未在 manifest 中声明"
+ },
+ {
+  "name": "undeclared action before empty label",
+  "msg": {
+   "title": "t",
+   "buttons": [
+    {
+     "label": "",
+     "action": "nope"
+    }
+   ]
+  },
+  "want": "按钮动作未在 manifest 中声明"
+ },
+ {
+  "name": "undeclared action with url",
+  "msg": {
+   "title": "t",
+   "buttons": [
+    {
+     "label": "a",
+     "action": "nope",
+     "url": "https://a.example/"
+    }
+   ]
+  },
+  "want": "按钮动作未在 manifest 中声明"
+ },
+ {
+  "name": "declared action with url",
+  "msg": {
+   "title": "t",
+   "buttons": [
+    {
+     "label": "a",
+     "action": "retry",
+     "url": "https://a.example/"
+    }
+   ]
+  },
+  "want": "按钮只能是链接（url）或动作（action）其中一种"
+ },
+ {
+  "name": "declared action empty label",
+  "msg": {
+   "title": "t",
+   "buttons": [
+    {
+     "label": " ",
+     "action": "retry"
+    }
+   ]
+  },
+  "want": "按钮文字不能为空"
+ },
+ {
+  "name": "action data 4096 bytes",
+  "msg": {
+   "title": "t",
+   "buttons": [
+    {
+     "label": "a",
+     "action": "retry",
+     "data": {
+      "$repeat": [
+       "d",
+       4094
+      ]
+     }
+    }
+   ]
+  },
+  "want": ""
+ },
+ {
+  "name": "action data 4097 bytes",
+  "msg": {
+   "title": "t",
+   "buttons": [
+    {
+     "label": "a",
+     "action": "retry",
+     "data": {
+      "$repeat": [
+       "d",
+       4095
+      ]
+     }
+    }
+   ]
+  },
+  "want": "按钮数据过大（上限 4096 字节）"
+ },
+ {
+  "name": "action data CJK bytes",
+  "msg": {
+   "title": "t",
+   "buttons": [
+    {
+     "label": "a",
+     "action": "retry",
+     "data": {
+      "$repeat": [
+       "汉",
+       1364
+      ]
+     }
+    }
+   ]
+  },
+  "want": ""
+ },
+ {
+  "name": "action data CJK bytes over",
+  "msg": {
+   "title": "t",
+   "buttons": [
+    {
+     "label": "a",
+     "action": "retry",
+     "data": {
+      "$repeat": [
+       "汉",
+       1365
+      ]
+     }
+    }
+   ]
+  },
+  "want": "按钮数据过大（上限 4096 字节）"
+ },
+ {
+  "name": "data null on link ok",
+  "msg": {
+   "title": "t",
+   "buttons": [
+    {
+     "label": "a",
+     "url": "https://a.example/",
+     "data": null
+    }
+   ]
+  },
+  "want": ""
+ },
+ {
+  "name": "data empty string on link",
+  "msg": {
+   "title": "t",
+   "buttons": [
+    {
+     "label": "a",
+     "url": "https://a.example/",
+     "data": ""
+    }
+   ]
+  },
+  "want": "只有动作按钮可以带 data"
+ },
+ {
+  "name": "seven action buttons",
+  "msg": {
+   "title": "t",
+   "buttons": [
+    {
+     "label": "0",
+     "action": "retry"
+    },
+    {
+     "label": "1",
+     "action": "retry"
+    },
+    {
+     "label": "2",
+     "action": "retry"
+    },
+    {
+     "label": "3",
+     "action": "retry"
+    },
+    {
+     "label": "4",
+     "action": "retry"
+    },
+    {
+     "label": "5",
+     "action": "retry"
+    },
+    {
+     "label": "6",
+     "action": "retry"
+    }
+   ]
+  },
+  "want": "按钮最多 6 个"
+ },
+ {
+  "name": "row of four actions",
+  "msg": {
+   "title": "t",
+   "buttons": [
+    [
+     {
+      "label": "0",
+      "action": "retry"
+     },
+     {
+      "label": "1",
+      "action": "retry"
+     },
+     {
+      "label": "2",
+      "action": "retry"
+     },
+     {
+      "label": "3",
+      "action": "retry"
+     }
+    ]
+   ]
+  },
+  "want": "每行按钮最多 3 个"
+ },
+ {
+  "name": "mixed link and action",
+  "msg": {
+   "title": "t",
+   "buttons": [
+    [
+     {
+      "label": "a",
+      "action": "retry",
+      "data": {
+       "k": 1
+      }
+     },
+     {
+      "label": "b",
+      "url": "https://a.example/"
+     }
+    ],
+    [
+     {
+      "label": "c",
+      "action": "ack"
+     }
+    ]
+   ]
+  },
+  "want": ""
+ },
+ {
+  "name": "action empty string is a link",
+  "msg": {
+   "title": "t",
+   "buttons": [
+    {
+     "label": "a",
+     "action": "",
+     "url": "https://a.example/"
+    }
+   ]
+  },
+  "want": ""
+ },
+ {
+  "name": "action empty no url",
+  "msg": {
+   "title": "t",
+   "buttons": [
+    {
+     "label": "a",
+     "action": ""
+    }
+   ]
+  },
+  "want": "按钮缺少链接（url）或动作（action）"
+ },
+ {
+  "name": "action null no url",
+  "msg": {
+   "title": "t",
+   "buttons": [
+    {
+     "label": "a",
+     "action": null
+    }
+   ]
+  },
+  "want": "按钮缺少链接（url）或动作（action）"
+ },
+ {
+  "name": "action buttons then bad link",
+  "msg": {
+   "title": "t",
+   "buttons": [
+    {
+     "label": "a",
+     "action": "retry"
+    },
+    {
+     "label": "b",
+     "url": "ftp://a.example/"
+    }
+   ]
+  },
+  "want": "按钮链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 0",
+  "msg": {
+   "body": "(x //- https://a.example/)\u00a0https://```",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 1",
+  "msg": {
+   "body": "(u@h)汉||\t(u@h)@\\*//ftp://https://汉*- :a.example(++",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 2",
+  "msg": {
+   "body": "@:a.example- a://@]``\\@ftp://(- )//++a://@||)(u@h)@",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 3",
+  "msg": {
+   "body": "\\@[t](>> ](a.example)\\@(\u00a0x```\\@> ",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 4",
+  "msg": {
+   "body": "\\@\\@ x(***)[u😀\\`",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 5",
+  "msg": {
+   "body": "\\*http://>> 汉https://a.example/)https://*\\/\\@(u@h)/https://``\u00a0",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 6",
+  "msg": {
+   "body": "\u00a0@*](😀https:// ```> h\ta.example",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 7",
+  "msg": {
+   "body": "a://@hx``",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 8",
+  "msg": {
+   "body": "||>> a://@]\t\\\n>> (u@h)~~[\u00a0https://a.example/)``",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 9",
+  "msg": {
+   "body": "[t](/ftp://``汉||(u@h)",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 10",
+  "msg": {
+   "body": "http://(u@h)\\*[t](x(u@h)|| x\n++\\@\\@a://@(x\n:",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 11",
+  "msg": {
+   "body": "a://@uxhttp://*- ```\n\n",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 12",
+  "msg": {
+   "body": "x***/\\@@[\n- :h++](\\a://@||a.example汉](~~",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 13",
+  "msg": {
+   "body": "++\\[t](**x++[]((:\\@https://- https://a.example/)\u00a0 ",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 14",
+  "msg": {
+   "body": "ftp://- `````\\😀)\nhttps://\\@/\\||`",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 15",
+  "msg": {
+   "body": "ftp://(> (u@h)- )ftp://**//a://@``]\\**a.example++`[t](u",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 16",
+  "msg": {
+   "body": "***~~||```\u00a0||\u00a0",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 17",
+  "msg": {
+   "body": "https://~~\n)\\@x",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 18",
+  "msg": {
+   "body": "(u@h)`> \t```***汉\t//a.example***",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 19",
+  "msg": {
+   "body": ">> **``@/))\\@(u@h)h",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 20",
+  "msg": {
+   "body": "😀```]((/h\\*\nhttp://++++~~a://@(x/*汉](",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 21",
+  "msg": {
+   "body": "(:\t(u@h)\u00a0](http:////\\*``](~~/",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 22",
+  "msg": {
+   "body": "(/[t](",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 23",
+  "msg": {
+   "body": "😀++h](``\u00a0@h***``a.example///\n",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 24",
+  "msg": {
+   "body": "a.example[*x```](\\*- ]\\*\\*:ha.exampleu[",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 25",
+  "msg": {
+   "body": "//`https://",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 26",
+  "msg": {
+   "body": "ftp:///",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 27",
+  "msg": {
+   "body": ")]([",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 28",
+  "msg": {
+   "body": "`a.example\u00a0a.example\\@~~\nhttp://***\n//~~",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 29",
+  "msg": {
+   "body": " (u@h)\\*https://**https://a.example/)ftp://++http://https://http:///[>> x **",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 30",
+  "msg": {
+   "body": "\\> ***``ftp://(😀",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 31",
+  "msg": {
+   "body": "- @``[- [\u00a0[u***x",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 32",
+  "msg": {
+   "body": "https://(u@h)h",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 33",
+  "msg": {
+   "body": "||https://a.example/)- ***- /[t](https://a.example/)>>  \u00a0a.exampleftp://(`",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 34",
+  "msg": {
+   "body": "xha.example(>> **[t](***",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 35",
+  "msg": {
+   "body": "//a.example\\@@@[x~~:😀||u>> ",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 36",
+  "msg": {
+   "body": "***😀[t](/ @](汉http:///> //h\n(](:",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 37",
+  "msg": {
+   "body": "😀hu a.example",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 38",
+  "msg": {
+   "body": "***ftp://> https://a.example/)``\\*汉@**\\* [u> `````h",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 39",
+  "msg": {
+   "body": "(\\@*汉hx~~",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 40",
+  "msg": {
+   "body": ">> ||(xx~~",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 41",
+  "msg": {
+   "body": "http://😀***u***x`😀汉\\*++******//++😀\\*](",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 42",
+  "msg": {
+   "body": "u``[//]https://(u@h)([```\thttps://a.example/)https://😀",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 43",
+  "msg": {
+   "body": "汉``h(u@h)汉:``]***[t](**//://\\",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 44",
+  "msg": {
+   "body": "- h😀> \n@*\t",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 45",
+  "msg": {
+   "body": "*))[t](**`//@[",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 46",
+  "msg": {
+   "body": "> a://@https://a.example/)> ftp://\\https://](~~``*a.example](\u00a0`(>  ",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 47",
+  "msg": {
+   "body": "https://汉*``(u@h)a.example",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 48",
+  "msg": {
+   "body": "\n (u@h)h***u",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 49",
+  "msg": {
+   "body": "a.example汉**😀x:]@\\@||uftp://\n]( ```//😀",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 50",
+  "msg": {
+   "body": "@*//\n>> ***",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 51",
+  "msg": {
+   "body": "`\\@(u@h)\n",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 52",
+  "msg": {
+   "body": "u``\t\u00a0>> ``//",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 53",
+  "msg": {
+   "body": "++> ftp://汉",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 54",
+  "msg": {
+   "body": ">> a://@\\",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 55",
+  "msg": {
+   "body": "> ++***> :",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 56",
+  "msg": {
+   "body": "u汉**https://汉\u00a0",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 57",
+  "msg": {
+   "body": "||http://@ftp://\n++- https://``",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 58",
+  "msg": {
+   "body": "\nftp://(u@h)](:```http://http://u\u00a0~~(\\http://hhttps://a.example/)\\@(u@h)",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 59",
+  "msg": {
+   "body": "x[)~~\u00a0 https://(]***a://@",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 60",
+  "msg": {
+   "body": "~~[```\thttp://[(](> a://@http://]> ",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 61",
+  "msg": {
+   "body": "@http://\t\n\thttps://a.example/)\\*\\@||x:",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 62",
+  "msg": {
+   "body": "https:////~~*:https://a.example/)https://\u00a0**- ",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 63",
+  "msg": {
+   "body": "\\@\u00a0//[汉",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 64",
+  "msg": {
+   "body": "a.example\u00a0*a://@",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 65",
+  "msg": {
+   "body": "😀- ```(u@h)](||```/[(u@h)@(u@h)@@",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 66",
+  "msg": {
+   "body": "a.example]",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 67",
+  "msg": {
+   "body": "😀***\u00a0h😀",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 68",
+  "msg": {
+   "body": " ```> ``",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 69",
+  "msg": {
+   "body": "/[\\*\\@[\\@u )```a.examplehttps://******@(u@h)\n",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 70",
+  "msg": {
+   "body": ":h\n汉(>> ``",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 71",
+  "msg": {
+   "body": "a://@\\u- \\@xhttp://",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 72",
+  "msg": {
+   "body": "\\``:]a.example>> ```https://a.example/)汉[t](**[t](++](- ",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 73",
+  "msg": {
+   "body": "``\n~~`]a.example](",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 74",
+  "msg": {
+   "body": ">> a.examplea.exampleu```//ftp://(u@h)\n",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 75",
+  "msg": {
+   "body": "``[x(u@h)\n(||\\@",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 76",
+  "msg": {
+   "body": "||ftp://a.example>> ",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 77",
+  "msg": {
+   "body": "\\*x\\@``||(u@h)[t](😀:x`**++>> ](汉)",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 78",
+  "msg": {
+   "body": "http://@]u\u00a0(* a.examplea://@\\*",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 79",
+  "msg": {
+   "body": ")||*:`\\*\t||\\*http://([t](++ftp:////](",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 80",
+  "msg": {
+   "body": "\u00a0**\t汉:(u@h)http://\\*[t](\n`**😀//(u@h)\\@xftp://~~",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 81",
+  "msg": {
+   "body": "ftp://\\@*ftp://``(u@h)@",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 82",
+  "msg": {
+   "body": "\u00a0\\@\\@\\*a.example***\\@@\t](a.examplehttps://a.example/)> ``汉",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 83",
+  "msg": {
+   "body": "/ftp://~~a://@> > [ :- https://",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 84",
+  "msg": {
+   "body": "\n[t](**\\||/[https://a.example/)``https://汉>> [t](**](++",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 85",
+  "msg": {
+   "body": ")||~~>> ",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 86",
+  "msg": {
+   "body": "hh/\\@[\\@](",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 87",
+  "msg": {
+   "body": "++``http://||http://\u00a0]~~😀/*😀x\n😀\n汉",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 88",
+  "msg": {
+   "body": "~~[t](:a://@ha://@\\@",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 89",
+  "msg": {
+   "body": "\\``(u@h))]u(",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 90",
+  "msg": {
+   "body": "]- >> /h`",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 91",
+  "msg": {
+   "body": "**\u00a0~~](",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 92",
+  "msg": {
+   "body": "- ``@[http://||x///> ***",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 93",
+  "msg": {
+   "body": "******~~\u00a0汉(u@h)\\u++||||(u@h):**@",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 94",
+  "msg": {
+   "body": "** **@\nx++**",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 95",
+  "msg": {
+   "body": "*> ~~**(u@h)`//```>>  > http://a.example\t]h(u@h)> 汉",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 96",
+  "msg": {
+   "body": "\\@> ",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 97",
+  "msg": {
+   "body": "](\t//\u00a0)- >> > \\*a.example\t++a.examplehttps://a.example/)u++~~",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 98",
+  "msg": {
+   "body": "https://u``a://@`a://@",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 99",
+  "msg": {
+   "body": "x(u@h)*x[t]( \\@++**\\[~~](h",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 100",
+  "msg": {
+   "body": "/https://a.example/)https://:~~**```汉](",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 101",
+  "msg": {
+   "body": "]>> )a.example",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 102",
+  "msg": {
+   "body": "a.example***\thttp://)a.example",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 103",
+  "msg": {
+   "body": "hhttp://*++a.example",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 104",
+  "msg": {
+   "body": "https://a.example/)- >> ++",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 105",
+  "msg": {
+   "body": "`ftp://- *++",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 106",
+  "msg": {
+   "body": "\u00a0[++)`x||https://a.example/)++//",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 107",
+  "msg": {
+   "body": "- [t](😀http://`](` (u@h) ftp://```",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 108",
+  "msg": {
+   "body": "``uhttp://h++😀```\nftp://]://",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 109",
+  "msg": {
+   "body": "(||a://@@https://😀\t/@||",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 110",
+  "msg": {
+   "body": "u\t@(\\ftp://`https://\\`//)\u00a0",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 111",
+  "msg": {
+   "body": ":hh >> https://h\n",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 112",
+  "msg": {
+   "body": "**++||> https://a.example/)]😀//https://a.example/):]])a://@[",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 113",
+  "msg": {
+   "body": "a.example]((ftp://](```h[t](:[t](https://a.example/)ftp://***",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 114",
+  "msg": {
+   "body": "]](> > >> //x++> \\*\u00a0~~",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 115",
+  "msg": {
+   "body": "\thttps://a.example/)\\*/>> \t[``](h*/",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 116",
+  "msg": {
+   "body": "))||](u@h)https://a.example/)*a://@x汉\u00a0a.example```",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 117",
+  "msg": {
+   "body": "x(u@h)]/ftp://[t](ftp://***",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 118",
+  "msg": {
+   "body": "]***",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 119",
+  "msg": {
+   "body": "a://@](- a.example~~u@//++a://@",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 120",
+  "msg": {
+   "body": "😀汉``xhttp://)\\~~\\*++***(u@h)",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 121",
+  "msg": {
+   "body": "\\\thttp:////",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 122",
+  "msg": {
+   "body": "- @](//\\",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 123",
+  "msg": {
+   "body": "a.example\\\t||hu(:ua://@> http://汉\\``x",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 124",
+  "msg": {
+   "body": "ftp://x``",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 125",
+  "msg": {
+   "body": "u\\***||~~:```汉https://汉//:\u00a0",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 126",
+  "msg": {
+   "body": ":**```https://a.example/)😀https://(u@h)()\\*]]>> *[t](",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 127",
+  "msg": {
+   "body": "https://`~~- *\u00a0u||ftp://",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 128",
+  "msg": {
+   "body": "\t||:> https://@ftp://",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 129",
+  "msg": {
+   "body": "//||]([t](",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 130",
+  "msg": {
+   "body": "(a://@//",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 131",
+  "msg": {
+   "body": "\\@>> u)a.example**x",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 132",
+  "msg": {
+   "body": "\\*\\> ||",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 133",
+  "msg": {
+   "body": "\\****: h//http://ftp://😀 - \t- ",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 134",
+  "msg": {
+   "body": "@https://a.example ",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 135",
+  "msg": {
+   "body": ">> ftp:// https://a.example/)]a.example++\t[t](\u00a0> https://[ha://@***](",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 136",
+  "msg": {
+   "body": "\u00a0😀\n\\[*> 😀😀@**\n",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 137",
+  "msg": {
+   "body": "[)++\n(",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 138",
+  "msg": {
+   "body": "h@*h( **[",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 139",
+  "msg": {
+   "body": "[t]((]\tx``",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 140",
+  "msg": {
+   "body": "\u00a0\tu[(u@h)http://***😀https://a.example/)http://😀\\",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 141",
+  "msg": {
+   "body": "ftp://`````\t\t]h)\\@:||***[t](https://\t[++[>> ",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 142",
+  "msg": {
+   "body": "> )```**>> a://@] //]\t:++]http://",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 143",
+  "msg": {
+   "body": "(u@h)||",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 144",
+  "msg": {
+   "body": "``*",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 145",
+  "msg": {
+   "body": "``\n- **++x ||",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 146",
+  "msg": {
+   "body": "ftp://ftp://(u@h)**[:",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 147",
+  "msg": {
+   "body": "\t😀[//a://@https://😀u\n\t",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 148",
+  "msg": {
+   "body": "[t](\u00a0https://a.example/)x/[t]()\\*||)- ~~> ```x``++ftp://汉",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 149",
+  "msg": {
+   "body": "- ++**",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 150",
+  "msg": {
+   "body": "***``\nhttp://**hhttp://` 😀ftp://]/",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 151",
+  "msg": {
+   "body": "https://a.example/)](*```(u@h)https://a.example/)///@)**",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 152",
+  "msg": {
+   "body": ")[t](++",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 153",
+  "msg": {
+   "body": "**(u@h)**\n汉\u00a0//@>>  https://[t](:> *",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 154",
+  "msg": {
+   "body": "\\- :a://@\\@- \u00a0~~",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 155",
+  "msg": {
+   "body": "h(u@h)http://u/http://`x**[\\@\u00a0\t~~](>> a://@[",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 156",
+  "msg": {
+   "body": "||https://> ***a://@\\@||\\*u:@😀",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 157",
+  "msg": {
+   "body": "``||\nhttps://a.example/)u/](](`//:\t😀\\@`***a://@",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 158",
+  "msg": {
+   "body": "++- 汉",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 159",
+  "msg": {
+   "body": "[t](uh@(]>> https://> ~~**https://a.example/)😀ftp://](:**[t](",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 160",
+  "msg": {
+   "body": "\t/\thttp://h](h\\](a.example\\@汉ftp://(",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 161",
+  "msg": {
+   "body": "//***",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 162",
+  "msg": {
+   "body": "~~||https://a.example/)(u@h)(u@h)https://http://\\@https://>> > *\\*a://@`~~``@",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 163",
+  "msg": {
+   "body": "h\t++``//\nhttps://x||",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 164",
+  "msg": {
+   "body": "//]](@uu**",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 165",
+  "msg": {
+   "body": "\n*",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 166",
+  "msg": {
+   "body": "@https://u:a.example",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 167",
+  "msg": {
+   "body": "\n[\\> ",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 168",
+  "msg": {
+   "body": "h(a.example]\t`a.example[t](http://\t/(u@h) ",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 169",
+  "msg": {
+   "body": "\t\ta.example******a.example- )*https://\\)",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 170",
+  "msg": {
+   "body": "//\u00a0\\@](",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 171",
+  "msg": {
+   "body": "***\\https://a.example/)[t]([~~:``😀https://a.example/)",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 172",
+  "msg": {
+   "body": "https://a.example/)\n```a://@",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 173",
+  "msg": {
+   "body": "**> //~~(u@h)>> ||>> :",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 174",
+  "msg": {
+   "body": "~~汉https://h",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 175",
+  "msg": {
+   "body": "@>> https://a.example/)/- ~~**u[t](\\@\\[",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 176",
+  "msg": {
+   "body": ":[//https://a.example/)](/>> x - > (``\\*",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 177",
+  "msg": {
+   "body": "a://@汉 \\@汉>> :||``a.example> a.example",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 178",
+  "msg": {
+   "body": "](*](```",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 179",
+  "msg": {
+   "body": "(u@h) ***",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 180",
+  "msg": {
+   "body": "\t]>> )[t](:>> ",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 181",
+  "msg": {
+   "body": "||u\\*@😀(u@h)(http://**\t`https://@`",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 182",
+  "msg": {
+   "body": "https://a.example/)xa.example*\\@`(- \\(ftp://:||](h[t](\\@",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 183",
+  "msg": {
+   "body": "http://||[",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 184",
+  "msg": {
+   "body": "a.example汉h [",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 185",
+  "msg": {
+   "body": "***",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 186",
+  "msg": {
+   "body": "[\u00a0***a://@https://a.example/)\t~~```[https://a.example/)(u@h)@",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 187",
+  "msg": {
+   "body": "- `a.example](\n",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 188",
+  "msg": {
+   "body": "(\\` [(u@h)]汉a://@````:++](@ftp://***",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 189",
+  "msg": {
+   "body": "`||**https://a.example/)😀//a.examplehttp://> ~~ftp://- \u00a0😀",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 190",
+  "msg": {
+   "body": "@x😀*\\@``**(u@h)++- *`++[t]( ",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 191",
+  "msg": {
+   "body": " \n||https://a.example/)",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 192",
+  "msg": {
+   "body": "\\@> a://@\t](",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 193",
+  "msg": {
+   "body": "||/- )https://a.example/)😀:",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 194",
+  "msg": {
+   "body": "[[*a.example**//++```\u00a0",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 195",
+  "msg": {
+   "body": ">> \u00a0>> ]",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 196",
+  "msg": {
+   "body": " http://http://\\h`:ftp://>> >> ",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 197",
+  "msg": {
+   "body": "汉****h```http://*``||",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 198",
+  "msg": {
+   "body": "a://@\\@\\*",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 199",
+  "msg": {
+   "body": "||[\t``++hhttps://u**a.example[t](",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 200",
+  "msg": {
+   "body": "```[t](`\\*||u-  \t@**```\\@https://a://@[t](\\@",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 201",
+  "msg": {
+   "body": "[](```\\(/++/ftp://)https:////",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 202",
+  "msg": {
+   "body": "u汉```***- x",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 203",
+  "msg": {
+   "body": "https://- `\t//",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 204",
+  "msg": {
+   "body": "x]😀a.exampleftp://",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 205",
+  "msg": {
+   "body": "***[t](**a://@x***:x> ]",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 206",
+  "msg": {
+   "body": "h\\*[\\*",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 207",
+  "msg": {
+   "body": "(u@h))++@>> *(u@h)> ***> ++//",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 208",
+  "msg": {
+   "body": "汉//a.example@]]😀https://a.example/)[t](https://a.example/)a.example||\\\\@++x)😀",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 209",
+  "msg": {
+   "body": "(u@h)> uuu",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 210",
+  "msg": {
+   "body": "[](***- 汉//\\@``(u@h)https://a.example/)[ftp://)/https://a.example/)",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 211",
+  "msg": {
+   "body": "//ua.example\u00a0x(u@h)https://a.example/)++[t](`~~@***@]",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 212",
+  "msg": {
+   "body": "https://a.example/)\u00a0",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 213",
+  "msg": {
+   "body": "~~汉h😀```h[- [t](@//>> \n**~~)]\na.example",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 214",
+  "msg": {
+   "body": "汉\\*a.example@\\https://a.example/)|| 汉http://ftp:// uhttps://a.example/)",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 215",
+  "msg": {
+   "body": "++汉a.example(\\@```++**\u00a0hh](a://@)",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 216",
+  "msg": {
+   "body": "``u*\u00a0@```~~](\\*ftp://\\@``//",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 217",
+  "msg": {
+   "body": "*((u@h)http://// [t]((u@h)]/ ]~~@/",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 218",
+  "msg": {
+   "body": "``https://a.example/))++[t](](\\(u@h)``>> //",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 219",
+  "msg": {
+   "body": "// \\*http:// ",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 220",
+  "msg": {
+   "body": "\u00a0\u00a0***\na://@`(u@h)[t]([u- `]](>> http://",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 221",
+  "msg": {
+   "body": "汉//||> ~~\\*ftp://||h> \\@https://@a://@++``",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 222",
+  "msg": {
+   "body": "ha://@h](](",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 223",
+  "msg": {
+   "body": "a.example>> ~~**",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 224",
+  "msg": {
+   "body": "**++](||a.example- h(u@h)",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 225",
+  "msg": {
+   "body": "/a://@u||@**汉a://@",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 226",
+  "msg": {
+   "body": "https://\\>> 😀a.example\t- /h``````\\@>> `````",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 227",
+  "msg": {
+   "body": "\u00a0ftp://\u00a0ftp://[\\*[",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 228",
+  "msg": {
+   "body": "//x",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 229",
+  "msg": {
+   "body": ">>  \nhttps://@\\ftp://](汉x汉[)hhttps://[t]((u@h)u",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 230",
+  "msg": {
+   "body": "//https:// https://a.example/)ftp://a.example:(u@h)😀](> ",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 231",
+  "msg": {
+   "body": "\\@:``[t]()",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 232",
+  "msg": {
+   "body": "https://a.example/) \\*hhttps://\\**>> [**\\@> ]",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 233",
+  "msg": {
+   "body": "uhttp://[t]([t](\u00a0",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 234",
+  "msg": {
+   "body": "``\\*~~]> \n> 😀\\*xh ",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 235",
+  "msg": {
+   "body": "ftp://😀https://\\@](```~~汉~~)汉uu",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 236",
+  "msg": {
+   "body": "- a://@++http://a.example`)a.example++",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 237",
+  "msg": {
+   "body": "\\[https://a://@(u:/",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 238",
+  "msg": {
+   "body": "***\u00a0``a.example汉```\t]https://a.example/)**😀😀\\@(\\```",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 239",
+  "msg": {
+   "body": "\nhttp://>> - //http://https://uftp://``",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 240",
+  "msg": {
+   "body": "||`\n\na://@*\t\\*\\)xftp://](",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 241",
+  "msg": {
+   "body": "\t```]``😀++]\\***ftp://\t ]//h",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 242",
+  "msg": {
+   "body": "]/++||||~~>> u汉** ]++](u@h)> ",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 243",
+  "msg": {
+   "body": "> @https://a.example/)//ftp:///@~~汉- [t](~~\\@",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 244",
+  "msg": {
+   "body": "\t~~](`\n> - \t",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 245",
+  "msg": {
+   "body": "> (@https://> *([\n:\u00a0@https://a.example/)[t](a://@",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 246",
+  "msg": {
+   "body": "ftp://:**)(u@h)> a://@//a://@)](\\😀>> ] ",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 247",
+  "msg": {
+   "body": "[t](]\n//https://a.example/)>> ](:https://- https://a.example/)- (u@h)\\@\\*\\@",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 248",
+  "msg": {
+   "body": "](https://a.example/)\t`\\*[\\\\@~~(u@h)**h\u00a0\\http://汉``",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 249",
+  "msg": {
+   "body": "[t](**\\",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 250",
+  "msg": {
+   "body": "u@a.example||u@[\t\\@*```**~~https://a.example/)",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 251",
+  "msg": {
+   "body": "😀> //@\u00a0]([t](*\\)`**```",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 252",
+  "msg": {
+   "body": "**> 汉h\t\t\nhx",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 253",
+  "msg": {
+   "body": "***[/\t\\@a.example",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 254",
+  "msg": {
+   "body": "😀/",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 255",
+  "msg": {
+   "body": "x](\t:* (\\* \\``):`\u00a0😀- ```",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 256",
+  "msg": {
+   "body": "``````😀:\n\t||\n```\\https://ftp://a://@***a.example//",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 257",
+  "msg": {
+   "body": "++[t](x||",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 258",
+  "msg": {
+   "body": "***\ta://@\\@a://@\\@\\*\u00a0>> \t`",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 259",
+  "msg": {
+   "body": ">> > ``h\u00a0汉 *😀>> \\*> ",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 260",
+  "msg": {
+   "body": ")\n ",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 261",
+  "msg": {
+   "body": "https://a.example/)@a.example/`++",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 262",
+  "msg": {
+   "body": "https://https://> ++",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 263",
+  "msg": {
+   "body": "a.example(u@h)++\thttp://",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 264",
+  "msg": {
+   "body": " ~~\\a.example- 😀:]~~**](\\@*[ ``\\*\\",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 265",
+  "msg": {
+   "body": "https:///(u@h)*\\@***** - ]",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 266",
+  "msg": {
+   "body": ">> ]~~",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 267",
+  "msg": {
+   "body": "\n(u@h) ](u```a.example>> ||\u00a0~~",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 268",
+  "msg": {
+   "body": "][t](>> ) ",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 269",
+  "msg": {
+   "body": "](😀汉 a.example```>> \\x**~~http://``",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 270",
+  "msg": {
+   "body": "https://a.example/)u[[**:\ta://@@\n(u@h)https://\\*",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 271",
+  "msg": {
+   "body": "(\\*@h:> [t]( x(]||]>>  ",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 272",
+  "msg": {
+   "body": "h](**](\\@😀",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 273",
+  "msg": {
+   "body": "https://>> a://@\t(u@h)u\\@(- > ***",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 274",
+  "msg": {
+   "body": "``https://a.example/)https://a.example/)**(u@h)[汉(a.example||```a.example",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 275",
+  "msg": {
+   "body": "~~ https://]x",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 276",
+  "msg": {
+   "body": "//```//[t](/https://[t](",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 277",
+  "msg": {
+   "body": ">> )``",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 278",
+  "msg": {
+   "body": "```~~++***x](u@h)https://a.example/)``http://*汉",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 279",
+  "msg": {
+   "body": "a.example~~> ",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 280",
+  "msg": {
+   "body": "[\\[``",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 281",
+  "msg": {
+   "body": ")\\*``||\t(***https://a.example/)https://a.example/)`汉\u00a0~~(http://||\\]/",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 282",
+  "msg": {
+   "body": "```]https://a.example/)**\n\u00a0```)>> :``//++",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 283",
+  "msg": {
+   "body": "]ftp://***",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 284",
+  "msg": {
+   "body": "([*\n\\:~~) *](``)***- > ",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 285",
+  "msg": {
+   "body": "||:***[)](h\\@++\u00a0```\\*```",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 286",
+  "msg": {
+   "body": "x:]( ```hx\\*](ftp://:*\u00a0a://@http://``)",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 287",
+  "msg": {
+   "body": ":** > *``[t](>> `)\\@:h- \n",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 288",
+  "msg": {
+   "body": "\\*]])*([]a.examplea://@\t\\😀",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 289",
+  "msg": {
+   "body": "汉> u😀https://\u00a0",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 290",
+  "msg": {
+   "body": "//**",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 291",
+  "msg": {
+   "body": "~~\t(u@h)(u@h)> https://汉\\***```汉:ftp://````@~~a://@",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 292",
+  "msg": {
+   "body": "[t](~~/u\\*汉``[t](*",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 293",
+  "msg": {
+   "body": "***\\*u😀\n[t](😀\\@h++```](/",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 294",
+  "msg": {
+   "body": "*:]\\@>> ",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 295",
+  "msg": {
+   "body": "```https://a.example/)ftp://``(u@h)[\n- ``ftp://",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 296",
+  "msg": {
+   "body": "[t](***>>  *>> ",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 297",
+  "msg": {
+   "body": "](\\```@http://)\n[t](~~xh||x> ||***\\@||``",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 298",
+  "msg": {
+   "body": "||\\**))***汉",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 299",
+  "msg": {
+   "body": "**:``xx\\*((||\n```**",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 300",
+  "msg": {
+   "body": "**\u00a0- h[t](**)\\[t](*)😀`\\*`:h",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 301",
+  "msg": {
+   "body": "(u@h)``u@- ||😀汉](\\*h:[[t](\u00a0)a://@||汉",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 302",
+  "msg": {
+   "body": ">> >> \\😀 ",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 303",
+  "msg": {
+   "body": "u~~\t++\\@:\\https://``- [**++a.example// https://a.example/)😀\\",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 304",
+  "msg": {
+   "body": "汉]`\\*a://@a.example",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 305",
+  "msg": {
+   "body": "汉*||https://)\\@",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 306",
+  "msg": {
+   "body": "\t[` 汉",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 307",
+  "msg": {
+   "body": "]([[https://",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 308",
+  "msg": {
+   "body": "a://@- - :@",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 309",
+  "msg": {
+   "body": "++a.example[t](*``https://a.example/)https://``[t](https://@",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 310",
+  "msg": {
+   "body": "\n++",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 311",
+  "msg": {
+   "body": "h ++😀>> [t](`u\t)h`",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 312",
+  "msg": {
+   "body": "@😀(u@h)]@\t```**xhttp://*`",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 313",
+  "msg": {
+   "body": "](*(u@h)ftp://@",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 314",
+  "msg": {
+   "body": "😀https://a.example/))||(u@h)a.example***",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 315",
+  "msg": {
+   "body": "[t](*//@>> ",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 316",
+  "msg": {
+   "body": ">> (u@h)[t]((u@h)\\*//",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 317",
+  "msg": {
+   "body": "ftp://> ||](> ``||\ta.example\u00a0**>> ",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 318",
+  "msg": {
+   "body": "汉h](@\\a.exampleuu:\n:a.example",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 319",
+  "msg": {
+   "body": "||\nu> [\\@***@\u00a0\\@\t\n\u00a0@x//++\t",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 320",
+  "msg": {
+   "body": "(\t](ftp://`\\**//```https://\\u:u||",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 321",
+  "msg": {
+   "body": "u(u@h)`\\\\)ftp://- \t//(u@h)",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 322",
+  "msg": {
+   "body": " ```~~xhttps://a.example/)++||)",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 323",
+  "msg": {
+   "body": "```//)](https://a.example/)::汉> https://a.example/)``😀\n> :\\@(u@h)",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 324",
+  "msg": {
+   "body": "u*** (`a.example****~~\\*a.examplea://@((😀",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 325",
+  "msg": {
+   "body": "> \\*[:```)ftp://`++***[t](>> `](>> )\\*@",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 326",
+  "msg": {
+   "body": "`\\*>> ```](ftp://@>> \\ ++\\@~~a://@u",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 327",
+  "msg": {
+   "body": "https://a.example/)a://@`x*http://** \\https://)](https://😀 ([~~",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 328",
+  "msg": {
+   "body": "\\(u@h)\n(\\@``😀*[t](",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 329",
+  "msg": {
+   "body": "//````](@u@~~>> ",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 330",
+  "msg": {
+   "body": "ftp://- - // 汉(",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 331",
+  "msg": {
+   "body": "😀ftp://[t](u",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 332",
+  "msg": {
+   "body": "> `",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 333",
+  "msg": {
+   "body": "https://a.example/)\\@\\@ ||> `````/x**a://@`` ```- a://@",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 334",
+  "msg": {
+   "body": "++😀*",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 335",
+  "msg": {
+   "body": "u\\*(\\@///)\u00a0",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 336",
+  "msg": {
+   "body": "\n]([[t](😀a.example)http:// (\u00a0x```[(u@h)[",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 337",
+  "msg": {
+   "body": "||(https://a.example/)\\@[t](/- x/(\t\u00a0[",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 338",
+  "msg": {
+   "body": "h- *hhttp:// \t``]http://ftp://https://a.example/))汉:`",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 339",
+  "msg": {
+   "body": "`***-  \\@ftp://`- >> \\*[t](>> ~~汉汉- ftp://(u@h)",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 340",
+  "msg": {
+   "body": "\\汉x```\\*http://ftp://(u@h)/",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 341",
+  "msg": {
+   "body": "hftp://[t](u😀a://@ftp://- ftp://(u@h)||> ](",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 342",
+  "msg": {
+   "body": "x***uhttps://(http://:(https://a.example/)",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 343",
+  "msg": {
+   "body": "]x\\*x汉",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 344",
+  "msg": {
+   "body": "`:\\\n(++ftp://)](*- https://**😀)\\@ftp://",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 345",
+  "msg": {
+   "body": ">> *(]](\t]](\n/(u@h)`\\*https://",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 346",
+  "msg": {
+   "body": "```***u\\@> :](~~`",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 347",
+  "msg": {
+   "body": "[t](> ftp://**(*(u@h)- **]\n//```https://a.example/)",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 348",
+  "msg": {
+   "body": "~~https://``*(u@h):``ftp://https://a.example/)",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 349",
+  "msg": {
+   "body": "~~ftp://``**> `- (``x]()a://@@>> ||",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 350",
+  "msg": {
+   "body": ">> https://汉汉> >> ",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 351",
+  "msg": {
+   "body": "`````\\**",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 352",
+  "msg": {
+   "body": "[t]((**```***- ++(u@h)]()",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 353",
+  "msg": {
+   "body": " //~~:😀a.example*u](```\\@\\(/- ++",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 354",
+  "msg": {
+   "body": ")***\\@>> ftp://a.example@](**``",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 355",
+  "msg": {
+   "body": "](😀",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 356",
+  "msg": {
+   "body": "a.example> a.examplea://@||https://||u***[\\*[[t](",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 357",
+  "msg": {
+   "body": "[t](`~~***a://@`]```||++(``\\",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 358",
+  "msg": {
+   "body": "ftp://> >> x[[t](https://(u@h)****x",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 359",
+  "msg": {
+   "body": "**h@@++a://@](/https://",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 360",
+  "msg": {
+   "body": "||- h***[t](~~x\u00a0(u@h)a://@😀//`/\\@:",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 361",
+  "msg": {
+   "body": "||/hhttps://*>> ",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 362",
+  "msg": {
+   "body": "(\\`ftp://***\\*)(]汉\u00a0\tx",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 363",
+  "msg": {
+   "body": "```||\t\t >> > 😀\\)||/\ta.example> - 汉",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 364",
+  "msg": {
+   "body": "https://a.example/)```\t`````@(u@h)[++汉](",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 365",
+  "msg": {
+   "body": "\u00a0***u)",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 366",
+  "msg": {
+   "body": "x)***xhttps://a://@`😀*(u@h)**`[ ftp://a://@",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 367",
+  "msg": {
+   "body": "汉https://]:@https://- @@",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 368",
+  "msg": {
+   "body": "u[",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 369",
+  "msg": {
+   "body": ")😀uftp://(u@h)\tftp:////ftp://https://a.example/)/xx\\*||a.example",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 370",
+  "msg": {
+   "body": "ftp://ftp://``http://x@**]@汉||/\\@**\\*``汉",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 371",
+  "msg": {
+   "body": "http://~~a.example***||h@\\\\++😀😀(\u00a0http://https://a.example/)[@",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 372",
+  "msg": {
+   "body": "`a.example[t](||a://@(u@h)/http://\u00a0[``*- ",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 373",
+  "msg": {
+   "body": "]汉u",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 374",
+  "msg": {
+   "body": "\u00a0***++https://a.example/)*a.example> 😀\\*~~**a.example",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 375",
+  "msg": {
+   "body": "> ftp://",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 376",
+  "msg": {
+   "body": "](\\*||~~汉***:**x||",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 377",
+  "msg": {
+   "body": "https://http://[**\\[**",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 378",
+  "msg": {
+   "body": "/x[//```[t](`\t``\\:(\t/[t](:",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 379",
+  "msg": {
+   "body": "(``||h😀ftp://\t@)@h](||汉",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 380",
+  "msg": {
+   "body": "``a.examplexu//~~``)\\*++[t](\u00a0- /h++~~\n\\*",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 381",
+  "msg": {
+   "body": "\\*```(u@h)***h\\*",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 382",
+  "msg": {
+   "body": "[\\",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 383",
+  "msg": {
+   "body": ">> (u@h)uhttps://\\*汉//```",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 384",
+  "msg": {
+   "body": "++> a.examplea.example😀`",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 385",
+  "msg": {
+   "body": "//\n\\]((\\****https://a.example/)[++\\@ [xhttp://a.example",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 386",
+  "msg": {
+   "body": "a://@++a://@\t[****//](```h\\||)",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 387",
+  "msg": {
+   "body": "(u@h)\u00a0u😀ftp://\u00a0``](> \\https://ftp://((- ~~**",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 388",
+  "msg": {
+   "body": ":\n||https://a.example/)[t](- a://@@](~~](u@h)",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 389",
+  "msg": {
+   "body": "> @++~~\\@](\\*[\\@ftp://***\\@\u00a0汉\\*h",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 390",
+  "msg": {
+   "body": "\\@\\@***``[``a.example> *:\\",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 391",
+  "msg": {
+   "body": "](xha.example`~~\\[t](*/***x\\```````",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 392",
+  "msg": {
+   "body": "(u@h)ftp://https://h\n\u00a0a://@ a.example~~`\\~~@||\u00a0++ (u@h)",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 393",
+  "msg": {
+   "body": "++h**uu\\a.example/``` a://@:~~https://",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 394",
+  "msg": {
+   "body": "\n\u00a0a://@[t](\\",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 395",
+  "msg": {
+   "body": "x\\@ 😀[**\u00a0~~",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 396",
+  "msg": {
+   "body": "https://a.example/)]//\\*h]``u",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 397",
+  "msg": {
+   "body": "https://\t```\\@> ](](\\@\u00a0`***[t]((u@h)汉",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
+ },
+ {
+  "name": "fuzz 398",
+  "msg": {
+   "body": "@](```(\u00a0```\\*> [t](",
+   "title": "t"
+  },
+  "want": ""
+ },
+ {
+  "name": "fuzz 399",
+  "msg": {
+   "body": "@[t](ftp://😀http://\\*\\@: [t]( [t](>> \\*[\\@>> \u00a0- ",
+   "title": "t"
+  },
+  "want": "正文里的链接无效：只允许 http / https，且不能带用户名和密码"
  }
 ]
