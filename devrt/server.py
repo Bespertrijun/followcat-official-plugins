@@ -142,7 +142,7 @@ HOOK_SAMPLES: Dict[str, Dict[str, Any]] = {
     "on_episode_found": {
         "anime_id": 1,
         "episode": 1,
-        "torrent_url": "magnet:?xt=urn:btih:abcdef0123456789",
+        "resource": "ourbits:12345",
     },
     "on_download_done": {
         "anime_id": 1,
@@ -252,7 +252,7 @@ HOOK_SAMPLES: Dict[str, Dict[str, Any]] = {
             "source_site": "mikan",
             "category": "",
             "size": 524288000,
-            "torrent_url": "magnet:?xt=urn:btih:abcdef0123456789",
+            "resource": "ourbits:12345",
             "is_movie": False,
             "is_show": False,
         },
@@ -297,7 +297,7 @@ HOOK_SAMPLES: Dict[str, Dict[str, Any]] = {
             "source_site": "mikan",
             "category": "",
             "size": 1048576000,
-            "torrent_url": "magnet:?xt=urn:btih:abcdef0123456789",
+            "resource": "ourbits:12345",
             "is_movie": False,
             "is_show": False,
         },

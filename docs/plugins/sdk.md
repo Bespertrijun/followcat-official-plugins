@@ -114,7 +114,7 @@ my-plugin/
 
 | Hook | 所需权限 | 触发时机 | payload 关键字段 |
 |------|---------|---------|-----------------|
-| `on_episode_found` | `hook.download.read` | RSS 发现新集 | `anime_id`, `episode`, `torrent_url` |
+| `on_episode_found` | `hook.download.read` | RSS 发现新集 | `anime_id`, `episode`, `resource`（种子的稳定资源身份键，如 `zhuque:55346`；没有身份键时是脱敏后的下载 URL；永不含 passkey 等凭据） |
 | `on_download_done` | `hook.download.read` | qBittorrent 下载完成 | `anime_id`, `anime_title`, `episode`, `hash`, `files: [{path,size}]?`, `size?`, `save_path?`, `category?` |
 | `on_download_failed` | `hook.download.read` | 下载失败（不可恢复） | `anime_id`, `anime_title`, `episode`, `episode_end?`, `hash`, `reason` |
 | `on_link_done` | `hook.link.read` | 链接整理完成（自动整理路径） | `anime_id`, `anime_title`, `episode`, `dest?`, `tmdb_episode?` |
@@ -250,7 +250,9 @@ plugin.on("should_download", function(p) {
     description,           // RSS 种子描述原文；可规则化的片段已进 tags，这里是未结构化正文，供插件自行解析
     tag,                  // 站点标签（free / 官种 / 中字 / 促销 等），这条种子的属性标记
     anime_id, task_id, link_subdir, directory,
-    source_site, category, size, torrent_url, is_movie, is_show
+    source_site, category, size,
+    resource,              // 种子的稳定资源身份键，如 zhuque:55346；没有身份键时是脱敏后的下载 URL；永不含 passkey 等凭据
+    is_movie, is_show
   }
 }
 ```
