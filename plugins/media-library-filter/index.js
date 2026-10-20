@@ -37,6 +37,7 @@ var CACHE_PREFIX = "lib_cache_";
 var DEFAULT_CACHE_TTL_SEC = 3600;
 // 缓存键总数上限：给计数器 / per-flow 配置等留足宿主每插件 500 个 key 的配额余量
 var CACHE_MAX_KEYS = 300;
+var CACHE_FLUSH_DELAY_MS = 25;
 // 缓存代号：0.4.0 起写入；启动时发现不是这个值 = 旧版本留下的缓存，整批删掉（旧版不淘汰，可能早已把配额写满）
 var CACHE_GEN_KEY = "cache_gen";
 var CACHE_GEN = "2";
@@ -288,8 +289,36 @@ function cacheKey(tmdbType, tmdbID, season, episode) {
            "_s" + String(season || 0) + "_e" + String(episode || 0);
 }
 
+// 查询结果先留在内存。持久化排队且按键合并，不能占用 should_download 的 3s 预算。
+var memoryCache = {};
+var pendingCache = {};
+var cacheFlushTimer = null;
+var cacheFlushIndexed = false;
+var cacheIndexReads = null;
+var activeChecks = 0;
+
+function rememberCache(key, entry) {
+    memoryCache[key] = entry;
+    var keys = Object.keys(memoryCache);
+    if (keys.length <= CACHE_MAX_KEYS) return;
+    keys.sort(function (a, b) {
+        return (memoryCache[a].ts || 0) - (memoryCache[b].ts || 0);
+    });
+    for (var i = 0; i < keys.length - CACHE_MAX_KEYS; i++) {
+        delete memoryCache[keys[i]];
+        delete pendingCache[keys[i]];
+    }
+}
+
 function readCache(key) {
     if (!nonEmpty(key)) return null;
+    if (Object.prototype.hasOwnProperty.call(memoryCache, key)) return memoryCache[key];
+    var obj = readStoredCache(key);
+    if (obj) rememberCache(key, obj);
+    return obj;
+}
+
+function readStoredCache(key) {
     var raw = config.get(key);
     if (!raw) return null;
     var obj = safeJsonParse(raw, null);
@@ -297,23 +326,114 @@ function readCache(key) {
     return obj;
 }
 
-function writeCache(key, entry) {
+function writeCache(key, entry, ttl) {
     if (!nonEmpty(key)) return;
-    if (canEvictCache()) {
-        if (cacheTtlSec() <= 0) {
-            // 缓存关闭：写进去也是一落地就过期、永远不会被读，不写；顺手清掉旧的
-            pruneCache(nowSec(), null);
-            return;
-        }
-        pruneCache(typeof entry.ts === "number" ? entry.ts : nowSec(), key);
+    if (ttl === undefined) ttl = cacheTtlSec();
+    if (ttl > 0) {
+        pendingCache[key] = entry;
+        rememberCache(key, entry);
+    } else {
+        memoryCache = {};
+        pendingCache = {};
+    }
+    scheduleCacheFlush();
+}
+
+function scheduleCacheFlush() {
+    // 更早的宿主没有定时器时只保留内存缓存，不退回同步写入。
+    if (cacheFlushTimer !== null || typeof setTimeout !== "function") return;
+    cacheFlushTimer = setTimeout(flushCache, CACHE_FLUSH_DELAY_MS);
+}
+
+function flushCache() {
+    cacheFlushTimer = null;
+    // HTTP await 期间也让查询优先；定时器与 hook 共用同一个 JS 循环。
+    if (activeChecks > 0) {
+        scheduleCacheFlush();
+        return;
     }
     try {
-        config.set(key, JSON.stringify(entry));
-        if (cacheIndex) cacheIndex[key] = typeof entry.ts === "number" ? entry.ts : 0;
+        if (canEvictCache() && !cacheFlushIndexed) {
+            if (cacheIndexReads === null) {
+                var oldIndex = cacheIndex || {};
+                var diskSnapshot = config.list() || [];
+                cacheIndex = {};
+                cacheIndexReads = [];
+                for (var d = 0; d < diskSnapshot.length; d++) {
+                    var diskKey = String(diskSnapshot[d]);
+                    if (diskKey.indexOf(CACHE_PREFIX) !== 0) continue;
+                    if (Object.prototype.hasOwnProperty.call(oldIndex, diskKey)) cacheIndex[diskKey] = oldIndex[diskKey];
+                    else cacheIndexReads.push(diskKey);
+                }
+                // 外部删除已经保存的键时，不让旧内存副本在下一轮对账后继续生效。
+                for (var oldKey in oldIndex) {
+                    if (Object.prototype.hasOwnProperty.call(oldIndex, oldKey) &&
+                        diskSnapshot.indexOf(oldKey) < 0 && !Object.prototype.hasOwnProperty.call(pendingCache, oldKey)) {
+                        delete memoryCache[oldKey];
+                    }
+                }
+            }
+            // 管理页新增的缓存键也要对账；每次只读取一项，避免整批读取阻塞下个 hook。
+            if (cacheIndexReads.length > 0) {
+                var readKey = cacheIndexReads.shift();
+                var diskEntry = readStoredCache(readKey);
+                cacheIndex[readKey] = diskEntry && typeof diskEntry.ts === "number" ? diskEntry.ts : 0;
+                scheduleCacheFlush();
+                return;
+            }
+            cacheIndexReads = null;
+            cacheFlushIndexed = true;
+        }
+        var ttl = cacheTtlSec();
+        var nowS = nowSec();
+        var keys = Object.keys(pendingCache);
+        for (var i = 0; i < keys.length; i++) {
+            var key = keys[i];
+            if (ttl <= 0 || nowS - pendingCache[key].ts >= ttl) {
+                delete pendingCache[key];
+                delete memoryCache[key];
+            }
+        }
+        if (ttl <= 0) memoryCache = {};
+        keys = Object.keys(pendingCache);
+        var nextKey = keys.length ? keys[0] : null;
+
+        if (canEvictCache()) {
+            var diskKeys = Object.keys(cacheIndex);
+            diskKeys.sort(function (a, b) {
+                var d = cacheIndex[a] - cacheIndex[b];
+                return d !== 0 ? d : (a < b ? -1 : (a > b ? 1 : 0));
+            });
+            var oldest = diskKeys.length ? diskKeys[0] : null;
+            var needsRoom = nextKey !== null && !Object.prototype.hasOwnProperty.call(cacheIndex, nextKey);
+            if (oldest !== null && (ttl <= 0 || nowS - cacheIndex[oldest] >= ttl ||
+                diskKeys.length + (needsRoom ? 1 : 0) > CACHE_MAX_KEYS)) {
+                dropCacheKey(oldest);
+                scheduleCacheFlush();
+                return;
+            }
+        }
+        if (nextKey !== null) {
+            var entry = pendingCache[nextKey];
+            delete pendingCache[nextKey];
+            try {
+                config.set(nextKey, JSON.stringify(entry));
+                if (cacheIndex) cacheIndex[nextKey] = entry.ts;
+            } catch (e) {
+                cache_write_fail++;
+                log.warn("media-library-filter: cache write failed: " + e);
+            }
+            // 每个回调至多写入或删除一项，给后续 hook 留出执行机会。
+            scheduleCacheFlush();
+            return;
+        }
     } catch (e) {
         cache_write_fail++;
-        log.warn("media-library-filter: cache write failed: " + e);
+        log.warn("media-library-filter: cache flush failed: " + e);
+        pendingCache = {}; // best effort：保留内存结果，避免故障时无限重试
     }
+    cacheFlushIndexed = false;
+    cacheIndexReads = null;
 }
 
 function cacheTtlSec() {
@@ -322,7 +442,7 @@ function cacheTtlSec() {
 
 // ====== 缓存淘汰（需要宿主的 config.delete；旧宿主没有它时不淘汰，行为同 0.3.x） ======
 //
-// 内存里记一份「缓存键 → 写入时间」索引，每次写缓存前先按 config.list() 对一遍账（管理页手动加 / 删的键也算进来，
+// 内存里记一份「缓存键 → 写入时间」索引，每轮后台保存前按 config.list() 对一遍账（管理页手动加 / 删的键也算进来，
 // 新出现的键读一次 ts），然后：先删过期项（按 cache_ttl_sec），再看总数，超过 CACHE_MAX_KEYS 就从最旧的删起。
 // 这样缓存永远不会把插件配置的 500 个 key 配额撑满（撑满后计数器、per-flow 配置都写不进去）。
 
@@ -351,6 +471,7 @@ function loadCacheIndex() {
 function dropCacheKey(k) {
     try { config["delete"](k); } catch (e) { log.warn("media-library-filter: cache delete failed: " + e); }
     if (cacheIndex) delete cacheIndex[k];
+    if (!Object.prototype.hasOwnProperty.call(pendingCache, k)) delete memoryCache[k];
 }
 
 // keepKey：马上要写的那个 key（不删它，并按「写入后」的总数算上限）
@@ -394,9 +515,9 @@ function initCache() {
     pruneCache(nowSec(), null);
 }
 
-function cacheFresh(entry) {
+function cacheFresh(entry, ttl) {
     if (!entry || typeof entry.ts !== "number") return false;
-    var ttl = cacheTtlSec();
+    if (ttl === undefined) ttl = cacheTtlSec();
     if (ttl <= 0) return false;
     return (nowSec() - entry.ts) < ttl;
 }
@@ -723,8 +844,9 @@ async function performLibraryCheck(tmdbType, tmdbID, season, episode, deadlineMs
 
 async function resolveLibraryStatus(tmdbType, tmdbID, season, episode) {
     var key = cacheKey(tmdbType, tmdbID, season, episode);
+    var ttl = cacheTtlSec();
     var cached = readCache(key);
-    if (cached && cacheFresh(cached)) {
+    if (cached && cacheFresh(cached, ttl)) {
         var copies = cached.copies;
         if (isArray(copies)) {
             return {
@@ -750,7 +872,7 @@ async function resolveLibraryStatus(tmdbType, tmdbID, season, episode) {
             copies: r.copies || [],
             source: r.source || "",
             ts: nowSec()
-        });
+        }, ttl);
     }
     r.from_cache = false;
     return r;
@@ -1071,10 +1193,11 @@ async function decideShouldDownloadBatch(p, callDeadline) {
     // ---- 缓存快路径：全部集命中缓存 → 跳过 HTTP ----
     var allCached = true;
     var epMap = {};
+    var ttl = cacheTtlSec();
     for (var cep = epStart; cep <= epEnd; cep++) {
         var cKey = cacheKey(tmdbType, tmdbID, season, cep);
         var cached = readCache(cKey);
-        if (cached && cacheFresh(cached) && isArray(cached.copies)) {
+        if (cached && cacheFresh(cached, ttl) && isArray(cached.copies)) {
             epMap[cep] = cached.copies;
         } else {
             allCached = false;
@@ -1105,14 +1228,14 @@ async function decideShouldDownloadBatch(p, callDeadline) {
         epMap = fetchResult.epMap;
         source = fetchResult.source;
 
-        // 逐集写缓存（与单集路径 resolveLibraryStatus 格式一致）
+        // 只更新内存并排队；数据库保存由 hook 返回后的定时器分步完成。
         for (var wep = epStart; wep <= epEnd; wep++) {
             var wKey = cacheKey(tmdbType, tmdbID, season, wep);
             writeCache(wKey, {
                 copies: epMap[wep] || [],
                 source: source,
                 ts: nowSec()
-            });
+            }, ttl);
         }
         if (callDeadline && nowMs() > callDeadline) return { allow: true, reason: "late", late: true };
     }
@@ -1164,6 +1287,7 @@ function noteLate(p, startMs, why) {
 plugin.on("should_download", async function (p) {
     var startMs = nowMs();
     var callDeadline = startMs + HOST_FILTER_TIMEOUT_MS;
+    activeChecks++;
     try {
         var media = (p && p.media) || {};
         var episodeEnd = safeNum(String(media.episode_end == null ? "" : media.episode_end), 0);
@@ -1213,6 +1337,8 @@ plugin.on("should_download", async function (p) {
         log.error("media-library-filter: should_download handler error: " + e);
         incCounter("allowed_error");
         return true;
+    } finally {
+        activeChecks--;
     }
 });
 

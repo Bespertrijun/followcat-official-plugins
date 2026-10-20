@@ -13,7 +13,9 @@ const INDEX_JS = fs.readFileSync(path.join(__dirname, '..', '..', 'plugins', 'me
 
 // opts: { config, httpGet: (url, headers) => resp | Promise<resp>, flows: [{id,name}], maxConfigKeys,
 //         noConfigDelete: true → 模拟没有 config.delete 的旧宿主,
-//         onConfigGet: (key) => void（可以 throw，用来在指定时刻制造异常） }
+//         noSetTimeout: true → 模拟没有宿主 setTimeout 的旧宿主,
+//         onConfigGet: (key) => void（可以 throw，用来在指定时刻制造异常）,
+//         onConfigSet: (key, value) => void（可推进时钟或抛错）, onConfigList: () => void }
 function load(opts) {
   opts = opts || {};
   const hooks = {}, apis = {}, logs = [];
@@ -21,6 +23,51 @@ function load(opts) {
   const maxKeys = opts.maxConfigKeys || 500;
   let clock = opts.startMs || Date.UTC(2026, 8, 25, 0, 0, 0);
   const httpCalls = [];
+  const configSets = [];
+  let configListCalls = 0;
+  let timerSeq = 0;
+  const timers = [];
+
+  function scheduleTimer(fn, delay) {
+    const d = Number.isFinite(Number(delay)) && Number(delay) >= 0 ? Number(delay) : 0;
+    const timer = { id: ++timerSeq, fn, delay: d, dueAt: clock + d };
+    timers.push(timer);
+    timers.sort((a, b) => a.dueAt - b.dueAt || a.id - b.id);
+    return timer.id;
+  }
+
+  function cancelTimer(id) {
+    const i = timers.findIndex((timer) => timer.id === id);
+    if (i >= 0) timers.splice(i, 1);
+  }
+
+  async function runNextTimer() {
+    if (timers.length === 0) return false;
+    const timer = timers.shift();
+    if (timer.dueAt > clock) clock = timer.dueAt;
+    const result = timer.fn();
+    // Let promise continuations created by the callback enqueue their work before
+    // the caller inspects the queue again. The callback itself is still timer-like:
+    // a rejected callback is surfaced to the test rather than swallowed.
+    await Promise.resolve();
+    if (result && typeof result.then === 'function') await result;
+    return true;
+  }
+
+  async function runTimers(limit) {
+    const explicitLimit = limit != null;
+    const max = explicitLimit ? Math.max(0, Number(limit) || 0) : 1000;
+    let ran = 0;
+    while (ran < max && timers.length > 0) {
+      await runNextTimer();
+      ran++;
+    }
+    if (!explicitLimit && timers.length > 0) {
+      throw new Error('timer queue did not drain within ' + max + ' callbacks; use runNextTimer() for an active hook');
+    }
+    return ran;
+  }
+
   const ctx = {
     plugin: { on: (n, f) => { hooks[n] = f; }, registerAPI: (p, f) => { apis[p] = f; } },
     log: {
@@ -32,17 +79,29 @@ function load(opts) {
       get: (k) => { if (opts.onConfigGet) opts.onConfigGet(k); return k in cfg ? cfg[k] : null; },
       // 同宿主：value 按字符串存；新 key 受每插件条数配额限制（已有 key 更新不计）
       set: (k, v) => {
+        k = String(k);
+        v = String(v);
+        configSets.push({ key: k, value: v, at: clock });
+        if (opts.onConfigSet) opts.onConfigSet(k, v);
         if (!(k in cfg) && Object.keys(cfg).length >= maxKeys) {
           throw new Error('plugin config: row quota exceeded: current=' + Object.keys(cfg).length + ' limit=' + maxKeys);
         }
-        cfg[k] = String(v);
+        cfg[k] = v;
       },
-      list: () => Object.keys(cfg).sort(),
+      list: () => {
+        configListCalls++;
+        if (opts.onConfigList) opts.onConfigList();
+        return Object.keys(cfg).sort();
+      },
     },
     http: { get: (url, h) => { httpCalls.push(url); return Promise.resolve().then(() => opts.httpGet(url, h)); } },
     ruleflow: { list: () => (opts.flows || []).slice() },
     __nowMs: () => clock,
   };
+  if (!opts.noSetTimeout) {
+    ctx.setTimeout = scheduleTimer;
+    ctx.clearTimeout = cancelTimer;
+  }
   // 宿主 R4：config.delete(key) 同步返回是否删到
   const deletes = [];
   if (!opts.noConfigDelete) {
@@ -69,6 +128,11 @@ function load(opts) {
     advance: (ms) => { clock += ms; },
     counters: () => JSON.parse(JSON.stringify(apis['/stats']({ method: 'GET', body: '', query: {} }).counters)),
     cacheKeys: () => Object.keys(cfg).filter((k) => k.startsWith('lib_cache_')),
+    configSets,
+    configListCalls: () => configListCalls,
+    pendingTimers: () => timers.length,
+    runNextTimer,
+    runTimers,
   };
 }
 

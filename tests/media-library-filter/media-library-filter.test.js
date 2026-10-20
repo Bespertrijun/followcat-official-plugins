@@ -30,6 +30,7 @@ test('should_download 回调是 async：http 返回 Promise，同规格副本 �
 test('库里没有这一集 → 放行（allowed_not_in_lib）；http 故障（reject）→ fail-open 放行、不写缓存', async () => {
   const miss = load({ config: flowCfg({ resolution: { op: '==' } }), httpGet: embyLib({ 9: [SDR] }) });
   assert.equal(await miss.hooks.should_download(payload()), true);
+  await miss.runTimers();
   assert.equal(miss.counters().allowed_not_in_lib, 1);
   assert.equal(miss.cacheKeys().length, 1, 'a clean miss is cached');
 
@@ -74,6 +75,7 @@ test('单集：结果在宿主 3s 超时之后才回来 → 放行、计 late、
   assert.match(warns[0][1], /after the host's 3000ms timeout/);
   assert.match(warns[0][1], /flow=f1 tmdb=1429 s1e8/);
   assert.ok(!/decision|veto|allow=/.test(warns[0][1].replace('host already allowed the download', '')), 'warn must not carry a verdict: ' + warns[0][1]);
+  await p.runTimers();
   assert.deepEqual(p.cacheKeys().length, 1, 'late result still fills the cache');
 });
 
@@ -172,6 +174,256 @@ test('G4：判定阶段（查完库之后）抛异常且已过 3s → handler �
   assert.equal(warns.length, 1);
   assert.match(warns[0][1], /error=Error: boom-late/);
   assert.ok(!p.logs.some((l) => l[0] === 'error'));
+});
+
+// ─── 缓存写入异步化回归 ────────────────────────────────────────────────────────
+
+function matchingBatch(start, end) {
+  const out = {};
+  for (let ep = start; ep <= end; ep++) out[ep] = [SDR];
+  return out;
+}
+
+function cacheWriteCount(p) {
+  return p.configSets.filter((entry) => entry.key.startsWith('lib_cache_')).length;
+}
+
+function cacheListCount(p) {
+  return p.configListCalls();
+}
+
+function assertBitmapRange(base64, first, last, max) {
+  const bytes = Buffer.from(base64, 'base64');
+  for (let ep = 1; ep <= max; ep++) {
+    const have = (bytes[(ep - 1) >> 3] & (1 << ((ep - 1) & 7))) !== 0;
+    assert.equal(have, ep >= first && ep <= last, 'bitmap episode ' + ep);
+  }
+}
+
+test('100 集全命中：每次 config.set 延迟 40ms，hook 仍按时返回 false，返回前不落盘', async () => {
+  let p;
+  p = load({
+    config: flowCfg({ resolution: { op: '==' } }),
+    httpGet: embyLib(matchingBatch(1, 100)),
+    onConfigSet: (key) => { if (key.startsWith('lib_cache_')) p.advance(40); },
+  });
+  const start = p.now();
+  assert.equal(await p.hooks.should_download(payload({ media: { episode: 1, episode_end: 100 } })), false);
+  assert.ok(p.now() - start < 3000, 'the decision must not include cache persistence: ' + (p.now() - start) + 'ms');
+  assert.equal(p.counters().late, 0);
+  assert.equal(cacheWriteCount(p), 0, 'no cache config.set before hook returns');
+  assert.deepEqual(p.cacheKeys(), []);
+
+  await p.runTimers();
+  assert.equal(p.cacheKeys().length, 100);
+  assert.equal(cacheWriteCount(p), 100);
+});
+
+test('100 集部分命中：每次 config.set 延迟 40ms，hook 按时返回 bitmap，返回前不落盘', async () => {
+  let p;
+  p = load({
+    config: flowCfg({ resolution: { op: '==' } }),
+    httpGet: embyLib(matchingBatch(1, 50)),
+    onConfigSet: (key) => { if (key.startsWith('lib_cache_')) p.advance(40); },
+  });
+  const start = p.now();
+  const result = await p.hooks.should_download(payload({ media: { episode: 1, episode_end: 100 } }));
+  assert.equal(p.now() - start < 3000, true);
+  assertBitmapRange(result.have_bitmap, 1, 50, 100);
+  assert.equal(p.counters().late, 0);
+  assert.equal(cacheWriteCount(p), 0, 'no cache config.set before hook returns');
+  assert.deepEqual(p.cacheKeys(), []);
+
+  await p.runTimers();
+  assert.equal(p.cacheKeys().length, 100);
+});
+
+test('缓存写入失败时，当前结果仍进入内存；flush 前的后续单集不再发 HTTP', async () => {
+  let p;
+  p = load({
+    config: flowCfg({ resolution: { op: '==' } }),
+    httpGet: embyLib([SDR]),
+    onConfigSet: (key) => { if (key.startsWith('lib_cache_')) throw new Error('config store unavailable'); },
+  });
+  assert.equal(await p.hooks.should_download(payload()), false);
+  assert.equal(p.cacheKeys().length, 0);
+  const httpCallsAfterFirst = p.httpCalls.length;
+
+  assert.equal(await p.hooks.should_download(payload()), false);
+  assert.equal(p.httpCalls.length, httpCallsAfterFirst, 'the second hook must read the in-memory cache');
+  assert.equal(p.cacheKeys().length, 0);
+
+  await p.runTimers();
+  assert.equal(p.cacheKeys().length, 0);
+  assert.ok(p.counters().cache_write_fail > 0);
+});
+
+test('缓存 flush 分步进行；flush 中再次查同一剧集仍使用内存结果', async () => {
+  const p = load({
+    config: flowCfg({ resolution: { op: '==' } }),
+    httpGet: embyLib(matchingBatch(1, 100)),
+  });
+  assert.equal(await p.hooks.should_download(payload({ media: { episode: 1, episode_end: 100 } })), false);
+  assert.ok(p.pendingTimers() > 0);
+  assert.equal(cacheWriteCount(p), 0);
+
+  const beforeFirstFlush = cacheWriteCount(p);
+  assert.equal(await p.runNextTimer(), true);
+  assert.equal(cacheWriteCount(p) - beforeFirstFlush, 1, 'one timer persists one cache entry');
+  assert.ok(p.pendingTimers() > 0, 'remaining cache entries stay queued');
+
+  const httpCallsAfterBatch = p.httpCalls.length;
+  assert.equal(await p.hooks.should_download(payload({ media: { episode: 50 } })), false);
+  assert.equal(p.httpCalls.length, httpCallsAfterBatch);
+
+  await p.runTimers();
+  assert.equal(p.cacheKeys().length, 100);
+});
+
+test('并发同一缓存键在 flush 前合并：较新的 HTTP 结果只持久化一次', async () => {
+  const sdr = embyLib([SDR]);
+  const hdr = embyLib([HDR10]);
+  const episodeResolvers = [];
+  const p = load({
+    config: flowCfg({ resolution: { op: '==' }, hdr: { op: '==' } }),
+    httpGet: (url) => {
+      if (url.indexOf('IncludeItemTypes=Episode') >= 0) {
+        const response = episodeResolvers.length === 0 ? sdr : hdr;
+        return new Promise((resolve) => {
+          episodeResolvers.push(() => resolve(response(url)));
+        });
+      }
+      return sdr(url);
+    },
+  });
+  const first = p.hooks.should_download(payload());
+  const second = p.hooks.should_download(payload());
+  for (let i = 0; i < 20 && episodeResolvers.length < 2; i++) await Promise.resolve();
+  assert.equal(episodeResolvers.length, 2, 'both concurrent hooks must reach the episode request');
+  episodeResolvers[0]();
+  episodeResolvers[1]();
+  assert.deepEqual(await Promise.all([first, second]), [false, true]);
+  assert.equal(cacheWriteCount(p), 0);
+
+  await p.runTimers();
+  assert.equal(cacheWriteCount(p), 1);
+  const stored = JSON.parse(p.cfg.lib_cache_tv_1429_s1_e8);
+  assert.equal(stored.copies[0].hdr, true, 'the later completion wins the merged pending key');
+});
+
+test('HTTP 挂起期间后台 timer 不 set/delete；HTTP 完成后 flush 可继续', async () => {
+  let holdEpisode = false;
+  let releaseEpisode = null;
+  const lib = embyLib([SDR]);
+  const p = load({
+    config: flowCfg({ resolution: { op: '==' } }),
+    httpGet: (url) => {
+      if (holdEpisode && url.indexOf('IncludeItemTypes=Episode') >= 0) {
+        return new Promise((resolve) => { releaseEpisode = () => resolve(lib(url)); });
+      }
+      return lib(url);
+    },
+  });
+  assert.equal(await p.hooks.should_download(payload()), false);
+  assert.ok(p.pendingTimers() > 0, 'the first result must leave a background flush queued');
+
+  holdEpisode = true;
+  const pendingHook = p.hooks.should_download(payload({ media: { episode: 9 } }));
+  for (let i = 0; i < 20 && !releaseEpisode; i++) await Promise.resolve();
+  assert.equal(typeof releaseEpisode, 'function', 'the second hook must be waiting on HTTP');
+  const writesBefore = cacheWriteCount(p);
+  const deletesBefore = p.deletes.length;
+  assert.equal(await p.runNextTimer(), true);
+  assert.equal(cacheWriteCount(p), writesBefore, 'active HTTP prevents background config.set');
+  assert.equal(p.deletes.length, deletesBefore, 'active HTTP prevents background config.delete');
+  assert.ok(p.pendingTimers() > 0, 'the deferred flush remains queued');
+
+  let settled = false;
+  pendingHook.then(() => { settled = true; });
+  await Promise.resolve();
+  assert.equal(settled, false, 'the hook remains pending until HTTP completes');
+  releaseEpisode();
+  assert.equal(await pendingHook, true);
+  await p.runTimers();
+  assert.ok(cacheWriteCount(p) > writesBefore, 'flush resumes after the HTTP hook finishes');
+  assert.ok(p.cacheKeys().includes('lib_cache_tv_1429_s1_e9'));
+});
+
+test('连续排队超过 300 个不同剧集：最终落盘不超过 300，最近集继续命中内存', async () => {
+  const p = load({ config: flowCfg({ resolution: { op: '==' } }), httpGet: embyLib([SDR]) });
+  for (let ep = 1; ep <= 301; ep++) {
+    await p.hooks.should_download(payload({ media: { episode: ep } }));
+  }
+  assert.equal(p.cacheKeys().length, 0, 'the queue has not flushed yet');
+  const httpCallsBeforeRecent = p.httpCalls.length;
+  assert.equal(await p.hooks.should_download(payload({ media: { episode: 301 } })), true);
+  assert.equal(p.httpCalls.length, httpCallsBeforeRecent, 'the newest queued result is served from memory');
+
+  await p.runTimers();
+  assert.ok(p.cacheKeys().length <= 300);
+  assert.ok(p.cacheKeys().includes('lib_cache_tv_1429_s1_e301'));
+  assert.equal(p.pendingTimers(), 0);
+});
+
+test('缓存 flush 只对账一次，批量缓存命中只读取一次 TTL', async () => {
+  let ttlReads = 0;
+  const p = load({
+    config: flowCfg({ resolution: { op: '==' } }),
+    httpGet: embyLib(matchingBatch(1, 100)),
+    onConfigGet: (key) => { if (key === 'cache_ttl_sec') ttlReads++; },
+  });
+  assert.equal(await p.hooks.should_download(payload({ media: { episode: 1, episode_end: 100 } })), false);
+  const listsBeforeFlush = cacheListCount(p);
+  await p.runTimers();
+  assert.equal(cacheListCount(p) - listsBeforeFlush, 1, 'one continuous flush performs one config.list reconciliation');
+
+  const httpCallsBeforeCachedBatch = p.httpCalls.length;
+  const ttlReadsBeforeCachedBatch = ttlReads;
+  assert.equal(await p.hooks.should_download(payload({ media: { episode: 1, episode_end: 100 } })), false);
+  assert.equal(p.httpCalls.length, httpCallsBeforeCachedBatch);
+  assert.ok(ttlReads - ttlReadsBeforeCachedBatch <= 3, 'batch cache hit should not read TTL once per episode');
+});
+
+test('缓存条目在 flush 前过期时不落盘，之后的 hook 会重新查库', async () => {
+  const start = Date.UTC(2026, 8, 25, 0, 0, 0);
+  const p = load({
+    config: Object.assign(flowCfg({ resolution: { op: '==' } }), { cache_ttl_sec: '1' }),
+    startMs: start,
+    httpGet: embyLib([SDR]),
+  });
+  assert.equal(await p.hooks.should_download(payload()), false);
+  p.advance(2000);
+  await p.runTimers();
+  assert.deepEqual(p.cacheKeys(), []);
+
+  const httpCallsBeforeRetry = p.httpCalls.length;
+  assert.equal(await p.hooks.should_download(payload()), false);
+  assert.ok(p.httpCalls.length > httpCallsBeforeRetry, 'expired memory cache must not veto without a fresh library check');
+});
+
+test('缓存关闭后，已经排队的写入也不落盘', async () => {
+  const p = load({
+    config: flowCfg({ resolution: { op: '==' } }),
+    httpGet: embyLib([SDR]),
+  });
+  assert.equal(await p.hooks.should_download(payload()), false);
+  p.cfg.cache_ttl_sec = '0';
+  await p.runTimers();
+  assert.deepEqual(p.cacheKeys(), []);
+});
+
+test('旧宿主没有 setTimeout 时不阻塞 hook，并用内存缓存服务后续查重', async () => {
+  const p = load({
+    noSetTimeout: true,
+    config: flowCfg({ resolution: { op: '==' } }),
+    httpGet: embyLib([SDR]),
+  });
+  assert.equal(await p.hooks.should_download(payload()), false);
+  assert.equal(p.pendingTimers(), 0);
+  assert.deepEqual(p.cacheKeys(), []);
+  const httpCallsAfterFirst = p.httpCalls.length;
+  assert.equal(await p.hooks.should_download(payload()), false);
+  assert.equal(p.httpCalls.length, httpCallsAfterFirst);
 });
 
 // ─── hdr / dv：宿主真实形态（G1） ──────────────────────────────────────────────
@@ -274,6 +526,7 @@ test('Emby 与 Plex 都正常查完、都没有这一集 → allowed_not_in_lib 
   const p = load({ config: Object.assign(flowCfg({ resolution: { op: '==' } }), PLEX_CFG),
     httpGet: (url) => (url.indexOf('emby.local') >= 0 ? embyLib({ 9: [SDR] })(url) : plexEmpty(url)) });
   assert.equal(await p.hooks.should_download(payload()), true);
+  await p.runTimers();
   assert.equal(p.counters().allowed_not_in_lib, 1);
   assert.equal(p.counters().allowed_error, 0);
   assert.equal(p.cacheKeys().length, 1);
@@ -365,6 +618,7 @@ test('写缓存时删掉过期项（按 cache_ttl_sec），没过期的留着', 
   assert.equal(p.cacheKeys().length, 3, 'nothing expired at startup');
   p.advance((HOUR - 150) * 1000); // 现在 ts=s0-200 / s0-300 已满 1 小时，s0-100 还差 50 秒
   assert.equal(await p.hooks.should_download(payload()), true);
+  await p.runTimers();
   assert.deepEqual(p.cacheKeys().sort(), ['lib_cache_tv_1429_s1_e8', 'lib_cache_tv_5000_s1_e1']);
   assert.deepEqual(p.deletes.sort(), ['lib_cache_tv_5001_s1_e1', 'lib_cache_tv_5002_s1_e1']);
 });
@@ -377,6 +631,7 @@ test('缓存键总数上限 300：已有 300 个新鲜缓存，再写一个 → 
   const p = load({ config: cfg, startMs: start, httpGet: embyLib({ 9: [SDR] }) });
   assert.equal(p.cacheKeys().length, 300);
   assert.equal(await p.hooks.should_download(payload()), true);
+  await p.runTimers();
   const keys = p.cacheKeys();
   assert.equal(keys.length, 300);
   assert.ok(keys.includes('lib_cache_tv_1429_s1_e8'), 'the new entry is written');
@@ -391,6 +646,7 @@ test('上限按缓存键算：合集一次写 N 集也不会超过 300', async (
   const cfg = Object.assign(flowCfg({ resolution: { op: '==' } }), { cache_gen: '2' }, cacheEntries(299, (i) => s0 - 1000 + i));
   const p = load({ config: cfg, startMs: start, httpGet: embyLib({ 1: [SDR], 2: [SDR] }) });
   await p.hooks.should_download(payload({ media: { episode: 1, episode_end: 12 } }));
+  await p.runTimers();
   assert.equal(p.cacheKeys().length, 300);
   for (let e = 1; e <= 12; e++) assert.ok(p.cacheKeys().includes('lib_cache_tv_1429_s1_e' + e), 'ep ' + e);
 });
@@ -409,6 +665,7 @@ test('配额 500 已被旧版缓存写满（升级自 0.3.x）：启动时删掉
   assert.equal(p.cfg.flow_f1_enabled, '1');
   assert.ok(p.logs.some((l) => /removed \d+ cache keys left by an older version/.test(l[1])));
   assert.equal(await p.hooks.should_download(payload()), true);
+  await p.runTimers();
   assert.equal(p.counters().should_download_seen, 1, 'counter write no longer hits the quota');
   assert.equal(p.cacheKeys().length, 1);
   assert.equal(p.counters().cache_write_fail, 0);
@@ -433,6 +690,8 @@ test('启动之后才出现的缓存键（如管理页手动加的）也算进�
   const p = load({ config: Object.assign(flowCfg({ resolution: { op: '==' } }), { cache_gen: '2' }), startMs: start, httpGet: embyLib({ 9: [SDR] }) });
   Object.assign(p.cfg, cacheEntries(300, (i) => s0 - 1000 + i), { lib_cache_tv_1_s1_e1: JSON.stringify({ copies: [], ts: s0 - 2 * HOUR }) });
   assert.equal(await p.hooks.should_download(payload()), true);
+  await p.runTimers(1000);
+  assert.equal(p.pendingTimers(), 0, 'all reconciliation and cache writes must finish');
   const keys = p.cacheKeys();
   assert.equal(keys.length, 300);
   assert.ok(keys.includes('lib_cache_tv_1429_s1_e8'));
@@ -446,6 +705,7 @@ test('cache_ttl_sec=0（关缓存）：不写缓存，已有的缓存键在下�
   const p = load({ config: Object.assign(flowCfg({ resolution: { op: '==' } }), { cache_gen: '2', cache_ttl_sec: '0' }, cacheEntries(2, () => s0)),
     startMs: start, httpGet: embyLib({ 9: [SDR] }) });
   assert.equal(await p.hooks.should_download(payload()), true);
+  await p.runTimers();
   assert.deepEqual(p.cacheKeys(), []);
 });
 
@@ -456,5 +716,19 @@ test('旧宿主没有 config.delete：不淘汰、不写 cache_gen、照常工�
     startMs: start, httpGet: embyLib([SDR]) });
   assert.equal(p.cfg.cache_gen, undefined);
   assert.equal(await p.hooks.should_download(payload()), false);
+  await p.runTimers();
   assert.equal(p.cacheKeys().length, 4);
+});
+
+
+test('后台对账清除外部删除的已保存缓存，同时保留新排队结果', async () => {
+  const p = load({ config: flowCfg({ resolution: { op: '==' } }), httpGet: embyLib({ 8: [SDR], 9: [SDR] }) });
+  assert.equal(await p.hooks.should_download(payload()), false);
+  await p.runTimers();
+  delete p.cfg.lib_cache_tv_1429_s1_e8;
+  assert.equal(await p.hooks.should_download(payload({ media: { episode: 9 } })), false);
+  await p.runTimers();
+  const before = p.httpCalls.length;
+  assert.equal(await p.hooks.should_download(payload()), false);
+  assert.ok(p.httpCalls.length > before, 'deleted persisted cache is removed from memory during reconciliation');
 });

@@ -130,7 +130,7 @@ python scripts/build.py
 | 插件 | 版本 | 说明 |
 |------|------|------|
 | `dashboard-stats` | 1.0.0（未发布：没打过 tag，不在线上注册表里） | 仅暴露统计 API 端点（headless） |
-| `media-library-filter` | 0.4.0（开发中；已发布 0.3.3） | 下载去重器：在 `should_download` hook 里拿种子 tags 与 Emby/Plex 库内副本按 7 维+3 种操作符（==/≥/regex）逐副本比对，库内已有同规格副本则跳过下载（fail-open / 3s 超时；0.4.0 要求 FollowCat 事件循环插件运行时） |
+| `media-library-filter` | 0.4.1 | 下载去重器：在 `should_download` hook 里拿种子 tags 与 Emby/Plex 库内副本按 7 维+3 种操作符（==/≥/regex）逐副本比对，库内已有同规格副本则跳过下载（fail-open / 3s 超时；0.4.0 要求 FollowCat 事件循环插件运行时） |
 | `cookiecloud` | 1.0.0（未发布） | 从自建 CookieCloud 同步浏览器 cookie 到 PT 站凭据与豆瓣 Cookie：两种加密方式都支持、本地解密（密码不出 FollowCat）、按各站 RSS 域名匹配 cookie、只写变了的、可定时自动同步（要求 FollowCat 宿主已开放定时器且 `ptsite.list` 带 `hosts`） |
 
 > Slack / Telegram 通知业务自 FollowCat v3.5 起在主仓 `internal/notify` 内置；早期的 `notify` / `notify-telegram` / `notify-extension` 示例插件已从本仓删除（参考 git 历史）。
