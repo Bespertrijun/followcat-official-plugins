@@ -61,7 +61,7 @@ qBit / linker --->|  EventBus 同步分 |       |
 - **出网是异步的**：`http.*`、`ptsite.setCookie`、`douban.setCookie` 返回 Promise，所在函数写成 `async function` 并 `await`（见 §5）；其余 facade（`config` / `data` / `crypto` / `anime` / `task` / `ruleflow` / `ptsite` 读方法 / `douban.getCookie` / `log`）是同步的。
 - **凭证不会泄漏**：`anime.get` 返回的是脱敏 view，拿不到 `Server.Password` 之类；PT 站 / 豆瓣凭据只写不读，读侧只有「已配置」+ 指纹。
 - **内置 `JSON` 带保护**：`JSON.parse` / `JSON.stringify` 用起来和平常一样（输出逐字节相同，`reviver` / `replacer` / `space` / `toJSON` 照旧），只是嵌套超过 1000 层、或 stringify 超过 100 万个值时抛普通 `TypeError`，而不是拖垮宿主进程。宿主把数据转成普通对象交给你时也有同样的上限：别改写全局原型（如 `Object.prototype.toJSON`），否则宿主给你的 payload / facade 结果会转换失败（该次调用报错）。
-- **正则单次匹配 5 秒上限**：带反向引用 / 环视的正则遇上长输入可能指数级回溯；超过 5 秒按**未匹配**处理（`test` → `false`、`exec` / `match` → `null`）。写正则时避免 `(a|aa)+`、`(.*)*` 这类嵌套量词，长文本先截短再匹配。
+- **正则单次匹配 5 秒上限**：所有正则都用回溯引擎执行，写得不好的正则遇上不匹配的长输入可能指数级回溯；单次匹配超过 5 秒会抛 `RangeError: match timeout ...`，可以用 `try/catch` 接住（2026-11 之前的宿主按**未匹配**返回 `false` / `null`，不抛错）。写正则时避免 `(a|aa)+`、`(.*)*` 这类嵌套量词，长文本先截短再匹配；用户填写的正则包在 `try/catch` 里。
 - **没有文件系统、没有 require、没有 console**（`eval` / `Function` 也是 `undefined`）：始终可用的是 `plugin` / `log` / `config` / `data` / `crypto` 与定时器（`setTimeout` / `setInterval` / `setImmediate`，见 §6.5）；`http` / `anime` / `task` / `ruleflow` / `ptsite` / `douban` / `notify` 按 manifest 权限注入（见 §2 权限表）。
 
 ---
@@ -733,7 +733,7 @@ plugin.on("on_bot_command", async function (p) {
 | 启用失败：`该插件上次的运行还没退出（卡在无法打断的操作里），请重启 FollowCat 后再启用` | 上次停用时插件卡在宿主打断不了的操作里，宿主放弃了它（停用照常完成），旧引擎还没真正退出 | 重启 FollowCat；或等旧引擎自己退出后再启用（自动解除） |
 | FollowCat 启动后插件没起来，最近错误：`插件文件与记录不一致，请重新安装后再启用（…）` | 安装 / 升级中途 FollowCat 被杀，插件目录里的 manifest（版本 / 权限）与数据库记录对不上；宿主启动时不会用新权限跑旧代码（只在 FollowCat 启动时核对，手动启用不核对） | 重新上传 / 安装一次该插件，再手动启用 |
 | `convert host value for plugin: nested deeper than 1000 levels ...` | 宿主把数据转给插件时超限，多半是插件改写了 `Object.prototype.toJSON` 之类的全局原型 | 别改写内置原型 |
-| 正则明明该匹配却返回 `false` / `null`，耗时约 5 秒 | 正则回溯超过 5 秒上限，按未匹配处理 | 改写正则（去掉嵌套量词 / 反向引用），或先截短输入 |
+| 正则调用抛 `RangeError: match timeout after 5s ...`，耗时约 5 秒（2026-11 之前的宿主是返回 `false` / `null`） | 正则回溯超过 5 秒上限 | 改写正则（去掉嵌套量词 / 反向引用），或先截短输入；用户填写的正则包在 `try/catch` 里 |
 | 上传预览报 `manifest.actions requires permission "api.notify.send" and hook "on_notify_action"`（`commands` 同理） | 声明了动作 / 命令，却没声明 `api.notify.send` 权限或对应 hook | 两个都加上 |
 | 上传预览报 `manifest.commands[0].name "x_y" invalid: must match ^[a-z0-9]{1,32}$` / `full command name ... max 32` | 命令短名带了下划线 / 大写，或「插件名 + 短名」太长 | 短名只用小写字母和数字，取短些 |
 | 安装被拒（409）：`已安装同名插件「x」（来自 ...），请先卸载它` | 已经装了一个同名、但来源（`source_url`）不同的插件 | 先卸载那个；或者给你的插件换个 `name` |
