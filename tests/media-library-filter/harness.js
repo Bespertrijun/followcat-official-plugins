@@ -23,10 +23,12 @@ function load(opts) {
   const maxKeys = opts.maxConfigKeys || 500;
   let clock = opts.startMs || Date.UTC(2026, 8, 25, 0, 0, 0);
   const httpCalls = [];
+  const configGets = [];
   const configSets = [];
   let configListCalls = 0;
   let timerSeq = 0;
   const timers = [];
+  const intervals = [];
 
   function scheduleTimer(fn, delay) {
     const d = Number.isFinite(Number(delay)) && Number(delay) >= 0 ? Number(delay) : 0;
@@ -39,6 +41,28 @@ function load(opts) {
   function cancelTimer(id) {
     const i = timers.findIndex((timer) => timer.id === id);
     if (i >= 0) timers.splice(i, 1);
+  }
+
+  function scheduleInterval(fn, delay) {
+    const d = Number.isFinite(Number(delay)) && Number(delay) > 0 ? Number(delay) : 1;
+    const item = { id: ++timerSeq, fn, delay: d };
+    intervals.push(item);
+    return item.id;
+  }
+
+  function cancelInterval(id) {
+    const i = intervals.findIndex((item) => item.id === id);
+    if (i >= 0) intervals.splice(i, 1);
+  }
+
+  async function runIntervals() {
+    const snapshot = intervals.slice();
+    for (const item of snapshot) {
+      const result = item.fn();
+      await Promise.resolve();
+      if (result && typeof result.then === 'function') await result;
+    }
+    return snapshot.length;
   }
 
   async function runNextTimer() {
@@ -76,7 +100,7 @@ function load(opts) {
       error: (...a) => logs.push(['error', a.join(' ')]),
     },
     config: {
-      get: (k) => { if (opts.onConfigGet) opts.onConfigGet(k); return k in cfg ? cfg[k] : null; },
+      get: (k) => { k = String(k); configGets.push({ key: k, at: clock }); if (opts.onConfigGet) opts.onConfigGet(k); return k in cfg ? cfg[k] : null; },
       // 同宿主：value 按字符串存；新 key 受每插件条数配额限制（已有 key 更新不计）
       set: (k, v) => {
         k = String(k);
@@ -101,6 +125,10 @@ function load(opts) {
   if (!opts.noSetTimeout) {
     ctx.setTimeout = scheduleTimer;
     ctx.clearTimeout = cancelTimer;
+    if (!opts.noSetInterval) {
+      ctx.setInterval = scheduleInterval;
+      ctx.clearInterval = cancelInterval;
+    }
   }
   // 宿主 R4：config.delete(key) 同步返回是否删到
   const deletes = [];
@@ -127,12 +155,17 @@ function load(opts) {
     now: () => clock,
     advance: (ms) => { clock += ms; },
     counters: () => JSON.parse(JSON.stringify(apis['/stats']({ method: 'GET', body: '', query: {} }).counters)),
+    cacheStats: () => JSON.parse(JSON.stringify(apis['/stats']({ method: 'GET', body: '', query: {} }).cache)),
+    stats: () => JSON.parse(JSON.stringify(apis['/stats']({ method: 'GET', body: '', query: {} }))),
     cacheKeys: () => Object.keys(cfg).filter((k) => k.startsWith('lib_cache_')),
+    configGets,
     configSets,
     configListCalls: () => configListCalls,
     pendingTimers: () => timers.length,
+    registeredIntervals: () => intervals.length,
     runNextTimer,
     runTimers,
+    runIntervals,
   };
 }
 
@@ -173,7 +206,7 @@ function flowCfg(dims) {
 function payload(over) {
   over = over || {};
   return {
-    flow_id: 'f1',
+    flow_id: over.flow_id !== undefined ? over.flow_id : 'f1',
     media: Object.assign({ tmdb_id: '1429', tmdb_type: 'tv', imdb_id: '', season: 1, episode: 8, episode_end: 0,
       title: 'T', original_title: '', aka: [], year: 2024 }, over.media),
     tags: Object.assign({ resolution: '1080p', video_encode: 'HEVC', audio_encode: 'AAC', dv: '无', hdr: '无', code_bits: '10bit',

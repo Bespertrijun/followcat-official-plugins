@@ -14,6 +14,19 @@
 //     发出的请求——在途请求拖过 3s 时宿主已 fail-open 放行，迟到的结果只写缓存、计 late、打一条 warn。
 //   * tmdb_id 缺失 → 无法精确查库 → 放行。
 //
+// === 0.4.2 性能与缓存架构 ===
+//   * 查库缓存改为纯内存、按后端独立按季（电影按条）存储逐集副本明细，按估算字节数 LRU 淘汰
+//     （默认 10MB，上限 256MB，由 cache_max_mb 控制）；彻底移除 should_download 热路径上的同步 DB 读/写。
+//   * 区分正/负缓存 TTL：命中匹配走 cache_ttl_sec（默认 3600s）；缺集或规格不匹配走短 TTL
+//     （min(cache_ttl_sec, 60s)），防 RSS 同波并发击穿的同时 1 分钟内感知新入库/洗版。
+//   * 双后端（Emby + Plex）缓存与在途请求相互独立：查缓存阶段两端对称，冷查时并行发出，
+//     任意一端先 100% 确认否决即刻返回，不被慢/故障的另一端拖累；单端成功结果照常写各自缓存。
+//   * 单集与合集共享整剧拉取与按季缓存：一次查剧覆盖该剧在该后端返回的所有季并清理已消失的旧季；
+//     内存缓存 tmdbID → Emby seriesID / Plex showKey（404/400 或 200 空列表自动清掉重查），
+//     并按后端+同剧/同片做 in-flight Promise 并发复用。
+//   * 全局与 per-flow 配置常驻内存（UI 保存触发 /flows 等接口实时刷新 + 30s 定时兜底），
+//     统计计数器与 last_error 在内存累加并延迟分步落盘；升级时分步清理旧版遗留的 lib_cache_*。
+//
 // === 7 个比对维度 ===
 //   resolution(==/>=)  video_encode(==/regex)  audio_encode(==/regex)
 //   code_bits(==/>=)   hdr(==)  dv(==)  format(==/regex)
@@ -21,9 +34,8 @@
 // === 全局配置 key ===
 //   emby_enabled / emby_url / emby_api_key
 //   plex_enabled / plex_url / plex_token
-//   cache_ttl_sec / dry_run
-//   （插件自己写的：计数器、emby_/plex_last_error[_at]、lib_cache_*（最多 CACHE_MAX_KEYS 个，写缓存时淘汰过期 /
-//    最旧的）、cache_gen（缓存代号，启动时据此删旧版本留下的缓存））
+//   cache_ttl_sec / cache_max_mb / dry_run
+//   （插件自己写的：计数器、emby_/plex_last_error[_at]、cache_gen）
 //
 // === per-flow 配置 key ===
 //   flow_<id>_enabled   "1" 启用本 flow 否决
@@ -35,12 +47,27 @@
 
 var CACHE_PREFIX = "lib_cache_";
 var DEFAULT_CACHE_TTL_SEC = 3600;
-// 缓存键总数上限：给计数器 / per-flow 配置等留足宿主每插件 500 个 key 的配额余量
-var CACHE_MAX_KEYS = 300;
-var CACHE_FLUSH_DELAY_MS = 25;
-// 缓存代号：0.4.0 起写入；启动时发现不是这个值 = 旧版本留下的缓存，整批删掉（旧版不淘汰，可能早已把配额写满）
+// 缺集 / 规格不匹配时的短缓存 TTL（秒）：防同波 RSS 多站并发重复查库，同时 1 分钟内感知新入库
+var NEGATIVE_CACHE_TTL_SEC = 60;
+// 默认纯内存缓存上限（MB），由 cache_max_mb 配置覆盖；<= 0 关闭缓存，硬上限 256 MB 防误配吃爆进程内存
+var DEFAULT_CACHE_MAX_MB = 10;
+var MAX_CACHE_MAX_MB = 256;
+var BYTES_PER_MB = 1024 * 1024;
+// tmdbID → seriesID / showKey 内存映射上限（条）
+var SERIES_ID_CACHE_MAX = 1000;
+// 缓存代号：0.4.2 起改为纯内存缓存；启动时发现不是 "3" 则清理旧版留在 plugin_configs 的 lib_cache_*
 var CACHE_GEN_KEY = "cache_gen";
-var CACHE_GEN = "2";
+var CACHE_GEN = "3";
+// 启动时同步清理旧缓存键上限：先立刻腾出少量配额防 500 键写满，其余交后台定时器分步删（避开 10s 启动超时）
+var LEGACY_CLEANUP_SYNC_LIMIT = 10;
+var LEGACY_CLEANUP_STEP_DELAY_MS = 50;
+// 配置后台兜底刷新间隔（UI 保存会立刻调 /flows 实时刷新，定时器兜底绕开 UI 的底层 API 改库）
+var CONFIG_REFRESH_INTERVAL_MS = 30000;
+var CONFIG_REFRESH_STEP_DELAY_MS = 25;
+// 计数器 / last_error 延迟落盘参数
+var STATS_FLUSH_DELAY_MS = 15000;
+var STATS_FLUSH_STEP_DELAY_MS = 50;
+
 var LIB_CHECK_SOFT_BUDGET_MS = 2500;
 // 镜像宿主 should_download 超时（3s 墙钟，含 await）：过了这个点宿主已 fail-open 放行、
 // 结果被丢弃，迟到的续体只写缓存 + 计 late + 打一条不带裁决的 warn，不记决策日志、不动其它计数
@@ -58,6 +85,36 @@ var MATCH_OPS = {
     format: ["==", "regex"]
 };
 
+var GLOBAL_CONFIG_KEYS = [
+    "emby_enabled", "emby_url", "emby_api_key",
+    "plex_enabled", "plex_url", "plex_token",
+    "cache_ttl_sec", "cache_max_mb", "dry_run"
+];
+
+var BACKEND_CACHE_AFFECTING_KEYS = [
+    "emby_enabled", "emby_url", "emby_api_key",
+    "plex_enabled", "plex_url", "plex_token"
+];
+
+var COUNTER_KEYS = [
+    "should_download_seen",
+    "vetoed",
+    "allowed_not_in_lib",
+    "allowed_no_tmdb",
+    "allowed_no_match",
+    "allowed_no_dims",
+    "allowed_tag_empty",
+    "allowed_error",
+    "dry_run_would_veto",
+    "batch_partial_filtered",
+    "late"
+];
+
+var ERROR_KEYS = [
+    "emby_last_error", "emby_last_error_at",
+    "plex_last_error", "plex_last_error_at"
+];
+
 var cache_write_fail = 0;
 
 function nowMs() { return new Date().getTime(); }
@@ -67,6 +124,13 @@ function safeNum(s, def) {
     if (s === null || s === undefined || s === "") return def;
     var n = parseInt(s, 10);
     return isNaN(n) ? def : n;
+}
+
+function safeFloat(s, def) {
+    if (s === null || s === undefined || s === "") return def;
+    var n = parseFloat(String(s));
+    if (isNaN(n) || !isFinite(n)) return def;
+    return n;
 }
 
 function nonEmpty(v) { return typeof v === "string" && v.length > 0; }
@@ -82,20 +146,6 @@ function safeJsonParse(raw, fallback) {
 
 function isArray(v) {
     return Object.prototype.toString.call(v) === "[object Array]";
-}
-
-function isEnabled(key) { return config.get(key) === "1"; }
-
-function incCounter(key) {
-    var n = safeNum(config.get(key), 0) + 1;
-    try { config.set(key, String(n)); } catch (e) { /* quota; ignore */ }
-}
-
-function rememberError(scope, err) {
-    try {
-        config.set(scope + "_last_error", String(err == null ? "" : err));
-        config.set(scope + "_last_error_at", new Date().toISOString());
-    } catch (e) { /* ignore */ }
 }
 
 function qs(params) {
@@ -114,6 +164,263 @@ function joinUrl(base, pathSeg) {
     var p = String(pathSeg || "");
     if (p && p.charAt(0) !== "/") p = "/" + p;
     return b + p;
+}
+
+// ====== 内存配置快照与计数器延迟落盘 ======
+
+var cfgSnapshot = {};
+var parsedFlowConfigs = {};
+var cfgLoaded = false;
+var configRefreshTimer = null;
+var stagedRefreshTimer = null;
+var stagedRefreshEpoch = 0;
+
+var memCounters = {};
+var memErrors = {};
+var dirtyStats = {};
+var statsFlushTimer = null;
+
+function cfgGet(key) {
+    if (Object.prototype.hasOwnProperty.call(cfgSnapshot, key)) {
+        return cfgSnapshot[key];
+    }
+    return null;
+}
+
+function isEnabled(key) { return cfgGet(key) === "1"; }
+
+function cacheTtlSec() {
+    return safeNum(cfgGet("cache_ttl_sec"), DEFAULT_CACHE_TTL_SEC);
+}
+
+function cacheMaxMb() {
+    var raw = cfgGet("cache_max_mb");
+    if (raw === null || raw === undefined || trim(String(raw)) === "") {
+        return DEFAULT_CACHE_MAX_MB;
+    }
+    var n = safeFloat(raw, DEFAULT_CACHE_MAX_MB);
+    if (n < 0) return DEFAULT_CACHE_MAX_MB;
+    if (n > MAX_CACHE_MAX_MB) return MAX_CACHE_MAX_MB;
+    return n;
+}
+
+function cacheMaxBytes() {
+    var mb = cacheMaxMb();
+    if (mb <= 0) return 0;
+    return Math.floor(mb * BYTES_PER_MB);
+}
+
+function effectiveNegativeTtlSec(ttl) {
+    if (ttl <= 0) return 0;
+    return ttl < NEGATIVE_CACHE_TTL_SEC ? ttl : NEGATIVE_CACHE_TTL_SEC;
+}
+
+function buildParsedFlowConfig(enabledRaw, dimsRaw) {
+    var enabled = enabledRaw === "1";
+    if (dimsRaw === null || dimsRaw === undefined || dimsRaw === "") {
+        return { enabled: enabled, dims: null };
+    }
+    var parsed = safeJsonParse(dimsRaw, null);
+    if (!parsed || typeof parsed !== "object" || isArray(parsed)) {
+        return { enabled: enabled, dims: null };
+    }
+    var clean = sanitizeDims(parsed);
+    if (dimCount(clean) === 0) {
+        return { enabled: enabled, dims: null };
+    }
+    return { enabled: enabled, dims: clean };
+}
+
+function flowConfig(flowID) {
+    var id = String(flowID == null ? "" : flowID);
+    if (Object.prototype.hasOwnProperty.call(parsedFlowConfigs, id)) {
+        return parsedFlowConfigs[id];
+    }
+    return { enabled: false, dims: null };
+}
+
+function parseFlowKeyName(k) {
+    if (k.indexOf("flow_") !== 0) return null;
+    if (k.length > 13 && k.slice(-8) === "_enabled") {
+        return { id: k.slice(5, -8), field: "enabled" };
+    }
+    if (k.length > 10 && k.slice(-5) === "_dims") {
+        return { id: k.slice(5, -5), field: "dims" };
+    }
+    return null;
+}
+
+function applyConfigSnapshot(next, flowIDs) {
+    var prev = cfgSnapshot;
+    var hadPrev = cfgLoaded;
+
+    var nextFlows = {};
+    for (var fid in flowIDs) {
+        if (!Object.prototype.hasOwnProperty.call(flowIDs, fid)) continue;
+        var enKey = "flow_" + fid + "_enabled";
+        var dmKey = "flow_" + fid + "_dims";
+        nextFlows[fid] = buildParsedFlowConfig(
+            Object.prototype.hasOwnProperty.call(next, enKey) ? next[enKey] : null,
+            Object.prototype.hasOwnProperty.call(next, dmKey) ? next[dmKey] : null
+        );
+    }
+
+    cfgSnapshot = next;
+    parsedFlowConfigs = nextFlows;
+    cfgLoaded = true;
+
+    if (hadPrev) {
+        var backendChanged = false;
+        for (var b = 0; b < BACKEND_CACHE_AFFECTING_KEYS.length; b++) {
+            var bk = BACKEND_CACHE_AFFECTING_KEYS[b];
+            var oldV = Object.prototype.hasOwnProperty.call(prev, bk) ? prev[bk] : null;
+            var newV = Object.prototype.hasOwnProperty.call(next, bk) ? next[bk] : null;
+            if (oldV !== newV) { backendChanged = true; break; }
+        }
+        var ttl = cacheTtlSec();
+        var maxBytes = cacheMaxBytes();
+        if (backendChanged || ttl <= 0 || maxBytes <= 0) {
+            clearAllCaches();
+        } else if (memCacheBytes > maxBytes) {
+            evictMemCache(nowSec(), ttl, maxBytes, null);
+        }
+    } else {
+        if (cacheTtlSec() <= 0 || cacheMaxBytes() <= 0) {
+            clearAllCaches();
+        }
+    }
+}
+
+function collectConfigKeysToRead() {
+    var keys = GLOBAL_CONFIG_KEYS.slice();
+    var flowIDs = {};
+    var allKeys = [];
+    try { allKeys = config.list() || []; } catch (e) { allKeys = []; }
+    for (var j = 0; j < allKeys.length; j++) {
+        var fk = String(allKeys[j]);
+        var parsedKey = parseFlowKeyName(fk);
+        if (!parsedKey || !parsedKey.id) continue;
+        flowIDs[parsedKey.id] = true;
+        keys.push(fk);
+    }
+    return { keys: keys, flowIDs: flowIDs };
+}
+
+function cancelStagedConfigRefresh() {
+    stagedRefreshEpoch++;
+    if (stagedRefreshTimer !== null && typeof clearTimeout === "function") {
+        clearTimeout(stagedRefreshTimer);
+    }
+    stagedRefreshTimer = null;
+}
+
+// 从宿主存储同步重读全局与 per-flow 配置到内存（用于启动、/flows、/save-config 等即时刷新入口）
+function reloadConfig() {
+    cancelStagedConfigRefresh();
+    var plan = collectConfigKeysToRead();
+    var next = {};
+    for (var i = 0; i < plan.keys.length; i++) {
+        var k = plan.keys[i];
+        var v = config.get(k);
+        if (v !== null && v !== undefined) next[k] = String(v);
+    }
+    applyConfigSnapshot(next, plan.flowIDs);
+}
+
+function reloadConfigSafe() {
+    try { reloadConfig(); } catch (e) { log.warn("media-library-filter: config refresh failed: " + e); }
+}
+
+// 后台定时兜底刷新：分步每次只读 1 个 key，避免在慢库上阻塞单个事件循环回合
+function startStagedConfigRefresh() {
+    if (stagedRefreshTimer !== null) return;
+    if (typeof setTimeout !== "function") {
+        reloadConfigSafe();
+        return;
+    }
+    var plan;
+    try { plan = collectConfigKeysToRead(); }
+    catch (e) { log.warn("media-library-filter: background config list failed: " + e); return; }
+
+    var epoch = ++stagedRefreshEpoch;
+    var next = {};
+    var idx = 0;
+    function step() {
+        stagedRefreshTimer = null;
+        if (epoch !== stagedRefreshEpoch) return;
+        if (idx >= plan.keys.length) {
+            try { applyConfigSnapshot(next, plan.flowIDs); }
+            catch (e) { log.warn("media-library-filter: background config apply failed: " + e); }
+            return;
+        }
+        var k = plan.keys[idx++];
+        try {
+            var v = config.get(k);
+            if (v !== null && v !== undefined) next[k] = String(v);
+        } catch (e) {
+            log.warn("media-library-filter: background config read failed for " + k + ": " + e);
+            return;
+        }
+        stagedRefreshTimer = setTimeout(step, CONFIG_REFRESH_STEP_DELAY_MS);
+    }
+    stagedRefreshTimer = setTimeout(step, CONFIG_REFRESH_STEP_DELAY_MS);
+}
+
+function startConfigRefreshTimer() {
+    if (configRefreshTimer !== null || typeof setInterval !== "function") return;
+    configRefreshTimer = setInterval(startStagedConfigRefresh, CONFIG_REFRESH_INTERVAL_MS);
+}
+
+function loadStatsFromStore() {
+    for (var i = 0; i < COUNTER_KEYS.length; i++) {
+        var ck = COUNTER_KEYS[i];
+        memCounters[ck] = safeNum(config.get(ck), 0);
+    }
+    for (var j = 0; j < ERROR_KEYS.length; j++) {
+        var ek = ERROR_KEYS[j];
+        var ev = config.get(ek);
+        memErrors[ek] = ev == null ? "" : String(ev);
+    }
+}
+
+function scheduleStatsFlush(delayMs) {
+    if (statsFlushTimer !== null || typeof setTimeout !== "function") return;
+    statsFlushTimer = setTimeout(flushStatsStep, delayMs === undefined ? STATS_FLUSH_DELAY_MS : delayMs);
+}
+
+// 每次只刷一个脏计数/错误键，避免在单个事件循环回合连续执行多次同步 DB 写事务
+function flushStatsStep() {
+    statsFlushTimer = null;
+    var keys = Object.keys(dirtyStats);
+    if (keys.length === 0) return;
+    var key = keys[0];
+    var val = dirtyStats[key];
+    delete dirtyStats[key];
+    try {
+        config.set(key, val);
+    } catch (e) {
+        log.warn("media-library-filter: stats flush failed for " + key + ": " + e);
+    }
+    if (Object.keys(dirtyStats).length > 0) {
+        scheduleStatsFlush(STATS_FLUSH_STEP_DELAY_MS);
+    }
+}
+
+function incCounter(key) {
+    var n = (memCounters[key] || 0) + 1;
+    memCounters[key] = n;
+    dirtyStats[key] = String(n);
+    scheduleStatsFlush();
+}
+
+function rememberError(scope, err) {
+    var errStr = String(err == null ? "" : err);
+    var errAt = new Date().toISOString();
+    memErrors[scope + "_last_error"] = errStr;
+    memErrors[scope + "_last_error_at"] = errAt;
+    dirtyStats[scope + "_last_error"] = errStr;
+    dirtyStats[scope + "_last_error_at"] = errAt;
+    scheduleStatsFlush();
 }
 
 // ====== 比对工具（纯函数） ======
@@ -282,244 +589,291 @@ function dimCount(dims) {
     return n;
 }
 
-// ====== 缓存 ======
+// ====== 纯内存按季 / 电影 LRU 缓存（按字节上限淘汰） ======
 
-function cacheKey(tmdbType, tmdbID, season, episode) {
-    return CACHE_PREFIX + String(tmdbType || "tv") + "_" + String(tmdbID) +
-           "_s" + String(season || 0) + "_e" + String(episode || 0);
+var memCache = {};
+var memCacheBytes = 0;
+var memCacheCount = 0;
+var memCacheSeq = 0;
+var cacheEpoch = 0;
+
+// tmdbID → seriesID / showKey 内存缓存
+var seriesIdCache = {};
+var seriesIdCount = 0;
+var seriesIdSeq = 0;
+
+// 同剧/同片在途请求去重表：key → Promise
+var inFlight = {};
+
+function seasonCacheKey(backend, tmdbID, season) {
+    return backend + ":tv:" + String(tmdbID) + ":s" + String(season || 0);
 }
 
-// 查询结果先留在内存。持久化排队且按键合并，不能占用 should_download 的 3s 预算。
-var memoryCache = {};
-var pendingCache = {};
-var cacheFlushTimer = null;
-var cacheFlushIndexed = false;
-var cacheIndexReads = null;
-var activeChecks = 0;
+function movieCacheKey(backend, tmdbID) {
+    return backend + ":movie:" + String(tmdbID);
+}
 
-function rememberCache(key, entry) {
-    memoryCache[key] = entry;
-    var keys = Object.keys(memoryCache);
-    if (keys.length <= CACHE_MAX_KEYS) return;
+function seriesFlightKey(backend, tmdbID) {
+    return backend + ":tv:" + String(tmdbID);
+}
+
+function movieFlightKey(backend, tmdbID) {
+    return backend + ":movie:" + String(tmdbID);
+}
+
+function seriesIdCacheKey(backend, tmdbID) {
+    return backend + ":" + String(tmdbID);
+}
+
+function hasAnyEpisode(epMap) {
+    if (!epMap || typeof epMap !== "object") return false;
+    for (var k in epMap) {
+        if (Object.prototype.hasOwnProperty.call(epMap, k)) return true;
+    }
+    return false;
+}
+
+// 整剧刷新成功时对账该剧在该后端的旧季缓存：
+// - 返回里已有的季随后会被新数据覆盖；
+// - 返回里消失且原本非空的旧季（如库里删了整季）立即删除，避免残留误拦截；
+// - 原本就是空的未过期短缓存季（episodes={}），借本次整剧结果把 ts 续期，60s 内免重复查库。
+function reconcileBackendSeriesSeasons(backend, tmdbID, freshSeasons, ts, ttl) {
+    var prefix = backend + ":tv:" + String(tmdbID) + ":s";
+    var toDel = [];
+    for (var k in memCache) {
+        if (!Object.prototype.hasOwnProperty.call(memCache, k) || k.indexOf(prefix) !== 0) continue;
+        var sKey = k.slice(prefix.length);
+        if (freshSeasons && Object.prototype.hasOwnProperty.call(freshSeasons, sKey)) continue;
+        var entry = memCache[k];
+        if (entry && !hasAnyEpisode(entry.episodes) && (ts - entry.ts) < ttl) {
+            entry.ts = ts;
+            entry.lastAccess = ++memCacheSeq;
+        } else {
+            toDel.push(k);
+        }
+    }
+    for (var i = 0; i < toDel.length; i++) {
+        deleteMemCacheKey(toDel[i]);
+    }
+}
+
+function estimateEntryBytes(key, payload) {
+    var rawLen = 0;
+    try { rawLen = JSON.stringify(payload).length; } catch (e) { rawLen = 512; }
+    // UTF-16 字符串 + JS 对象头估算（×2 + 固定开销）
+    return 128 + key.length * 2 + rawLen * 2;
+}
+
+function deleteMemCacheKey(key) {
+    if (!Object.prototype.hasOwnProperty.call(memCache, key)) return;
+    memCacheBytes -= memCache[key].bytes || 0;
+    if (memCacheBytes < 0) memCacheBytes = 0;
+    delete memCache[key];
+    memCacheCount--;
+    if (memCacheCount < 0) memCacheCount = 0;
+}
+
+function evictMemCache(nowS, ttl, maxBytes, keepKey) {
+    var k;
+    // 第一轮：先清掉所有已过期的条目
+    for (k in memCache) {
+        if (!Object.prototype.hasOwnProperty.call(memCache, k) || k === keepKey) continue;
+        if (ttl <= 0 || (nowS - memCache[k].ts) >= ttl) {
+            deleteMemCacheKey(k);
+        }
+    }
+    if (memCacheBytes <= maxBytes) return;
+
+    // 第二轮：仍超容量则按 LRU（lastAccess 升序）淘汰
+    var keys = [];
+    for (k in memCache) {
+        if (Object.prototype.hasOwnProperty.call(memCache, k) && k !== keepKey) {
+            keys.push(k);
+        }
+    }
     keys.sort(function (a, b) {
-        return (memoryCache[a].ts || 0) - (memoryCache[b].ts || 0);
+        return (memCache[a].lastAccess || 0) - (memCache[b].lastAccess || 0);
     });
-    for (var i = 0; i < keys.length - CACHE_MAX_KEYS; i++) {
-        delete memoryCache[keys[i]];
-        delete pendingCache[keys[i]];
+    for (var i = 0; i < keys.length && memCacheBytes > maxBytes; i++) {
+        deleteMemCacheKey(keys[i]);
     }
 }
 
-function readCache(key) {
-    if (!nonEmpty(key)) return null;
-    if (Object.prototype.hasOwnProperty.call(memoryCache, key)) return memoryCache[key];
-    var obj = readStoredCache(key);
-    if (obj) rememberCache(key, obj);
-    return obj;
+function getMemCache(key, ttl) {
+    if (!nonEmpty(key) || ttl <= 0 || cacheMaxBytes() <= 0) return null;
+    if (!Object.prototype.hasOwnProperty.call(memCache, key)) return null;
+    var entry = memCache[key];
+    if ((nowSec() - entry.ts) >= ttl) {
+        deleteMemCacheKey(key);
+        return null;
+    }
+    entry.lastAccess = ++memCacheSeq;
+    return entry;
 }
 
-function readStoredCache(key) {
-    var raw = config.get(key);
-    if (!raw) return null;
-    var obj = safeJsonParse(raw, null);
-    if (!obj || typeof obj !== "object") return null;
-    return obj;
-}
-
-function writeCache(key, entry, ttl) {
+function putMemCache(key, data, ttl) {
     if (!nonEmpty(key)) return;
-    if (ttl === undefined) ttl = cacheTtlSec();
-    if (ttl > 0) {
-        pendingCache[key] = entry;
-        rememberCache(key, entry);
-    } else {
-        memoryCache = {};
-        pendingCache = {};
-    }
-    scheduleCacheFlush();
-}
-
-function scheduleCacheFlush() {
-    // 更早的宿主没有定时器时只保留内存缓存，不退回同步写入。
-    if (cacheFlushTimer !== null || typeof setTimeout !== "function") return;
-    cacheFlushTimer = setTimeout(flushCache, CACHE_FLUSH_DELAY_MS);
-}
-
-function flushCache() {
-    cacheFlushTimer = null;
-    // HTTP await 期间也让查询优先；定时器与 hook 共用同一个 JS 循环。
-    if (activeChecks > 0) {
-        scheduleCacheFlush();
+    var maxBytes = cacheMaxBytes();
+    if (ttl <= 0 || maxBytes <= 0) {
         return;
     }
-    try {
-        if (canEvictCache() && !cacheFlushIndexed) {
-            if (cacheIndexReads === null) {
-                var oldIndex = cacheIndex || {};
-                var diskSnapshot = config.list() || [];
-                cacheIndex = {};
-                cacheIndexReads = [];
-                for (var d = 0; d < diskSnapshot.length; d++) {
-                    var diskKey = String(diskSnapshot[d]);
-                    if (diskKey.indexOf(CACHE_PREFIX) !== 0) continue;
-                    if (Object.prototype.hasOwnProperty.call(oldIndex, diskKey)) cacheIndex[diskKey] = oldIndex[diskKey];
-                    else cacheIndexReads.push(diskKey);
-                }
-                // 外部删除已经保存的键时，不让旧内存副本在下一轮对账后继续生效。
-                for (var oldKey in oldIndex) {
-                    if (Object.prototype.hasOwnProperty.call(oldIndex, oldKey) &&
-                        diskSnapshot.indexOf(oldKey) < 0 && !Object.prototype.hasOwnProperty.call(pendingCache, oldKey)) {
-                        delete memoryCache[oldKey];
-                    }
-                }
-            }
-            // 管理页新增的缓存键也要对账；每次只读取一项，避免整批读取阻塞下个 hook。
-            if (cacheIndexReads.length > 0) {
-                var readKey = cacheIndexReads.shift();
-                var diskEntry = readStoredCache(readKey);
-                cacheIndex[readKey] = diskEntry && typeof diskEntry.ts === "number" ? diskEntry.ts : 0;
-                scheduleCacheFlush();
-                return;
-            }
-            cacheIndexReads = null;
-            cacheFlushIndexed = true;
-        }
-        var ttl = cacheTtlSec();
-        var nowS = nowSec();
-        var keys = Object.keys(pendingCache);
-        for (var i = 0; i < keys.length; i++) {
-            var key = keys[i];
-            if (ttl <= 0 || nowS - pendingCache[key].ts >= ttl) {
-                delete pendingCache[key];
-                delete memoryCache[key];
-            }
-        }
-        if (ttl <= 0) memoryCache = {};
-        keys = Object.keys(pendingCache);
-        var nextKey = keys.length ? keys[0] : null;
-
-        if (canEvictCache()) {
-            var diskKeys = Object.keys(cacheIndex);
-            diskKeys.sort(function (a, b) {
-                var d = cacheIndex[a] - cacheIndex[b];
-                return d !== 0 ? d : (a < b ? -1 : (a > b ? 1 : 0));
-            });
-            var oldest = diskKeys.length ? diskKeys[0] : null;
-            var needsRoom = nextKey !== null && !Object.prototype.hasOwnProperty.call(cacheIndex, nextKey);
-            if (oldest !== null && (ttl <= 0 || nowS - cacheIndex[oldest] >= ttl ||
-                diskKeys.length + (needsRoom ? 1 : 0) > CACHE_MAX_KEYS)) {
-                dropCacheKey(oldest);
-                scheduleCacheFlush();
-                return;
-            }
-        }
-        if (nextKey !== null) {
-            var entry = pendingCache[nextKey];
-            delete pendingCache[nextKey];
-            try {
-                config.set(nextKey, JSON.stringify(entry));
-                if (cacheIndex) cacheIndex[nextKey] = entry.ts;
-            } catch (e) {
-                cache_write_fail++;
-                log.warn("media-library-filter: cache write failed: " + e);
-            }
-            // 每个回调至多写入或删除一项，给后续 hook 留出执行机会。
-            scheduleCacheFlush();
-            return;
-        }
-    } catch (e) {
-        cache_write_fail++;
-        log.warn("media-library-filter: cache flush failed: " + e);
-        pendingCache = {}; // best effort：保留内存结果，避免故障时无限重试
+    var bytes = estimateEntryBytes(key, data);
+    if (bytes > maxBytes) {
+        // 单条本身超出上限：不写入，若原有旧条目一并删掉
+        deleteMemCacheKey(key);
+        return;
     }
-    cacheFlushIndexed = false;
-    cacheIndexReads = null;
+    deleteMemCacheKey(key);
+    var entry = {
+        kind: data.kind,
+        ts: data.ts,
+        source: data.source || "",
+        bytes: bytes,
+        lastAccess: ++memCacheSeq
+    };
+    if (data.kind === "movie") {
+        entry.copies = data.copies || [];
+    } else {
+        entry.episodes = data.episodes || {};
+    }
+    memCache[key] = entry;
+    memCacheBytes += bytes;
+    memCacheCount++;
+    if (memCacheBytes > maxBytes) {
+        evictMemCache(nowSec(), ttl, maxBytes, key);
+    }
 }
 
-function cacheTtlSec() {
-    return safeNum(config.get("cache_ttl_sec"), DEFAULT_CACHE_TTL_SEC);
+function getSeriesIdCache(backend, tmdbID, ttl) {
+    if (ttl <= 0 || cacheMaxBytes() <= 0) return "";
+    var k = seriesIdCacheKey(backend, tmdbID);
+    if (!Object.prototype.hasOwnProperty.call(seriesIdCache, k)) return "";
+    var entry = seriesIdCache[k];
+    if ((nowSec() - entry.ts) >= ttl) {
+        delete seriesIdCache[k];
+        seriesIdCount--;
+        if (seriesIdCount < 0) seriesIdCount = 0;
+        return "";
+    }
+    entry.lastAccess = ++seriesIdSeq;
+    return entry.id;
 }
 
-// ====== 缓存淘汰（需要宿主的 config.delete；旧宿主没有它时不淘汰，行为同 0.3.x） ======
-//
-// 内存里记一份「缓存键 → 写入时间」索引，每轮后台保存前按 config.list() 对一遍账（管理页手动加 / 删的键也算进来，
-// 新出现的键读一次 ts），然后：先删过期项（按 cache_ttl_sec），再看总数，超过 CACHE_MAX_KEYS 就从最旧的删起。
-// 这样缓存永远不会把插件配置的 500 个 key 配额撑满（撑满后计数器、per-flow 配置都写不进去）。
+function putSeriesIdCache(backend, tmdbID, id, ttl) {
+    if (!nonEmpty(String(id || "")) || ttl <= 0 || cacheMaxBytes() <= 0) return;
+    var k = seriesIdCacheKey(backend, tmdbID);
+    if (!Object.prototype.hasOwnProperty.call(seriesIdCache, k)) {
+        seriesIdCount++;
+    }
+    seriesIdCache[k] = {
+        id: String(id),
+        ts: nowSec(),
+        lastAccess: ++seriesIdSeq
+    };
+    if (seriesIdCount > SERIES_ID_CACHE_MAX) {
+        var keys = Object.keys(seriesIdCache);
+        keys.sort(function (a, b) {
+            return (seriesIdCache[a].lastAccess || 0) - (seriesIdCache[b].lastAccess || 0);
+        });
+        for (var i = 0; i < keys.length && seriesIdCount > SERIES_ID_CACHE_MAX; i++) {
+            delete seriesIdCache[keys[i]];
+            seriesIdCount--;
+        }
+    }
+}
 
-var cacheIndex = null; // key → ts（秒）；解析不了的旧值记 0（最先被当成过期删掉）
+function deleteSeriesIdCache(backend, tmdbID) {
+    var k = seriesIdCacheKey(backend, tmdbID);
+    if (!Object.prototype.hasOwnProperty.call(seriesIdCache, k)) return;
+    delete seriesIdCache[k];
+    seriesIdCount--;
+    if (seriesIdCount < 0) seriesIdCount = 0;
+}
 
-function canEvictCache() {
+function clearAllCaches() {
+    var stats = {
+        cleared_entries: memCacheCount,
+        cleared_bytes: memCacheBytes,
+        cleared_series_ids: seriesIdCount
+    };
+    memCache = {};
+    memCacheBytes = 0;
+    memCacheCount = 0;
+    seriesIdCache = {};
+    seriesIdCount = 0;
+    inFlight = {};
+    cacheEpoch++;
+    return stats;
+}
+
+// ====== 旧版本数据库缓存清理（升级自 <= 0.4.1 时释放 plugin_configs 配额） ======
+
+var legacyCleanupQueue = [];
+var legacyCleanupTotalRemoved = 0;
+var legacyCleanupTimer = null;
+
+function canDeleteConfig() {
     return typeof config === "object" && config !== null && typeof config["delete"] === "function";
 }
 
-// 与 config.list() 对账：列表里有、索引里没有的缓存键读一次 ts 补进来；索引里有、列表里已经没有的去掉
-function loadCacheIndex() {
-    var old = cacheIndex || {};
-    var next = {};
-    var keys = [];
-    try { keys = config.list() || []; } catch (e) { keys = []; }
-    for (var i = 0; i < keys.length; i++) {
-        var k = String(keys[i]);
-        if (k.indexOf(CACHE_PREFIX) !== 0) continue;
-        if (Object.prototype.hasOwnProperty.call(old, k)) { next[k] = old[k]; continue; }
-        var entry = readCache(k);
-        next[k] = (entry && typeof entry.ts === "number") ? entry.ts : 0;
+function finishLegacyCleanup() {
+    try { config.set(CACHE_GEN_KEY, CACHE_GEN); } catch (e) {
+        log.warn("media-library-filter: failed to write cache_gen: " + e);
     }
-    cacheIndex = next;
-}
-
-function dropCacheKey(k) {
-    try { config["delete"](k); } catch (e) { log.warn("media-library-filter: cache delete failed: " + e); }
-    if (cacheIndex) delete cacheIndex[k];
-    if (!Object.prototype.hasOwnProperty.call(pendingCache, k)) delete memoryCache[k];
-}
-
-// keepKey：马上要写的那个 key（不删它，并按「写入后」的总数算上限）
-function pruneCache(nowS, keepKey) {
-    loadCacheIndex();
-    var ttl = cacheTtlSec();
-    var k;
-    for (k in cacheIndex) {
-        if (!Object.prototype.hasOwnProperty.call(cacheIndex, k) || k === keepKey) continue;
-        if (ttl <= 0 || (nowS - cacheIndex[k]) >= ttl) dropCacheKey(k);
-    }
-    var rest = [];
-    for (k in cacheIndex) {
-        if (Object.prototype.hasOwnProperty.call(cacheIndex, k) && k !== keepKey) rest.push(k);
-    }
-    var total = rest.length + (keepKey ? 1 : 0);
-    if (total <= CACHE_MAX_KEYS) return;
-    rest.sort(function (a, b) {
-        var d = cacheIndex[a] - cacheIndex[b];
-        return d !== 0 ? d : (a < b ? -1 : (a > b ? 1 : 0));
-    });
-    for (var i = 0; i < rest.length && total > CACHE_MAX_KEYS; i++) {
-        dropCacheKey(rest[i]);
-        total--;
+    if (legacyCleanupTotalRemoved > 0) {
+        log.info("media-library-filter: removed " + legacyCleanupTotalRemoved + " legacy cache keys from config store");
     }
 }
 
-// 启动时：旧版本留下的缓存（没有 cache_gen 标记）整批删掉；否则只删过期 / 超限的
-function initCache() {
-    if (!canEvictCache()) return;
-    loadCacheIndex();
-    if (config.get(CACHE_GEN_KEY) !== CACHE_GEN) {
-        var n = 0;
-        for (var k in cacheIndex) {
-            if (Object.prototype.hasOwnProperty.call(cacheIndex, k)) { dropCacheKey(k); n++; }
-        }
-        config.set(CACHE_GEN_KEY, CACHE_GEN);
-        if (n > 0) log.info("media-library-filter: removed " + n + " cache keys left by an older version");
+function stepLegacyCleanup() {
+    legacyCleanupTimer = null;
+    if (legacyCleanupQueue.length === 0) {
+        finishLegacyCleanup();
         return;
     }
-    pruneCache(nowSec(), null);
+    var k = legacyCleanupQueue.shift();
+    try {
+        if (config["delete"](k)) legacyCleanupTotalRemoved++;
+    } catch (e) {
+        log.warn("media-library-filter: legacy cache delete failed: " + e);
+    }
+    if (legacyCleanupQueue.length > 0) {
+        legacyCleanupTimer = setTimeout(stepLegacyCleanup, LEGACY_CLEANUP_STEP_DELAY_MS);
+    } else {
+        finishLegacyCleanup();
+    }
 }
 
-function cacheFresh(entry, ttl) {
-    if (!entry || typeof entry.ts !== "number") return false;
-    if (ttl === undefined) ttl = cacheTtlSec();
-    if (ttl <= 0) return false;
-    return (nowSec() - entry.ts) < ttl;
+function initLegacyCacheCleanup() {
+    if (!canDeleteConfig()) return;
+    if (config.get(CACHE_GEN_KEY) === CACHE_GEN) return;
+    var allKeys = [];
+    try { allKeys = config.list() || []; } catch (e) { allKeys = []; }
+    var legacyKeys = [];
+    for (var i = 0; i < allKeys.length; i++) {
+        var k = String(allKeys[i]);
+        if (k.indexOf(CACHE_PREFIX) === 0) legacyKeys.push(k);
+    }
+    if (legacyKeys.length === 0) {
+        finishLegacyCleanup();
+        return;
+    }
+    // 启动时最多同步删少量键以立刻腾出配额，其余交后台分步删，避免慢库下撞上 10s 入口超时
+    var syncLimit = typeof setTimeout === "function" ? LEGACY_CLEANUP_SYNC_LIMIT : legacyKeys.length;
+    var syncCount = legacyKeys.length < syncLimit ? legacyKeys.length : syncLimit;
+    for (var s = 0; s < syncCount; s++) {
+        try {
+            if (config["delete"](legacyKeys[s])) legacyCleanupTotalRemoved++;
+        } catch (e) {
+            log.warn("media-library-filter: legacy cache delete failed: " + e);
+        }
+    }
+    if (syncCount >= legacyKeys.length) {
+        finishLegacyCleanup();
+        return;
+    }
+    legacyCleanupQueue = legacyKeys.slice(syncCount);
+    legacyCleanupTimer = setTimeout(stepLegacyCleanup, LEGACY_CLEANUP_STEP_DELAY_MS);
 }
 
 // ====== Emby 查询 ======
@@ -532,7 +886,7 @@ async function embyGet(url) {
         }
         if (resp.status < 200 || resp.status >= 300) {
             rememberError("emby", "status=" + resp.status);
-            return { ok: false, reason: "status_" + resp.status };
+            return { ok: false, reason: "status_" + resp.status, status: resp.status };
         }
         return { ok: true, body: safeJsonParse(resp.body, null) };
     } catch (e) {
@@ -586,56 +940,70 @@ function embyItemCopies(item) {
     return copies;
 }
 
-async function checkEmbyEpisode(tmdbType, tmdbID, season, episode, deadlineMs) {
-    var url = config.get("emby_url");
-    var key = config.get("emby_api_key");
+async function fetchEmbyMovie(tmdbID, deadlineMs) {
+    var url = cfgGet("emby_url");
+    var key = cfgGet("emby_api_key");
     if (!nonEmpty(url) || !nonEmpty(key)) return { ok: false, hit: false, reason: "not_configured" };
     if (deadlineMs && nowMs() > deadlineMs) return { ok: false, hit: false, reason: "deadline" };
 
-    if (tmdbType === "movie") {
-        var movieUrl = joinUrl(url, "/emby/Items") + "?" + qs({
-            api_key: key,
-            Recursive: "true",
-            IncludeItemTypes: "Movie",
-            AnyProviderIdEquals: "tmdb." + tmdbID,
-            Fields: "ProviderIds,MediaSources,Path",
-            Limit: 5
-        });
-        var mr = await embyGet(movieUrl);
-        if (!mr.ok) return { ok: false, hit: false, reason: mr.reason };
-        var mItems = (mr.body && mr.body.Items) || [];
-        for (var mi = 0; mi < mItems.length; mi++) {
-            var mItem = mItems[mi] || {};
-            var pid = mItem.ProviderIds || {};
-            if (String(pid.Tmdb || pid.tmdb || "") === String(tmdbID)) {
-                return { ok: true, hit: true, source: "emby", copies: embyItemCopies(mItem) };
-            }
-        }
-        return { ok: true, hit: false, reason: "movie_not_found" };
-    }
-
-    var seriesUrl = joinUrl(url, "/emby/Items") + "?" + qs({
+    var movieUrl = joinUrl(url, "/emby/Items") + "?" + qs({
         api_key: key,
         Recursive: "true",
-        IncludeItemTypes: "Series",
+        IncludeItemTypes: "Movie",
         AnyProviderIdEquals: "tmdb." + tmdbID,
-        Fields: "ProviderIds",
+        Fields: "ProviderIds,MediaSources,Path",
         Limit: 5
     });
-    var sr = await embyGet(seriesUrl);
-    if (!sr.ok) return { ok: false, hit: false, reason: sr.reason };
-    var sItems = (sr.body && sr.body.Items) || [];
-    var seriesID = "";
-    for (var si = 0; si < sItems.length; si++) {
-        var sItem = sItems[si] || {};
-        var spid = sItem.ProviderIds || {};
-        if (String(spid.Tmdb || spid.tmdb || "") === String(tmdbID)) {
-            seriesID = sItem.Id || sItem.ID || "";
-            break;
+    var mr = await embyGet(movieUrl);
+    if (!mr.ok) return { ok: false, hit: false, reason: mr.reason };
+    var mItems = (mr.body && mr.body.Items) || [];
+    for (var mi = 0; mi < mItems.length; mi++) {
+        var mItem = mItems[mi] || {};
+        var pid = mItem.ProviderIds || {};
+        if (String(pid.Tmdb || pid.tmdb || "") === String(tmdbID)) {
+            return { ok: true, hit: true, source: "emby", copies: embyItemCopies(mItem) };
         }
     }
-    if (!nonEmpty(String(seriesID))) return { ok: true, hit: false, reason: "series_not_found" };
-    if (deadlineMs && nowMs() > deadlineMs) return { ok: false, hit: false, reason: "deadline" };
+    return { ok: true, hit: false, source: "emby", copies: [], reason: "movie_not_found" };
+}
+
+// 拉取 Emby 整部剧的所有季分集（使用已验证接口），并复用 tmdbID → seriesID 缓存；
+// 若缓存的 seriesID 失效（404/400 或返回 200 空列表），自动清理并重查一次；仅在查到至少 1 集时写回 ID 缓存。
+async function fetchEmbySeriesSeasons(tmdbID, deadlineMs, allowCache, skipReadIdCache, cacheEpochAtStart) {
+    var url = cfgGet("emby_url");
+    var key = cfgGet("emby_api_key");
+    if (!nonEmpty(url) || !nonEmpty(key)) return { ok: false, found: false, reason: "not_configured" };
+    if (deadlineMs && nowMs() > deadlineMs) return { ok: false, found: false, reason: "deadline" };
+
+    var ttl = cacheTtlSec();
+    var seriesID = (allowCache && !skipReadIdCache) ? getSeriesIdCache("emby", tmdbID, ttl) : "";
+    var usedCachedId = nonEmpty(seriesID);
+
+    if (!usedCachedId) {
+        var seriesUrl = joinUrl(url, "/emby/Items") + "?" + qs({
+            api_key: key,
+            Recursive: "true",
+            IncludeItemTypes: "Series",
+            AnyProviderIdEquals: "tmdb." + tmdbID,
+            Fields: "ProviderIds",
+            Limit: 5
+        });
+        var sr = await embyGet(seriesUrl);
+        if (!sr.ok) return { ok: false, found: false, reason: sr.reason };
+        var sItems = (sr.body && sr.body.Items) || [];
+        for (var si = 0; si < sItems.length; si++) {
+            var sItem = sItems[si] || {};
+            var spid = sItem.ProviderIds || {};
+            if (String(spid.Tmdb || spid.tmdb || "") === String(tmdbID)) {
+                seriesID = String(sItem.Id || sItem.ID || "");
+                break;
+            }
+        }
+        if (!nonEmpty(seriesID)) {
+            return { ok: true, found: false, source: "emby", seasons: {}, reason: "series_not_found" };
+        }
+        if (deadlineMs && nowMs() > deadlineMs) return { ok: false, found: false, reason: "deadline" };
+    }
 
     var epUrl = joinUrl(url, "/emby/Items") + "?" + qs({
         api_key: key,
@@ -646,22 +1014,45 @@ async function checkEmbyEpisode(tmdbType, tmdbID, season, episode, deadlineMs) {
         Limit: 2000
     });
     var er = await embyGet(epUrl);
-    if (!er.ok) return { ok: false, hit: false, reason: er.reason };
+    if (!er.ok) {
+        if (usedCachedId && (er.status === 404 || er.status === 400)) {
+            deleteSeriesIdCache("emby", tmdbID);
+            if (!deadlineMs || nowMs() <= deadlineMs) {
+                return await fetchEmbySeriesSeasons(tmdbID, deadlineMs, allowCache, true, cacheEpochAtStart);
+            }
+            return { ok: false, found: false, reason: "deadline" };
+        }
+        return { ok: false, found: false, reason: er.reason };
+    }
+
     var eItems = (er.body && er.body.Items) || [];
-    var matched = [];
+    if (usedCachedId && eItems.length === 0) {
+        deleteSeriesIdCache("emby", tmdbID);
+        if (!deadlineMs || nowMs() <= deadlineMs) {
+            return await fetchEmbySeriesSeasons(tmdbID, deadlineMs, allowCache, true, cacheEpochAtStart);
+        }
+        return { ok: false, found: false, reason: "deadline" };
+    }
+    if (!usedCachedId && allowCache && eItems.length > 0 && cacheEpochAtStart === cacheEpoch) {
+        putSeriesIdCache("emby", tmdbID, seriesID, ttl);
+    }
+
+    var seasons = {};
     for (var ei = 0; ei < eItems.length; ei++) {
         var eItem = eItems[ei] || {};
         var pSeason = safeNum(String(eItem.ParentIndexNumber), -1);
         var pEpisode = safeNum(String(eItem.IndexNumber), -1);
-        if (pSeason === season && pEpisode === episode) {
-            var c = embyItemCopies(eItem);
-            for (var ci = 0; ci < c.length; ci++) matched.push(c[ci]);
+        if (pSeason < 0 || pEpisode <= 0) continue;
+        var sKey = String(pSeason);
+        var eKey = String(pEpisode);
+        if (!seasons[sKey]) seasons[sKey] = {};
+        if (!seasons[sKey][eKey]) seasons[sKey][eKey] = [];
+        var c = embyItemCopies(eItem);
+        for (var ci = 0; ci < c.length; ci++) {
+            seasons[sKey][eKey].push(c[ci]);
         }
     }
-    if (matched.length > 0) {
-        return { ok: true, hit: true, source: "emby", copies: matched };
-    }
-    return { ok: true, hit: false, reason: "episode_not_found" };
+    return { ok: true, found: true, source: "emby", seasons: seasons };
 }
 
 // ====== Plex 查询 ======
@@ -674,7 +1065,7 @@ async function plexGet(url) {
         }
         if (resp.status < 200 || resp.status >= 300) {
             rememberError("plex", "status=" + resp.status);
-            return { ok: false, reason: "status_" + resp.status };
+            return { ok: false, reason: "status_" + resp.status, status: resp.status };
         }
         return { ok: true, body: safeJsonParse(resp.body, null) };
     } catch (e) {
@@ -755,130 +1146,256 @@ function plexMetaTmdb(meta) {
     return "";
 }
 
-async function checkPlexEpisode(tmdbType, tmdbID, season, episode, deadlineMs) {
-    var url = config.get("plex_url");
-    var token = config.get("plex_token");
+async function fetchPlexMovie(tmdbID, deadlineMs) {
+    var url = cfgGet("plex_url");
+    var token = cfgGet("plex_token");
     if (!nonEmpty(url) || !nonEmpty(token)) return { ok: false, hit: false, reason: "not_configured" };
     if (deadlineMs && nowMs() > deadlineMs) return { ok: false, hit: false, reason: "deadline" };
 
-    if (tmdbType === "movie") {
-        var movieUrl = joinUrl(url, "/library/all") + "?" + qs({
-            "X-Plex-Token": token,
-            type: 1,
-            includeGuids: 1
-        });
-        var mr = await plexGet(movieUrl);
-        if (!mr.ok) return { ok: false, hit: false, reason: mr.reason };
-        var mMetas = (mr.body && mr.body.MediaContainer && mr.body.MediaContainer.Metadata) || [];
-        for (var mi = 0; mi < mMetas.length; mi++) {
-            if (plexMetaTmdb(mMetas[mi]) === String(tmdbID)) {
-                return { ok: true, hit: true, source: "plex", copies: plexItemCopies(mMetas[mi]) };
-            }
-        }
-        return { ok: true, hit: false, reason: "movie_not_found" };
-    }
-
-    var showUrl = joinUrl(url, "/library/all") + "?" + qs({
+    var movieUrl = joinUrl(url, "/library/all") + "?" + qs({
         "X-Plex-Token": token,
-        type: 2,
+        type: 1,
         includeGuids: 1
     });
-    var shr = await plexGet(showUrl);
-    if (!shr.ok) return { ok: false, hit: false, reason: shr.reason };
-    var shMetas = (shr.body && shr.body.MediaContainer && shr.body.MediaContainer.Metadata) || [];
-    var showKey = "";
-    for (var shi = 0; shi < shMetas.length; shi++) {
-        if (plexMetaTmdb(shMetas[shi]) === String(tmdbID)) {
-            showKey = String((shMetas[shi] || {}).ratingKey || "");
-            break;
+    var mr = await plexGet(movieUrl);
+    if (!mr.ok) return { ok: false, hit: false, reason: mr.reason };
+    var mMetas = (mr.body && mr.body.MediaContainer && mr.body.MediaContainer.Metadata) || [];
+    for (var mi = 0; mi < mMetas.length; mi++) {
+        if (plexMetaTmdb(mMetas[mi]) === String(tmdbID)) {
+            return { ok: true, hit: true, source: "plex", copies: plexItemCopies(mMetas[mi]) };
         }
     }
-    if (!nonEmpty(showKey)) return { ok: true, hit: false, reason: "series_not_found" };
-    if (deadlineMs && nowMs() > deadlineMs) return { ok: false, hit: false, reason: "deadline" };
+    return { ok: true, hit: false, source: "plex", copies: [], reason: "movie_not_found" };
+}
+
+async function fetchPlexSeriesSeasons(tmdbID, deadlineMs, allowCache, skipReadIdCache, cacheEpochAtStart) {
+    var url = cfgGet("plex_url");
+    var token = cfgGet("plex_token");
+    if (!nonEmpty(url) || !nonEmpty(token)) return { ok: false, found: false, reason: "not_configured" };
+    if (deadlineMs && nowMs() > deadlineMs) return { ok: false, found: false, reason: "deadline" };
+
+    var ttl = cacheTtlSec();
+    var showKey = (allowCache && !skipReadIdCache) ? getSeriesIdCache("plex", tmdbID, ttl) : "";
+    var usedCachedId = nonEmpty(showKey);
+
+    if (!usedCachedId) {
+        var showUrl = joinUrl(url, "/library/all") + "?" + qs({
+            "X-Plex-Token": token,
+            type: 2,
+            includeGuids: 1
+        });
+        var shr = await plexGet(showUrl);
+        if (!shr.ok) return { ok: false, found: false, reason: shr.reason };
+        var shMetas = (shr.body && shr.body.MediaContainer && shr.body.MediaContainer.Metadata) || [];
+        for (var shi = 0; shi < shMetas.length; shi++) {
+            if (plexMetaTmdb(shMetas[shi]) === String(tmdbID)) {
+                showKey = String((shMetas[shi] || {}).ratingKey || "");
+                break;
+            }
+        }
+        if (!nonEmpty(showKey)) {
+            return { ok: true, found: false, source: "plex", seasons: {}, reason: "series_not_found" };
+        }
+        if (deadlineMs && nowMs() > deadlineMs) return { ok: false, found: false, reason: "deadline" };
+    }
 
     var epUrl = joinUrl(url, "/library/metadata/" + showKey + "/allLeaves") + "?" + qs({
-        "X-Plex-Token": token
+        "X-Plex-Token": token,
+        includeGuids: 1
     });
     var er = await plexGet(epUrl);
-    if (!er.ok) return { ok: false, hit: false, reason: er.reason };
+    if (!er.ok) {
+        if (usedCachedId && (er.status === 404 || er.status === 400)) {
+            deleteSeriesIdCache("plex", tmdbID);
+            if (!deadlineMs || nowMs() <= deadlineMs) {
+                return await fetchPlexSeriesSeasons(tmdbID, deadlineMs, allowCache, true, cacheEpochAtStart);
+            }
+            return { ok: false, found: false, reason: "deadline" };
+        }
+        return { ok: false, found: false, reason: er.reason };
+    }
+
     var eMetas = (er.body && er.body.MediaContainer && er.body.MediaContainer.Metadata) || [];
-    var matched = [];
+    if (usedCachedId && eMetas.length === 0) {
+        deleteSeriesIdCache("plex", tmdbID);
+        if (!deadlineMs || nowMs() <= deadlineMs) {
+            return await fetchPlexSeriesSeasons(tmdbID, deadlineMs, allowCache, true, cacheEpochAtStart);
+        }
+        return { ok: false, found: false, reason: "deadline" };
+    }
+    if (!usedCachedId && allowCache && eMetas.length > 0 && cacheEpochAtStart === cacheEpoch) {
+        putSeriesIdCache("plex", tmdbID, showKey, ttl);
+    }
+
+    var seasons = {};
     for (var ei = 0; ei < eMetas.length; ei++) {
         var em = eMetas[ei] || {};
         var pSeason = safeNum(String(em.parentIndex), -1);
         var pEpisode = safeNum(String(em.index), -1);
-        if (pSeason === season && pEpisode === episode) {
-            var c = plexItemCopies(em);
-            for (var ci = 0; ci < c.length; ci++) matched.push(c[ci]);
+        if (pSeason < 0 || pEpisode <= 0) continue;
+        var sKey = String(pSeason);
+        var eKey = String(pEpisode);
+        if (!seasons[sKey]) seasons[sKey] = {};
+        if (!seasons[sKey][eKey]) seasons[sKey][eKey] = [];
+        var c = plexItemCopies(em);
+        for (var ci = 0; ci < c.length; ci++) {
+            seasons[sKey][eKey].push(c[ci]);
         }
     }
-    if (matched.length > 0) {
-        return { ok: true, hit: true, source: "plex", copies: matched };
-    }
-    return { ok: true, hit: false, reason: "episode_not_found" };
+    return { ok: true, found: true, source: "plex", seasons: seasons };
 }
 
-// ====== 主库检查 ======
+// ====== 按后端独立的媒体库查询、整剧多季缓存与并行竞速 ======
 
-async function performLibraryCheck(tmdbType, tmdbID, season, episode, deadlineMs) {
-    var sources = [];
-    if (isEnabled("emby_enabled")) {
-        var er = await checkEmbyEpisode(tmdbType, tmdbID, season, episode, deadlineMs);
-        sources.push({ name: "emby", ok: er.ok, hit: er.hit, reason: er.reason || "" });
-        if (er.ok && er.hit) {
-            return { hit: true, source: "emby", copies: er.copies || [], sources: sources };
-        }
-    }
-    if (isEnabled("plex_enabled")) {
-        if (deadlineMs && nowMs() > deadlineMs) {
-            return { hit: false, reason: "deadline", copies: [], sources: sources };
-        }
-        var pr = await checkPlexEpisode(tmdbType, tmdbID, season, episode, deadlineMs);
-        sources.push({ name: "plex", ok: pr.ok, hit: pr.hit, reason: pr.reason || "" });
-        if (pr.ok && pr.hit) {
-            return { hit: true, source: "plex", copies: pr.copies || [], sources: sources };
-        }
-    }
-    return { hit: false, reason: "no_match", copies: [], sources: sources };
+function enabledBackends() {
+    var list = [];
+    if (isEnabled("emby_enabled")) list.push("emby");
+    if (isEnabled("plex_enabled")) list.push("plex");
+    return list;
 }
 
-async function resolveLibraryStatus(tmdbType, tmdbID, season, episode) {
-    var key = cacheKey(tmdbType, tmdbID, season, episode);
+function mergeEpisodeMapInto(target, srcEpMap) {
+    if (!srcEpMap) return;
+    for (var eKey in srcEpMap) {
+        if (!Object.prototype.hasOwnProperty.call(srcEpMap, eKey)) continue;
+        if (!target[eKey]) target[eKey] = [];
+        var arr = srcEpMap[eKey];
+        for (var i = 0; i < arr.length; i++) {
+            target[eKey].push(arr[i]);
+        }
+    }
+}
+
+async function performBackendMovieCheck(backend, tmdbID, deadlineMs, allowWriteCache) {
+    var epoch = cacheEpoch;
+    var r = backend === "emby"
+        ? await fetchEmbyMovie(tmdbID, deadlineMs)
+        : await fetchPlexMovie(tmdbID, deadlineMs);
+    var ts = nowSec();
     var ttl = cacheTtlSec();
-    var cached = readCache(key);
-    if (cached && cacheFresh(cached, ttl)) {
-        var copies = cached.copies;
-        if (isArray(copies)) {
-            return {
-                hit: copies.length > 0,
-                copies: copies,
-                source: cached.source || "",
-                from_cache: true
-            };
-        }
-    }
-    var deadline = nowMs() + LIB_CHECK_SOFT_BUDGET_MS;
-    var r = await performLibraryCheck(tmdbType, tmdbID, season, episode, deadline);
-
-    // 查库没完整做完：任一后端请求失败 / 没配好，或超了软预算没轮到下一个后端。这时「没查到」不代表
-    // 库里没有：不写缓存（别把暂时的故障固化），判定按 allowed_error 计
-    var hadError = !r.hit && r.reason === "deadline";
-    for (var i = 0; i < (r.sources || []).length; i++) {
-        if (r.sources[i].ok === false) hadError = true;
-    }
-    r.incomplete = hadError;
-    if (!hadError) {
-        writeCache(key, {
-            copies: r.copies || [],
-            source: r.source || "",
-            ts: nowSec()
+    if (allowWriteCache && r.ok && epoch === cacheEpoch && ttl > 0 && cacheMaxBytes() > 0) {
+        putMemCache(movieCacheKey(backend, tmdbID), {
+            kind: "movie",
+            ts: ts,
+            source: backend,
+            copies: r.copies || []
         }, ttl);
     }
-    r.from_cache = false;
-    return r;
+    return {
+        backend: backend,
+        ok: !!r.ok,
+        hit: !!r.hit,
+        copies: r.copies || [],
+        source: r.hit ? backend : "",
+        reason: r.reason || (r.hit ? "hit" : "no_match"),
+        epoch: epoch,
+        ts: ts
+    };
 }
 
-// ====== per-flow 配置 ======
+async function performBackendTvCheck(backend, tmdbID, deadlineMs, allowWriteCache) {
+    var epoch = cacheEpoch;
+    var r = backend === "emby"
+        ? await fetchEmbySeriesSeasons(tmdbID, deadlineMs, allowWriteCache, false, epoch)
+        : await fetchPlexSeriesSeasons(tmdbID, deadlineMs, allowWriteCache, false, epoch);
+    var ts = nowSec();
+    var ttl = cacheTtlSec();
+    // 该后端完整拉取成功即独立写回它自己的按季缓存，并对账该剧在该后端的旧季缓存；
+    // 不因另一后端失败而连坐丢弃本端缓存。
+    if (allowWriteCache && r.ok && epoch === cacheEpoch && ttl > 0 && cacheMaxBytes() > 0) {
+        var seasons = r.seasons || {};
+        reconcileBackendSeriesSeasons(backend, tmdbID, seasons, ts, ttl);
+        for (var sKey in seasons) {
+            if (!Object.prototype.hasOwnProperty.call(seasons, sKey)) continue;
+            putMemCache(seasonCacheKey(backend, tmdbID, safeNum(sKey, 0)), {
+                kind: "tv",
+                ts: ts,
+                source: backend,
+                episodes: seasons[sKey]
+            }, ttl);
+        }
+    }
+    return {
+        backend: backend,
+        ok: !!r.ok,
+        found: !!r.found,
+        seasons: r.seasons || {},
+        source: r.found ? backend : "",
+        reason: r.reason || (r.ok ? "ok" : "lib_error"),
+        epoch: epoch,
+        ts: ts
+    };
+}
+
+function ensureSeasonMissCached(backend, tmdbID, season, bRes) {
+    if (!bRes || !bRes.ok || bRes.epoch !== cacheEpoch) return;
+    var ttl = cacheTtlSec();
+    if (ttl <= 0 || cacheMaxBytes() <= 0) return;
+    var sKey = String(season);
+    if (bRes.seasons && Object.prototype.hasOwnProperty.call(bRes.seasons, sKey)) return;
+    putMemCache(seasonCacheKey(backend, tmdbID, season), {
+        kind: "tv",
+        ts: bRes.ts,
+        source: backend,
+        episodes: {}
+    }, ttl);
+}
+
+// 按后端+同剧/同片在途请求去重（singleflight）：同毫秒并发到达的多个请求共用同一份异步 Promise
+function runInFlight(flightKey, fn) {
+    if (Object.prototype.hasOwnProperty.call(inFlight, flightKey)) {
+        return inFlight[flightKey];
+    }
+    var p = fn();
+    inFlight[flightKey] = p;
+    var cleanup = function () {
+        if (inFlight[flightKey] === p) delete inFlight[flightKey];
+    };
+    p.then(cleanup, cleanup);
+    return p;
+}
+
+// 并行等待多个后端的在途 Promise：每完成一个后端就回调 onResult(backend, res)；
+// 若 onResult 返回 true（已 100% 确定否决），立刻提前 resolve，慢端在后台跑完只更新它自己的缓存。
+function raceBackends(tasks, onResult) {
+    return new Promise(function (resolve, reject) {
+        if (!tasks || tasks.length === 0) {
+            resolve({ earlyVeto: false });
+            return;
+        }
+        var remaining = tasks.length;
+        var settled = false;
+        for (var i = 0; i < tasks.length; i++) {
+            (function (task) {
+                Promise.resolve(task.promise).then(function (res) {
+                    if (settled) return;
+                    try {
+                        if (onResult(task.backend, res)) {
+                            settled = true;
+                            resolve({ earlyVeto: true });
+                            return;
+                        }
+                    } catch (cbErr) {
+                        settled = true;
+                        reject(cbErr);
+                        return;
+                    }
+                    remaining--;
+                    if (remaining === 0 && !settled) {
+                        settled = true;
+                        resolve({ earlyVeto: false });
+                    }
+                }, function (err) {
+                    if (settled) return;
+                    settled = true;
+                    reject(err);
+                });
+            })(tasks[i]);
+        }
+    });
+}
+
+// ====== per-flow 配置校验 ======
 
 function sanitizeDims(obj) {
     var out = {};
@@ -904,27 +1421,7 @@ function sanitizeDims(obj) {
     return out;
 }
 
-function flowConfig(flowID) {
-    var id = String(flowID == null ? "" : flowID);
-    var prefix = "flow_" + id + "_";
-    var enabled = config.get(prefix + "enabled") === "1";
-    var raw = config.get(prefix + "dims");
-
-    if (raw === null || raw === undefined || raw === "") {
-        return { enabled: enabled, dims: null };
-    }
-    var parsed = safeJsonParse(raw, null);
-    if (!parsed || typeof parsed !== "object" || isArray(parsed)) {
-        return { enabled: enabled, dims: null };
-    }
-    var clean = sanitizeDims(parsed);
-    if (dimCount(clean) === 0) {
-        return { enabled: enabled, dims: null };
-    }
-    return { enabled: enabled, dims: clean };
-}
-
-// ====== should_download 主判定 ======
+// ====== should_download 主判定（单集 / 电影） ======
 
 async function decideShouldDownload(p, callDeadline) {
     incCounter("should_download_seen");
@@ -949,7 +1446,8 @@ async function decideShouldDownload(p, callDeadline) {
         return { allow: true, reason: "no_dims", fc: fc };
     }
 
-    if (!isEnabled("emby_enabled") && !isEnabled("plex_enabled")) {
+    var backends = enabledBackends();
+    if (backends.length === 0) {
         return { allow: true, reason: "no_backend", fc: fc };
     }
 
@@ -967,9 +1465,107 @@ async function decideShouldDownload(p, callDeadline) {
         }
     }
 
-    var libStatus;
+    var ttl = cacheTtlSec();
+    var negTtl = effectiveNegativeTtlSec(ttl);
+    var cachedAllCopies = [];
+    var cachedSources = [];
+    var backendsToFetch = [];
+
+    // 1) 缓存快路径（两端对称）：任意已启用后端的缓存命中匹配即立刻否决（0 HTTP）；
+    //    未命中匹配但尚在短负缓存（<=60s）内的后端记下结果、不再发 HTTP。
+    for (var bi = 0; bi < backends.length; bi++) {
+        var bName = backends[bi];
+        var cKey = tmdbType === "movie" ? movieCacheKey(bName, tmdbID) : seasonCacheKey(bName, tmdbID, season);
+        var cached = getMemCache(cKey, ttl);
+        if (cached) {
+            var bCopies = tmdbType === "movie"
+                ? (cached.copies || [])
+                : ((cached.episodes && cached.episodes[String(episode)]) || []);
+            if (bCopies.length > 0 && anyCopyMatchesTags(bCopies, tags, fc.dims)) {
+                incCounter("vetoed");
+                return {
+                    allow: false,
+                    reason: "in_lib_match",
+                    fc: fc,
+                    lib: { hit: true, copies: bCopies, source: bName, from_cache: true }
+                };
+            }
+            var age = nowSec() - cached.ts;
+            if (age < negTtl) {
+                if (bCopies.length > 0) {
+                    cachedAllCopies = cachedAllCopies.concat(bCopies);
+                    cachedSources.push(bName);
+                }
+                continue;
+            }
+        }
+        backendsToFetch.push(bName);
+    }
+
+    if (backendsToFetch.length === 0) {
+        var cachedLib = {
+            hit: cachedAllCopies.length > 0,
+            copies: cachedAllCopies,
+            source: cachedSources.join("+"),
+            from_cache: true
+        };
+        if (cachedAllCopies.length === 0) {
+            incCounter("allowed_not_in_lib");
+            return { allow: true, reason: "not_in_lib", fc: fc, lib: cachedLib };
+        }
+        incCounter("allowed_no_match");
+        return { allow: true, reason: "no_match", fc: fc, lib: cachedLib };
+    }
+
+    // 2) 并行查询未命中缓存的后端：谁先命中同规格副本即立刻返回否决，不被另一慢端拖累
+    var allCopies = cachedAllCopies.slice();
+    var sourceNames = cachedSources.slice();
+    var hadError = false;
+    var hitDeadline = false;
+    var matchedLib = null;
+
     try {
-        libStatus = await resolveLibraryStatus(tmdbType, tmdbID, season, episode);
+        var deadline = nowMs() + LIB_CHECK_SOFT_BUDGET_MS;
+        var tasks = [];
+        for (var fi = 0; fi < backendsToFetch.length; fi++) {
+            (function (backendName) {
+                var fKey = tmdbType === "movie"
+                    ? movieFlightKey(backendName, tmdbID)
+                    : seriesFlightKey(backendName, tmdbID);
+                var prom = runInFlight(fKey, function () {
+                    if (tmdbType === "movie") {
+                        return performBackendMovieCheck(backendName, tmdbID, deadline, true);
+                    }
+                    return performBackendTvCheck(backendName, tmdbID, deadline, true);
+                });
+                tasks.push({ backend: backendName, promise: prom });
+            })(backendsToFetch[fi]);
+        }
+
+        await raceBackends(tasks, function (backendName, bRes) {
+            if (!bRes || !bRes.ok) {
+                hadError = true;
+                if (bRes && bRes.reason === "deadline") hitDeadline = true;
+                return false;
+            }
+            var epCopies;
+            if (tmdbType === "movie") {
+                epCopies = bRes.copies || [];
+            } else {
+                ensureSeasonMissCached(backendName, tmdbID, season, bRes);
+                var seasonEps = (bRes.seasons && bRes.seasons[String(season)]) || {};
+                epCopies = seasonEps[String(episode)] || [];
+            }
+            if (epCopies.length > 0) {
+                allCopies = allCopies.concat(epCopies);
+                if (sourceNames.indexOf(backendName) < 0) sourceNames.push(backendName);
+                if (anyCopyMatchesTags(epCopies, tags, fc.dims)) {
+                    matchedLib = { hit: true, copies: epCopies, source: backendName, from_cache: false };
+                    return true;
+                }
+            }
+            return false;
+        });
     } catch (e) {
         if (callDeadline && nowMs() > callDeadline) return { allow: true, reason: "late", late: true };
         log.error("media-library-filter: lib check exception: " + e);
@@ -978,26 +1574,31 @@ async function decideShouldDownload(p, callDeadline) {
     }
     if (callDeadline && nowMs() > callDeadline) return { allow: true, reason: "late", late: true };
 
-    if (!libStatus.hit && libStatus.incomplete) {
-        // Emby / Plex 请求失败（含超了软预算没查完）：不是「库里没有」
-        incCounter("allowed_error");
-        return { allow: true, reason: libStatus.reason === "deadline" ? "deadline" : "lib_error", fc: fc, lib: libStatus };
-    }
-
-    var copies = isArray(libStatus.copies) ? libStatus.copies : [];
-
-    if (copies.length === 0) {
-        incCounter("allowed_not_in_lib");
-        return { allow: true, reason: "not_in_lib", fc: fc, lib: libStatus };
-    }
-
-    if (anyCopyMatchesTags(copies, tags, fc.dims)) {
+    if (matchedLib) {
         incCounter("vetoed");
-        return { allow: false, reason: "in_lib_match", fc: fc, lib: libStatus };
+        return { allow: false, reason: "in_lib_match", fc: fc, lib: matchedLib };
+    }
+
+    var finalLib = {
+        hit: allCopies.length > 0,
+        copies: allCopies,
+        source: sourceNames.join("+"),
+        from_cache: false
+    };
+
+    if (hadError) {
+        // 至少一个后端请求失败或超软预算，且没有后端命中匹配副本：fail-open 计 allowed_error
+        incCounter("allowed_error");
+        return { allow: true, reason: hitDeadline ? "deadline" : "lib_error", fc: fc, lib: finalLib };
+    }
+
+    if (allCopies.length === 0) {
+        incCounter("allowed_not_in_lib");
+        return { allow: true, reason: "not_in_lib", fc: fc, lib: finalLib };
     }
 
     incCounter("allowed_no_match");
-    return { allow: true, reason: "no_match", fc: fc, lib: libStatus };
+    return { allow: true, reason: "no_match", fc: fc, lib: finalLib };
 }
 
 function libSummary(d) {
@@ -1008,7 +1609,6 @@ function libSummary(d) {
     if (d.lib.from_cache) s += " cache";
     return s;
 }
-
 
 // ====== 合集逐集否决（bitmap 协议） ======
 
@@ -1040,123 +1640,18 @@ function setBitmapBit(bytes, ep) {
     bytes[byteIdx] |= (1 << bitIdx);
 }
 
-// 检查 bitmap 第 ep 集是否已标记
-function getBitmapBit(bytes, ep) {
-    if (ep <= 0) return false;
-    var byteIdx = (ep - 1) >> 3;
-    var bitIdx = (ep - 1) & 7;
-    if (byteIdx >= bytes.length) return false;
-    return (bytes[byteIdx] & (1 << bitIdx)) !== 0;
-}
-
-// Emby 批量拉取：一次拉全季 episodes，返回 { epMap, source } 或 null
-async function embyBatchFetch(tmdbID, season, epStart, epEnd, deadlineMs) {
-    var url = config.get("emby_url");
-    var key = config.get("emby_api_key");
-    if (!nonEmpty(url) || !nonEmpty(key)) return null;
-
-    // 找 series
-    var seriesUrl = joinUrl(url, "/emby/Items") + "?" + qs({
-        api_key: key,
-        Recursive: "true",
-        IncludeItemTypes: "Series",
-        AnyProviderIdEquals: "tmdb." + tmdbID,
-        Fields: "ProviderIds",
-        Limit: 5
-    });
-    var sr = await embyGet(seriesUrl);
-    if (!sr.ok) return null;
-    var sItems = (sr.body && sr.body.Items) || [];
-    var seriesID = "";
-    for (var si = 0; si < sItems.length; si++) {
-        var sItem = sItems[si] || {};
-        var spid = sItem.ProviderIds || {};
-        if (String(spid.Tmdb || spid.tmdb || "") === String(tmdbID)) {
-            seriesID = sItem.Id || sItem.ID || "";
-            break;
+function evalBatchEpisodes(epMap, epStart, epEnd, tags, dims) {
+    var haveBytes = [];
+    var haveCount = 0;
+    var totalEps = epEnd - epStart + 1;
+    for (var ep = epStart; ep <= epEnd; ep++) {
+        var copies = epMap && epMap[String(ep)];
+        if (copies && copies.length > 0 && anyCopyMatchesTags(copies, tags, dims)) {
+            setBitmapBit(haveBytes, ep);
+            haveCount++;
         }
     }
-    if (!nonEmpty(String(seriesID))) return null;
-    if (deadlineMs && nowMs() > deadlineMs) return null;
-
-    // 一次拉全季
-    var epUrl = joinUrl(url, "/emby/Items") + "?" + qs({
-        api_key: key,
-        Recursive: "true",
-        ParentId: seriesID,
-        IncludeItemTypes: "Episode",
-        Fields: "MediaSources,ParentIndexNumber,IndexNumber,Path",
-        Limit: 2000
-    });
-    var er = await embyGet(epUrl);
-    if (!er.ok) return null;
-    var eItems = (er.body && er.body.Items) || [];
-
-    // 按集号索引
-    var epMap = {};
-    for (var ei = 0; ei < eItems.length; ei++) {
-        var eItem = eItems[ei] || {};
-        var pSeason = safeNum(String(eItem.ParentIndexNumber), -1);
-        var pEpisode = safeNum(String(eItem.IndexNumber), -1);
-        if (pSeason === season && pEpisode >= epStart && pEpisode <= epEnd) {
-            if (!epMap[pEpisode]) epMap[pEpisode] = [];
-            var copies = embyItemCopies(eItem);
-            for (var ci = 0; ci < copies.length; ci++) {
-                epMap[pEpisode].push(copies[ci]);
-            }
-        }
-    }
-    return { epMap: epMap, source: "emby" };
-}
-
-// Plex 批量拉取：返回 { epMap, source } 或 null
-async function plexBatchFetch(tmdbID, season, epStart, epEnd, deadlineMs) {
-    var url = config.get("plex_url");
-    var token = config.get("plex_token");
-    if (!nonEmpty(url) || !nonEmpty(token)) return null;
-
-    // 找 series（按 tmdb guid）
-    var searchUrl = joinUrl(url, "/library/all") + "?" + qs({
-        "X-Plex-Token": token,
-        type: 2,
-        includeGuids: 1
-    });
-    var sr = await plexGet(searchUrl);
-    if (!sr.ok) return null;
-    var shows = (sr.body && sr.body.MediaContainer && sr.body.MediaContainer.Metadata) || [];
-    var showKey = "";
-    for (var si = 0; si < shows.length; si++) {
-        if (plexMetaTmdb(shows[si]) === String(tmdbID)) {
-            showKey = String((shows[si] || {}).ratingKey || "");
-            break;
-        }
-    }
-    if (!nonEmpty(String(showKey))) return null;
-    if (deadlineMs && nowMs() > deadlineMs) return null;
-
-    // 拉全季 episodes（与单集路径 checkPlexEpisode 同构）
-    var epUrl = joinUrl(url, "/library/metadata/" + showKey + "/allLeaves") + "?" + qs({
-        "X-Plex-Token": token,
-        includeGuids: 1
-    });
-    var er = await plexGet(epUrl);
-    if (!er.ok) return null;
-    var eItems = (er.body && er.body.MediaContainer && er.body.MediaContainer.Metadata) || [];
-
-    var epMap = {};
-    for (var ei = 0; ei < eItems.length; ei++) {
-        var eItem = eItems[ei] || {};
-        var pSeason = safeNum(String(eItem.parentIndex), -1);
-        var pEpisode = safeNum(String(eItem.index), -1);
-        if (pSeason === season && pEpisode >= epStart && pEpisode <= epEnd) {
-            if (!epMap[pEpisode]) epMap[pEpisode] = [];
-            var copies = plexItemCopies(eItem);
-            for (var ci = 0; ci < copies.length; ci++) {
-                epMap[pEpisode].push(copies[ci]);
-            }
-        }
-    }
-    return { epMap: epMap, source: "plex" };
+    return { haveBytes: haveBytes, haveCount: haveCount, totalEps: totalEps };
 }
 
 // 合集主判定：返回 { allow, have_bitmap_bytes, reason }
@@ -1168,7 +1663,6 @@ async function decideShouldDownloadBatch(p, callDeadline) {
     var flowID = (p && p.flow_id != null) ? p.flow_id : "";
 
     var tmdbID = media.tmdb_id == null ? "" : String(media.tmdb_id);
-    var tmdbType = trim(media.tmdb_type) || "tv";
     var season = safeNum(String(media.season == null ? "" : media.season), 0);
     var epStart = safeNum(String(media.episode == null ? "" : media.episode), 0);
     var epEnd = safeNum(String(media.episode_end == null ? "" : media.episode_end), 0);
@@ -1177,7 +1671,8 @@ async function decideShouldDownloadBatch(p, callDeadline) {
 
     if (!fc.enabled) return { allow: true, reason: "flow_disabled" };
     if (!fc.dims || dimCount(fc.dims) === 0) { incCounter("allowed_no_dims"); return { allow: true, reason: "no_dims" }; }
-    if (!isEnabled("emby_enabled") && !isEnabled("plex_enabled")) return { allow: true, reason: "no_backend" };
+    var backends = enabledBackends();
+    if (backends.length === 0) return { allow: true, reason: "no_backend" };
     if (!nonEmpty(tmdbID)) { incCounter("allowed_no_tmdb"); return { allow: true, reason: "no_tmdb" }; }
     if (epStart <= 0 || epEnd <= 0 || epEnd < epStart) return { allow: true, reason: "invalid_range" };
 
@@ -1190,85 +1685,139 @@ async function decideShouldDownloadBatch(p, callDeadline) {
         }
     }
 
-    // ---- 缓存快路径：全部集命中缓存 → 跳过 HTTP ----
-    var allCached = true;
-    var epMap = {};
     var ttl = cacheTtlSec();
-    for (var cep = epStart; cep <= epEnd; cep++) {
-        var cKey = cacheKey(tmdbType, tmdbID, season, cep);
-        var cached = readCache(cKey);
-        if (cached && cacheFresh(cached, ttl) && isArray(cached.copies)) {
-            epMap[cep] = cached.copies;
-        } else {
-            allCached = false;
-            break;
+    var negTtl = effectiveNegativeTtlSec(ttl);
+    var cachedByBackend = {};
+    var allCachedEpMap = {};
+
+    // 1) 缓存快路径（两端对称）：合并所有已启用后端的正缓存，若已覆盖全部集 → 立刻整包否决（0 HTTP）
+    for (var bi = 0; bi < backends.length; bi++) {
+        var bName = backends[bi];
+        var cached = getMemCache(seasonCacheKey(bName, tmdbID, season), ttl);
+        if (cached) {
+            cachedByBackend[bName] = cached;
+            mergeEpisodeMapInto(allCachedEpMap, cached.episodes || {});
         }
     }
-
-    var source = "cache";
-
-    if (!allCached) {
-        // ---- HTTP 批量拉取 ----
-        var deadline = nowMs() + LIB_CHECK_SOFT_BUDGET_MS;
-        var fetchResult = null;
-
-        if (isEnabled("emby_enabled")) {
-            fetchResult = await embyBatchFetch(tmdbID, season, epStart, epEnd, deadline);
-        }
-        if (fetchResult === null && isEnabled("plex_enabled")) {
-            fetchResult = await plexBatchFetch(tmdbID, season, epStart, epEnd, deadline);
-        }
-
-        if (fetchResult === null) {
-            if (callDeadline && nowMs() > callDeadline) return { allow: true, reason: "late", late: true };
-            incCounter("allowed_error");
-            return { allow: true, reason: "batch_check_failed" };
-        }
-
-        epMap = fetchResult.epMap;
-        source = fetchResult.source;
-
-        // 只更新内存并排队；数据库保存由 hook 返回后的定时器分步完成。
-        for (var wep = epStart; wep <= epEnd; wep++) {
-            var wKey = cacheKey(tmdbType, tmdbID, season, wep);
-            writeCache(wKey, {
-                copies: epMap[wep] || [],
-                source: source,
-                ts: nowSec()
-            }, ttl);
-        }
-        if (callDeadline && nowMs() > callDeadline) return { allow: true, reason: "late", late: true };
-    }
-
-    // ---- 构建 bitmap ----
-    var haveBytes = [];
-    for (var bep = epStart; bep <= epEnd; bep++) {
-        var copies = epMap[bep];
-        if (copies && copies.length > 0 && anyCopyMatchesTags(copies, tags, fc.dims)) {
-            setBitmapBit(haveBytes, bep);
-        }
-    }
-
-    // 统计 have 数量
-    var haveCount = 0;
-    var totalEps = epEnd - epStart + 1;
-    for (var sep = epStart; sep <= epEnd; sep++) {
-        if (getBitmapBit(haveBytes, sep)) haveCount++;
-    }
-
-    if (haveCount === totalEps) {
+    var combinedCachedEval = evalBatchEpisodes(allCachedEpMap, epStart, epEnd, tags, fc.dims);
+    if (combinedCachedEval.haveCount === combinedCachedEval.totalEps) {
         incCounter("vetoed");
         return { allow: false, reason: "batch_all_in_lib" };
     }
-    if (haveCount === 0) {
+
+    // 2) 未覆盖全部集：尚在短负缓存（<=60s）内的后端直接沿用缓存，其余并行查库
+    var liveEpMap = {};
+    var backendsToFetch = [];
+    for (var bj = 0; bj < backends.length; bj++) {
+        var bn = backends[bj];
+        var entry = cachedByBackend[bn];
+        if (entry && (nowSec() - entry.ts) < negTtl) {
+            mergeEpisodeMapInto(liveEpMap, entry.episodes || {});
+        } else {
+            backendsToFetch.push(bn);
+        }
+    }
+
+    var evalRes = null;
+    var fallbackBackends = [];
+    if (backendsToFetch.length === 0) {
+        evalRes = evalBatchEpisodes(liveEpMap, epStart, epEnd, tags, fc.dims);
+    } else {
+        var hadError = false;
+        var earlyEval = null;
+        var fallbackNotes = [];
+        try {
+            var deadline = nowMs() + LIB_CHECK_SOFT_BUDGET_MS;
+            var tasks = [];
+            for (var fi = 0; fi < backendsToFetch.length; fi++) {
+                (function (backendName) {
+                    var prom = runInFlight(seriesFlightKey(backendName, tmdbID), function () {
+                        return performBackendTvCheck(backendName, tmdbID, deadline, true);
+                    });
+                    tasks.push({ backend: backendName, promise: prom });
+                })(backendsToFetch[fi]);
+            }
+
+            await raceBackends(tasks, function (backendName, bRes) {
+                if (!bRes || !bRes.ok) {
+                    hadError = true;
+                    // 重查失败（如 5xx 或 60/min 限流）时，回退到该后端仍在 cache_ttl_sec 内的正缓存，
+                    // 保证已缓存的集数不被丢弃而退化成整包重下（与单集正缓存语义一致）。
+                    var stale = cachedByBackend[backendName];
+                    if (stale) {
+                        var staleEps = stale.episodes || {};
+                        var staleOwnEval = evalBatchEpisodes(staleEps, epStart, epEnd, tags, fc.dims);
+                        if (staleOwnEval.haveCount > 0) {
+                            mergeEpisodeMapInto(liveEpMap, staleEps);
+                            fallbackBackends.push(backendName);
+                            fallbackNotes.push({
+                                backend: backendName,
+                                reason: (bRes && bRes.reason) || "lib_error",
+                                age: nowSec() - stale.ts
+                            });
+                            var mergedEval = evalBatchEpisodes(liveEpMap, epStart, epEnd, tags, fc.dims);
+                            if (mergedEval.haveCount === mergedEval.totalEps) {
+                                earlyEval = mergedEval;
+                                return true;
+                            }
+                        }
+                    }
+                    return false;
+                }
+                ensureSeasonMissCached(backendName, tmdbID, season, bRes);
+                var seasonEps = (bRes.seasons && bRes.seasons[String(season)]) || {};
+                mergeEpisodeMapInto(liveEpMap, seasonEps);
+                var curEval = evalBatchEpisodes(liveEpMap, epStart, epEnd, tags, fc.dims);
+                if (curEval.haveCount === curEval.totalEps) {
+                    earlyEval = curEval;
+                    return true;
+                }
+                return false;
+            });
+        } catch (e) {
+            if (callDeadline && nowMs() > callDeadline) return { allow: true, reason: "late", late: true };
+            log.error("media-library-filter: batch lib check exception: " + e);
+            incCounter("allowed_error");
+            return { allow: true, reason: "exception" };
+        }
+        if (callDeadline && nowMs() > callDeadline) return { allow: true, reason: "late", late: true };
+
+        var freshEval = earlyEval || evalBatchEpisodes(liveEpMap, epStart, epEnd, tags, fc.dims);
+        if (hadError && freshEval.haveCount === 0) {
+            incCounter("allowed_error");
+            return { allow: true, reason: "batch_check_failed" };
+        }
+        if (fallbackNotes.length > 0 && freshEval.haveCount > 0) {
+            for (var fni = 0; fni < fallbackNotes.length; fni++) {
+                var fn = fallbackNotes[fni];
+                log.warn("media-library-filter: batch refresh failed (" + fn.backend + " reason=" + fn.reason +
+                         "), falling back to valid memory cache (age=" + fn.age + "s) flow=" + flowID +
+                         " tmdb=" + tmdbID + " s" + season + " e" + epStart + "-" + epEnd);
+            }
+        }
+        evalRes = freshEval;
+    }
+
+    var fallbackTag = fallbackBackends.length > 0 ? fallbackBackends.join("+") : "";
+    if (evalRes.haveCount === evalRes.totalEps) {
+        incCounter("vetoed");
+        return { allow: false, reason: "batch_all_in_lib", fallback: fallbackTag };
+    }
+    if (evalRes.haveCount === 0) {
         incCounter("allowed_not_in_lib");
         return { allow: true, reason: "batch_none_in_lib" };
     }
 
     incCounter("batch_partial_filtered");
-    return { allow: true, reason: "batch_partial", have_bitmap_bytes: haveBytes, have_count: haveCount, total: totalEps };
+    return {
+        allow: true,
+        reason: "batch_partial",
+        have_bitmap_bytes: evalRes.haveBytes,
+        have_count: evalRes.haveCount,
+        total: evalRes.totalEps,
+        fallback: fallbackTag
+    };
 }
-
 
 // ====== Hook 注册 ======
 
@@ -1287,7 +1836,6 @@ function noteLate(p, startMs, why) {
 plugin.on("should_download", async function (p) {
     var startMs = nowMs();
     var callDeadline = startMs + HOST_FILTER_TIMEOUT_MS;
-    activeChecks++;
     try {
         var media = (p && p.media) || {};
         var episodeEnd = safeNum(String(media.episode_end == null ? "" : media.episode_end), 0);
@@ -1302,6 +1850,7 @@ plugin.on("should_download", async function (p) {
                      " e" + (media.episode || 0) + "-" + episodeEnd +
                      " reason=" + db.reason +
                      (db.have_count != null ? " have=" + db.have_count + "/" + db.total : "") +
+                     (db.fallback ? " cache_fallback=" + db.fallback : "") +
                      " decision=" + (db.allow ? "allow" : "veto") +
                      (dryRun && !db.allow ? " [dry_run->allow]" : ""));
 
@@ -1337,14 +1886,14 @@ plugin.on("should_download", async function (p) {
         log.error("media-library-filter: should_download handler error: " + e);
         incCounter("allowed_error");
         return true;
-    } finally {
-        activeChecks--;
     }
 });
 
 // ====== 自定义 API ======
 
 plugin.registerAPI("/flows", function (req) {
+    // 设置页保存后会立刻调 /flows，在此重读配置即可做到网页改配置实时生效
+    reloadConfigSafe();
     if (typeof ruleflow !== "object" || !ruleflow || typeof ruleflow.list !== "function") {
         return { ok: false, error: "ruleflow unavailable (need api.ruleflow.read permission)", flows: [] };
     }
@@ -1372,35 +1921,60 @@ plugin.registerAPI("/flows", function (req) {
 });
 
 plugin.registerAPI("/stats", function (req) {
+    reloadConfigSafe();
     return {
         config: {
             emby_enabled: isEnabled("emby_enabled"),
-            emby_configured: !!(config.get("emby_url") && config.get("emby_api_key")),
+            emby_configured: !!(cfgGet("emby_url") && cfgGet("emby_api_key")),
             plex_enabled: isEnabled("plex_enabled"),
-            plex_configured: !!(config.get("plex_url") && config.get("plex_token")),
+            plex_configured: !!(cfgGet("plex_url") && cfgGet("plex_token")),
             cache_ttl_sec: cacheTtlSec(),
+            cache_max_mb: cacheMaxMb(),
             dry_run: isEnabled("dry_run")
         },
+        cache: {
+            entries: memCacheCount,
+            bytes: memCacheBytes,
+            max_bytes: cacheMaxBytes(),
+            series_id_entries: seriesIdCount
+        },
         counters: {
-            should_download_seen: safeNum(config.get("should_download_seen"), 0),
-            vetoed: safeNum(config.get("vetoed"), 0),
-            allowed_not_in_lib: safeNum(config.get("allowed_not_in_lib"), 0),
-            allowed_no_tmdb: safeNum(config.get("allowed_no_tmdb"), 0),
-            allowed_no_match: safeNum(config.get("allowed_no_match"), 0),
-            allowed_no_dims: safeNum(config.get("allowed_no_dims"), 0),
-            allowed_tag_empty: safeNum(config.get("allowed_tag_empty"), 0),
-            allowed_error: safeNum(config.get("allowed_error"), 0),
-            dry_run_would_veto: safeNum(config.get("dry_run_would_veto"), 0),
-            batch_partial_filtered: safeNum(config.get("batch_partial_filtered"), 0),
-            late: safeNum(config.get("late"), 0),
+            should_download_seen: memCounters.should_download_seen || 0,
+            vetoed: memCounters.vetoed || 0,
+            allowed_not_in_lib: memCounters.allowed_not_in_lib || 0,
+            allowed_no_tmdb: memCounters.allowed_no_tmdb || 0,
+            allowed_no_match: memCounters.allowed_no_match || 0,
+            allowed_no_dims: memCounters.allowed_no_dims || 0,
+            allowed_tag_empty: memCounters.allowed_tag_empty || 0,
+            allowed_error: memCounters.allowed_error || 0,
+            dry_run_would_veto: memCounters.dry_run_would_veto || 0,
+            batch_partial_filtered: memCounters.batch_partial_filtered || 0,
+            late: memCounters.late || 0,
             cache_write_fail: cache_write_fail
         },
         errors: {
-            emby_last_error: config.get("emby_last_error") || "",
-            emby_last_error_at: config.get("emby_last_error_at") || "",
-            plex_last_error: config.get("plex_last_error") || "",
-            plex_last_error_at: config.get("plex_last_error_at") || ""
+            emby_last_error: memErrors.emby_last_error || "",
+            emby_last_error_at: memErrors.emby_last_error_at || "",
+            plex_last_error: memErrors.plex_last_error || "",
+            plex_last_error_at: memErrors.plex_last_error_at || ""
         }
+    };
+});
+
+plugin.registerAPI("/clear-cache", function (req) {
+    var method = (req && req.method) ? String(req.method).toUpperCase() : "GET";
+    if (method !== "POST") {
+        return { ok: false, error: "method not allowed: use POST" };
+    }
+    reloadConfigSafe();
+    var cleared = clearAllCaches();
+    log.info("media-library-filter: memory cache cleared (entries=" + cleared.cleared_entries +
+             " bytes=" + cleared.cleared_bytes + " series_ids=" + cleared.cleared_series_ids + ")");
+    return {
+        ok: true,
+        cleared_entries: cleared.cleared_entries,
+        cleared_bytes: cleared.cleared_bytes,
+        cleared_series_ids: cleared.cleared_series_ids
     };
 });
 
@@ -1447,6 +2021,7 @@ function buildCopyTrace(copies, tags, dims) {
 }
 
 plugin.registerAPI("/check", async function (req) {
+    reloadConfigSafe();
     var method = (req && req.method) || "GET";
 
     if (method === "POST") {
@@ -1506,8 +2081,47 @@ plugin.registerAPI("/check", async function (req) {
     }
 
     var deadline = nowMs() + LIB_CHECK_SOFT_BUDGET_MS;
-    var r = await performLibraryCheck(tmdbType, tmdbID, season, episode, deadline);
-    var realCopies = isArray(r.copies) ? r.copies : [];
+    var backends = enabledBackends();
+    var checkPromises = [];
+    for (var bi = 0; bi < backends.length; bi++) {
+        (function (backendName) {
+            if (tmdbType === "movie") {
+                checkPromises.push(performBackendMovieCheck(backendName, tmdbID, deadline, false));
+            } else {
+                checkPromises.push(performBackendTvCheck(backendName, tmdbID, deadline, false));
+            }
+        })(backends[bi]);
+    }
+    var results = await Promise.all(checkPromises);
+    var realCopies = [];
+    var sourcesTried = [];
+    var sourceNames = [];
+    var hadErr = false;
+    var lastErrReason = "";
+    for (var ri = 0; ri < results.length; ri++) {
+        var br = results[ri] || {};
+        var bCopies;
+        if (tmdbType === "movie") {
+            bCopies = br.ok ? (br.copies || []) : [];
+        } else {
+            var sEps = (br.ok && br.seasons && br.seasons[String(season)]) || {};
+            bCopies = sEps[String(episode)] || [];
+        }
+        sourcesTried.push({ name: br.backend || "", ok: !!br.ok, hit: bCopies.length > 0, reason: br.reason || "" });
+        if (!br.ok) {
+            hadErr = true;
+            lastErrReason = br.reason || "lib_error";
+        } else if (bCopies.length > 0) {
+            realCopies = realCopies.concat(bCopies);
+            if (br.backend && sourceNames.indexOf(br.backend) < 0) sourceNames.push(br.backend);
+        }
+    }
+    var r = {
+        hit: realCopies.length > 0,
+        source: sourceNames.join("+"),
+        reason: realCopies.length > 0 ? "hit" : (hadErr ? lastErrReason : "no_match"),
+        sources: sourcesTried
+    };
 
     var resp = {
         ok: true,
@@ -1543,8 +2157,9 @@ plugin.registerAPI("/check", async function (req) {
 });
 
 plugin.registerAPI("/test-emby", async function (req) {
-    var url = config.get("emby_url");
-    var key = config.get("emby_api_key");
+    reloadConfigSafe();
+    var url = cfgGet("emby_url");
+    var key = cfgGet("emby_api_key");
     if (!nonEmpty(url) || !nonEmpty(key)) return { ok: false, error: "url/api_key missing" };
     try {
         var resp = await http.get(joinUrl(url, "/emby/System/Info/Public"), { "Accept": "application/json" });
@@ -1559,8 +2174,9 @@ plugin.registerAPI("/test-emby", async function (req) {
 });
 
 plugin.registerAPI("/test-plex", async function (req) {
-    var url = config.get("plex_url");
-    var token = config.get("plex_token");
+    reloadConfigSafe();
+    var url = cfgGet("plex_url");
+    var token = cfgGet("plex_token");
     if (!nonEmpty(url) || !nonEmpty(token)) return { ok: false, error: "url/token missing" };
     try {
         var resp = await http.get(joinUrl(url, "/identity") + "?" + qs({ "X-Plex-Token": token }), { "Accept": "application/json" });
@@ -1589,7 +2205,7 @@ plugin.registerAPI("/save-config", function (req) {
     var globalAllowed = {
         emby_enabled: 1, emby_url: 1, emby_api_key: 1,
         plex_enabled: 1, plex_url: 1, plex_token: 1,
-        cache_ttl_sec: 1, dry_run: 1
+        cache_ttl_sec: 1, cache_max_mb: 1, dry_run: 1
     };
     var flowKeyRe = /^flow_.+_(enabled|dims)$/;
     var flowDimsRe = /^flow_.+_dims$/;
@@ -1601,6 +2217,14 @@ plugin.registerAPI("/save-config", function (req) {
         var v = obj[k];
         if (v === null || v === undefined) v = "";
         if (typeof v !== "string") v = String(v);
+
+        if (k === "cache_max_mb" && trim(v) !== "") {
+            var parsedMb = parseFloat(trim(v));
+            if (isNaN(parsedMb) || !isFinite(parsedMb) || parsedMb < 0 || parsedMb > MAX_CACHE_MAX_MB) {
+                return { ok: false, error: "cache_max_mb must be between 0 and " + MAX_CACHE_MAX_MB, key: k, written: written };
+            }
+            v = trim(v);
+        }
 
         if (flowDimsRe.test(k)) {
             var parsed;
@@ -1646,11 +2270,18 @@ plugin.registerAPI("/save-config", function (req) {
         try { config.set(k, v); written.push(k); }
         catch (e2) { return { ok: false, error: "config.set failed for " + k + ": " + e2, written: written }; }
     }
+    reloadConfigSafe();
     return { ok: true, written: written };
 });
 
-try { initCache(); } catch (e) { log.warn("media-library-filter: cache cleanup at startup failed: " + e); }
+// ====== 启动初始化 ======
+
+try { initLegacyCacheCleanup(); } catch (e) { log.warn("media-library-filter: legacy cache cleanup at startup failed: " + e); }
+try { loadStatsFromStore(); } catch (e) { log.warn("media-library-filter: load stats at startup failed: " + e); }
+reloadConfigSafe();
+startConfigRefreshTimer();
 
 log.info("media-library-filter loaded (like-for-like dedup; emby=" + isEnabled("emby_enabled") +
          " plex=" + isEnabled("plex_enabled") +
-         " dry_run=" + isEnabled("dry_run") + ")");
+         " dry_run=" + isEnabled("dry_run") +
+         " cache_max_mb=" + cacheMaxMb() + ")");

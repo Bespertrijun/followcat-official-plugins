@@ -255,7 +255,12 @@
   <div class="field">
     <label for="cache-ttl">缓存 TTL（秒）</label>
     <input type="text" id="cache-ttl" placeholder="3600">
-    <div class="hint">库查询结果缓存秒数，默认 3600。设 0 关闭缓存</div>
+    <div class="hint">命中缓存的有效期（秒），默认 3600；缺集/未命中走 60 秒短缓存。设 0 关闭缓存</div>
+  </div>
+  <div class="field">
+    <label for="cache-max-mb">内存缓存上限（MB）</label>
+    <input type="text" id="cache-max-mb" placeholder="10">
+    <div class="hint">按季纯内存缓存估算上限，默认 10 MB（上限 256 MB），超限时按 LRU 淘汰。设 0 关闭缓存</div>
   </div>
   <div class="toggle-row">
     <input type="checkbox" id="dry-run">
@@ -280,6 +285,7 @@
 <div class="actions" style="margin-bottom:16px">
   <button class="btn btn-primary" id="btn-save" onclick="saveAll()">保存配置</button>
   <button class="btn btn-secondary" id="btn-reload" onclick="reloadAll()">刷新</button>
+  <button class="btn btn-secondary" id="btn-clear-cache" onclick="clearCache()">清空内存缓存</button>
 </div>
 
 <script>
@@ -340,7 +346,7 @@
   // ── 全局配置加载 ───────────────────────────────────────────────────────────
 
   function loadGlobalConfig() {
-    var keys = ['emby_enabled', 'emby_url', 'emby_api_key', 'plex_enabled', 'plex_url', 'plex_token', 'cache_ttl_sec', 'dry_run'];
+    var keys = ['emby_enabled', 'emby_url', 'emby_api_key', 'plex_enabled', 'plex_url', 'plex_token', 'cache_ttl_sec', 'cache_max_mb', 'dry_run'];
     var promises = keys.map(function(k) {
       return FC.config.get(k).then(function(v) { return { k: k, v: v }; });
     });
@@ -361,6 +367,7 @@
       document.getElementById('plex-token').placeholder = plexTokenSet ? '（已设置，留空不修改）' : '请输入 token';
 
       document.getElementById('cache-ttl').value = cfg['cache_ttl_sec'] || '';
+      document.getElementById('cache-max-mb').value = cfg['cache_max_mb'] || '';
       document.getElementById('dry-run').checked = cfg['dry_run'] === '1';
 
       resize();
@@ -572,12 +579,22 @@
     // 的根因。config.put 是 sdk.md 列出的 iframe 桥消息之一，字符串键值直达，无编码歧义。
     var writes = [];
 
+    var cacheMaxMbRaw = document.getElementById('cache-max-mb').value.trim();
+    if (cacheMaxMbRaw !== '') {
+      var parsedMaxMb = parseFloat(cacheMaxMbRaw);
+      if (isNaN(parsedMaxMb) || !isFinite(parsedMaxMb) || parsedMaxMb < 0 || parsedMaxMb > 256) {
+        showStatus('error', '保存失败：内存缓存上限必须为 0 ~ 256 之间的数字（单位 MB）');
+        return;
+      }
+    }
+
     // 全局配置（非 secret）
     writes.push({ key: 'emby_enabled', value: document.getElementById('emby-enabled').checked ? '1' : '0' });
     writes.push({ key: 'emby_url',     value: document.getElementById('emby-url').value.trim() });
     writes.push({ key: 'plex_enabled', value: document.getElementById('plex-enabled').checked ? '1' : '0' });
     writes.push({ key: 'plex_url',     value: document.getElementById('plex-url').value.trim() });
     writes.push({ key: 'cache_ttl_sec', value: document.getElementById('cache-ttl').value.trim() });
+    writes.push({ key: 'cache_max_mb', value: cacheMaxMbRaw });
     writes.push({ key: 'dry_run',      value: document.getElementById('dry-run').checked ? '1' : '0' });
 
     // secret 字段：留空 = 不修改，仅在用户输入了新值时才写（secret=true → 回读脱敏）
@@ -666,6 +683,30 @@
       var errMsg = (e && e.message) ? e.message : String(e);
       showStatus('error', '保存失败：' + errMsg);
       hostToast('error', '保存失败：' + errMsg);
+    });
+  };
+
+  window.clearCache = function() {
+    var btn = document.getElementById('btn-clear-cache');
+    btn.disabled = true;
+    showStatus('info', '正在清空内存缓存…');
+    FC.api('/clear-cache', {}).then(function(res) {
+      btn.disabled = false;
+      if (!res || !res.ok) {
+        var failMsg = '清空缓存失败：' + ((res && res.error) || '未知错误');
+        showStatus('error', failMsg);
+        hostToast('error', failMsg);
+        return;
+      }
+      var mb = ((res.cleared_bytes || 0) / (1024 * 1024)).toFixed(2);
+      var okMsg = '已清空内存缓存（' + (res.cleared_entries || 0) + ' 条，约 ' + mb + ' MB）';
+      showStatus('success', okMsg);
+      hostToast('success', okMsg);
+    }).catch(function(e) {
+      btn.disabled = false;
+      var errMsg = (e && e.message) ? e.message : String(e);
+      showStatus('error', '清空缓存失败：' + errMsg);
+      hostToast('error', '清空缓存失败：' + errMsg);
     });
   };
 })();

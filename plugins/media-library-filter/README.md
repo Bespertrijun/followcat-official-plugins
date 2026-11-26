@@ -34,7 +34,8 @@
 | `plex_enabled` | 任选一个 | 否 | `"1"` 启用 Plex 库检查 |
 | `plex_url` | 启用 Plex 时必填 | 否 | Plex 根 URL，例：`http://192.168.1.10:32400` |
 | `plex_token` | 启用 Plex 时必填 | ✅ | `X-Plex-Token` |
-| `cache_ttl_sec` | 否 | 否 | 库查询结果缓存秒数，默认 `3600`。设 `0` 关闭缓存（不再使用或保存缓存，已有缓存随后分步清理） |
+| `cache_ttl_sec` | 否 | 否 | 命中缓存的有效期（秒），默认 `3600`；缺集/规格不匹配走 `min(cache_ttl_sec, 60)` 秒短缓存。设 `0` 关闭缓存 |
+| `cache_max_mb` | 否 | 否 | 纯内存按季缓存的估算容量上限（MB），默认 `10`、上限 `256`（超限按 LRU 淘汰）。设 `0` 关闭缓存 |
 | `dry_run` | 否 | 否 | `"1"` 仅日志记录决策、**永远 `return true`**（不真正否决，验证用） |
 
 > Emby 与 Plex 至少配置并启用一个；都没启用时插件对所有 flow 一律放行。
@@ -120,10 +121,10 @@ media.episode_end > 0 ?
   ├── 是 → 合集路径（见下方）
   └── 否 → 单集/电影路径
   ▼
-【单集/电影路径】（按代码里的检查顺序）
+【单集/电影路径】（按代码里的检查顺序，热路径全程 0 次 DB 读写）
 flow_<p.flow_id>_enabled ≠ "1"（未启用 / 未配）     → return true   (flow_disabled，不计数)
   ▼
-读取 flow_<p.flow_id>_dims
+读取内存快照中的 flow_<p.flow_id>_dims
   │  键缺失 / JSON 损坏 / 空 {} / 无有效维度          → return true   (allowed_no_dims++)
   ▼
 emby_enabled=0 且 plex_enabled=0                     → return true   (no_backend，不计数)
@@ -131,16 +132,18 @@ emby_enabled=0 且 plex_enabled=0                     → return true   (no_back
   ▼
 tag 端短路：任一已配维度 p.tags[dim] 为空             → return true   (allowed_tag_empty++)
   ▼
-（缓存命中且未过期 → 直接用缓存的副本列表，不发请求）
-按 tmdb_id+季+集 查 Emby（命中即止）→ 否则查 Plex
-  │  （2500ms 软预算只在两次请求之间检查：超了就不发下一枪）
-  │  任一后端请求失败 / 超预算没查完（没轮到下一枪）      → return true   (allowed_error++，不写缓存；
-  │                                                       emby_last_error / plex_last_error 记原因)
-  │  各后端都正常查完、都没有这一集                      → return true   (allowed_not_in_lib++，写缓存)
+纯内存按后端独立的按季/电影 LRU 缓存快路径（两端对称）：
+  │  任意后端命中且副本匹配（在 cache_ttl_sec 内）     → return false  (vetoed++，0 HTTP)
+  │  全部已启用后端均命中短负缓存（在 min(ttl, 60s) 内）→ return true   (allowed_not_in_lib / allowed_no_match)
+  │  存在未命中缓存或短 TTL 已过的后端                 → 并行查未命中后端（按后端+同剧/同片复用 in-flight Promise）
   ▼
-命中（copies 列表非空）：
-  │  逐副本检查：任一副本在全部已配维度上按操作符匹配    → return false  (vetoed++)
-  │  所有副本均不匹配                                  → return true   (allowed_no_match++)
+并行查 Emby / Plex（剧集一次拉整剧并独立写回该后端所有季缓存、清理已消失旧季；复用 tmdbID → seriesID/showKey 缓存）
+  │  （2500ms 软预算在单后端多步请求之间检查：超了就不发下一枪）
+  │  任意一端先命中匹配副本                            → 立刻 return false (vetoed++，不等慢端；慢端后台写各自缓存)
+  │  全部返回仍无匹配，且任一后端失败 / 超预算          → return true   (allowed_error++，失败端不写缓存、成功端照写；
+  │                                                       emby_last_error / plex_last_error 记原因)
+  │  全部后端都正常查完、都没有这一集                   → return true   (allowed_not_in_lib++，写各自内存缓存)
+  │  全部后端都正常查完、有副本但规格均不匹配            → return true   (allowed_no_match++，写各自内存缓存)
   ▼
 dry_run=1：以上 false 路径一律改成 return true（仅 log）
 超过宿主 3s 才走到这里（在途请求拖的）：宿主早已放行 → return true、late++、一条 warn，
@@ -150,12 +153,12 @@ dry_run=1：以上 false 路径一律改成 return true（仅 log）
 前置守卫同单集（flow / dims / backend / tmdb_id，然后区间合法性，最后 tag 空值）
   │  epStart ≤ 0 / epEnd ≤ 0 / epEnd < epStart     → return true   (invalid_range)
   ▼
-缓存快路径：优先读内存，未命中再读 lib_cache_*；全部命中且未过期      → 跳过 HTTP，直接用缓存 copies
-  │  任一集缓存缺失/过期                              → 走 HTTP 批量拉取（一次拉全季）
+纯内存按后端独立的按季 LRU 缓存快路径（与单集共用缓存，两端对称）：
+  │  单端或两端缓存合并已覆盖整包全部集（在 ttl 内）   → 跳过 HTTP，直接 return false
+  │  未覆盖全：短负缓存（<=60s）内的后端沿用缓存，其余并行拉整剧（复用 in-flight + seriesID/showKey 缓存）
   ▼
-HTTP 批量拉取：Emby 优先 → Plex 兜底
-  │  两端均失败 / 超时                                → return true   (allowed_error++)
-  │  拉取成功 → 更新内存缓存并排队保存（与单集路径共享 key 格式）
+HTTP 并行拉整剧（各后端独立写各自按季缓存，任意一端合并后覆盖整包即立刻 return false）：
+  │  失败端不写缓存；若无任何命中且存在后端失败/超时    → return true   (allowed_error++)
   ▼
 逐集构建 bitmap（任一副本全维度匹配 → 标记 have）：
   │  全部集都在库中                                    → return false  (vetoed++)
@@ -184,7 +187,8 @@ dry_run=1：以上 false / bitmap 路径一律改成 return true（仅 log）
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | GET  | `/api/plugins/<id>/api/flows` | `ruleflow.list()` 结果 + 每条 flow 当前配置（`enabled`、`dims`，供 UI 枚举） |
-| GET  | `/api/plugins/<id>/api/stats` | 配置摘要 + 计数器 + last_error |
+| GET  | `/api/plugins/<id>/api/stats` | 配置摘要 + 内存缓存用量 + 计数器 + last_error |
+| POST | `/api/plugins/<id>/api/clear-cache` | 清空纯内存查库缓存与 `tmdbID → seriesID/showKey` 映射 |
 | GET  | `/api/plugins/<id>/api/check?tmdb_id=1429&season=1&episode=8[&tmdb_type=tv&flow_id=...]` | 真实查库 trace（不写缓存）；带 `flow_id` 时输出 `would_decision` + 逐副本逐维比对明细（含 `height_raw`/`bucket`/`format`） |
 | POST | `/api/plugins/<id>/api/check` | mock 注入验证：body `{"mock_copies":[...],"tags":{...},"dims":{...}}`（或 `{"flow_id":"...","tags":{...}}`），完全绕过真实查库，直接计算 `would_decision`/`would_reason` + 逐副本 trace，用于回归验证 |
 | POST | `/api/plugins/<id>/api/save-config` | 批量保存（全局键 + 动态 `flow_*` 键白名单；dims 写入时做维度名+操作符校验+正则合法性校验） |
@@ -231,15 +235,15 @@ dry_run=1：以上 false / bitmap 路径一律改成 return true（仅 log）
 | `late` | 宿主 3s 超时之后插件才得出结果（在途请求拖的）：宿主早已放行，这次结果作废（只写缓存） |
 | `dry_run_would_veto` | dry_run 模式下本应否决的次数 |
 | `batch_partial_filtered` | 合集部分集在库中 → 返回 bitmap 逐集过滤的次数 |
-| `cache_write_fail` | 缓存写入失败次数（config 配额超限等，可观测）。**只在内存里计**，插件重启归零 |
+| `cache_write_fail` | 兼容保留字段（0.4.2 改为纯内存缓存后恒为 `0`） |
 
 `/stats` 的 `errors` 里还有 `emby_last_error` / `emby_last_error_at`、`plex_last_error` / `plex_last_error_at`：**最近一次**请求失败的原因与时间（也是插件配置里的 4 个键）。之后请求成功了也**不会清空**，所以它说明「最近一次出错是什么」，不说明「现在还在出错」——看是否持续故障要对照 `allowed_error` 是否还在涨、`*_last_error_at` 是否还在更新。
 
 ## 注意事项
 
-- **3s 硬超时**：Emby（series 定位 + episode 列表）+ Plex 串行；2500ms 软预算只在请求之间检查，挡不住在途请求（见上文「返回值契约」）。`late` 持续增长需结合媒体库请求与宿主存储耗时排查；不能仅凭它认定媒体库响应慢。
-- **缓存存副本事实列表，不存结论**：缓存 key 为 `lib_cache_<type>_<tmdb_id>_s<季>_e<集>`，value 为该集所有副本的属性列表。命中后按**当前 flow 维度+操作符与种子 tags 现场比对**，同一集可被不同 flow 判出不同结果。外部故障路径**不写缓存**，避免把「暂时查不到」固化。**合集批量路径与单集路径共享同一份 per-episode 缓存**——单集查过的集在合集里直接命中，反过来也一样。
-- **缓存会自己清理，不会撑满配置配额**（需要 FollowCat 提供 `config.delete`；更早的宿主上不清理，同 0.3.x）：后台保存前先清理过期缓存键（按 `cache_ttl_sec`），缓存键总数超过 **300** 就从最旧的删起——给计数器、per-flow 配置留足宿主每插件 500 个键的配额。插件启动时也清一遍；**从 0.3.x 升级后第一次启动会把旧版本留下的缓存键全部删掉**（旧版不清理，可能早已把配额写满，导致计数器和配置都写不进去），并写一个标记键 `cache_gen`（请勿删除，删了下次启动会再整批清一次缓存）。
+- **3s 硬超时**：同时启用 Emby + Plex 时并行查询未命中缓存的后端，任意一端先 100% 确认否决即立刻返回，不被慢/故障的另一端拖累；单后端内的多步请求之间检查 2500ms 软预算，挡不住已发出的在途请求（见上文「返回值契约」）。`late` 持续增长需结合媒体库请求与宿主存储耗时排查；不能仅凭它认定媒体库响应慢。
+- **缓存存副本事实明细，不存结论（纯内存按后端按季 LRU）**：剧集按 `<backend>:tv:<tmdb_id>:s<季>` 存整季逐集副本明细、电影按 `<backend>:movie:<tmdb_id>` 存副本列表，完全在内存维护，不再读写 `plugin_configs`。正命中走 `cache_ttl_sec`（默认 3600s），缺集或规格不匹配走 60 秒短 TTL（防止同波 RSS 重复查库，同时 1 分钟内感知新入库）；超 `cache_max_mb`（默认 10MB、硬上限 256MB）时先清过期项再按 LRU 淘汰。单集与合集共用同一份整剧查询和按季缓存，一次查剧会覆盖写入该后端返回的所有季并清理已消失的旧季；同时内存缓存 `tmdbID → Emby seriesID / Plex showKey`（仅对有集的剧写入，拉分集返回 404/400 或 200 空列表时自动清掉重查）并对同后端同剧/同片并发请求做 in-flight 复用（关闭缓存时不打断并发复用）。单个后端故障只影响该后端写缓存，不影响另一健康后端写入与复用。
+- **配置内存化与计数器延迟落盘**：全局与 per-flow 配置启动时加载到内存，设置页保存后经 `/flows` 等接口即时刷新，并由 30 秒后台分步定时刷新兜底；计数器与 `*_last_error` 在内存累加、延迟约 15 秒后分步落盘，`should_download` 热路径做到 **0 次同步 DB 读写**。注意：停用、升级或容器重启时，最后约 15 秒内尚未落盘的统计增量与最近错误可能丢失（不影响已生效的下载判定）；在「高级配置」里手工修改计数器键的值，下次计数更新时也会被内存值覆盖（需重启插件才按 DB 生效）。升级自 `<= 0.4.1` 时会自动分步清理数据库里残留的旧 `lib_cache_*` 键并写 `cache_gen="3"`。
 - **HTTP rate limit 60/min**：缓存 + per-flow 默认未启用基本可控；高频入库可放大 `cache_ttl_sec`。
 - **fail-open 哲学**：宁可多下一份，也不因 Emby 宕机永久漏下。查 `emby_last_error` / `plex_last_error` 跟踪连续故障。
 - **双端 fail-open**：tag 端（种子标题未解析出某维度）或库端（副本缺某属性）任一端为空 → 该维度不匹配 → 放行方向。绝不会因为某一端缺数据而误否决。
@@ -256,7 +260,7 @@ dry_run=1：以上 false / bitmap 路径一律改成 return true（仅 log）
 | `allowed_no_dims` 计数持续增长 | `flow_<id>_dims` 键缺失或 JSON 格式错误 | 用 `/save-config` API 写入合法 JSON；检查 UI 保存是否成功 |
 | `allowed_tag_empty` 计数增长 | 已配维度在种子 tags 中无值 | 该种子源标题不含此维度信息 → 正常行为（fail-open 方向） |
 | `allowed_error` 计数增长 | Emby/Plex 不可达、返回非 2xx、已启用但没填地址 / 密钥，或查询超了 2500ms 软预算 | 看 `/stats` 的 `emby_last_error` / `plex_last_error`（最近一次失败原因）及 `*_at` 时间；确认网络连通性与配置 |
-| `cache_write_fail` 增长 | config 配额不足 | 缓存最多 300 个键，配额仍满说明别的键太多（per-flow 配置等），或宿主太旧没有 `config.delete`（不清理缓存）：升级 FollowCat，或在管理页删掉旧的 `lib_cache_*` 键 |
+| 内存缓存命中偏低或频繁重查 | `cache_max_mb` 过小触发 LRU 淘汰，或刚入库未满 60 秒短缓存 | 查看 `/stats` 的 `cache.bytes` / `cache.max_bytes`；可适当调大 `cache_max_mb`，或点「清空内存缓存」立即重查 |
 | 用了 `>=` 但仍不匹配 | `>=` 仅限 `resolution` 和 `code_bits` | 其他维度不支持 `>=`，用 `==` 或 `regex` |
 | dry_run 模式下无否决日志 | 查库未命中或维度不匹配 | 用 `/check` API 逐步排查；dry_run 只改变最终返回值，不改变匹配逻辑 |
 
@@ -265,6 +269,14 @@ dry_run=1：以上 false / bitmap 路径一律改成 return true（仅 log）
 - **`should_download` hook**：由主仓提供（v3.5+），本插件注册。宿主在推种前同步调用，读取返回值。
 - **`ruleflow.list()` API**：需 `api.ruleflow.read` 权限，用于 UI 列出所有 flow 以便逐条配置。
 - **通知功能**：自 v3.5 起请走主仓 `internal/notify`（钉钉 / 飞书等），本插件不再涉及通知。
+
+## 0.4.2：纯内存按季 LRU 缓存、零 DB 热路径与并行查询复用
+
+- **纯内存按后端按季缓存 + `cache_max_mb` 容量上限**：查库缓存改为纯内存、Emby/Plex 各自独立按季存储逐集明细（电影按条存），新增配置项 `cache_max_mb`（默认 `10` MB，上限 `256` MB，支持设置页配置与「清空内存缓存」按钮 `POST /clear-cache`），超限时先清过期再按 LRU 淘汰；彻底移除逐集同步读库和 `flushCache` / `activeChecks`（修复高集数合集被宿主 3s 看门狗打断导致 `activeChecks` 永久泄漏的问题）。
+- **正/负缓存分级 TTL**：命中匹配沿用 `cache_ttl_sec`（默认 3600s）；缺集或规格不匹配采用 60 秒短 TTL（`min(cache_ttl_sec, 60)`），兼顾防同波并发击穿与新入库/洗版及时感知。
+- **热路径 0 DB 读写**：配置常驻内存（UI 保存经 `/flows` 立即同步，叠加 30 秒后台分步兜底刷新，后端连接参数变更时自动清缓存）；统计计数器与 `*_last_error` 在内存累加并延迟约 15 秒后分步落盘（插件停用/升级/重启可能丢失最近约 15 秒统计增量，外部手改计数器键也会被运行期内存值覆盖）。
+- **并行双端与查询复用**：同时启用 Emby + Plex 时缓存查验两端对称、冷查并行发出，任意一端先 100% 确认否决即立刻返回（不被慢/故障的另一端拖累，健康端缓存独立写回）；单集与合集共享整剧拉取并整体替换该后端该剧所有季缓存（清除已消失旧季）；内存缓存 `tmdbID → Emby seriesID / Plex showKey`（仅对有集的剧缓存，404/400 或 200 空列表均自动失效重查）；同后端同剧/同片并发请求复用在途 Promise（singleflight，关闭缓存时不打断复用）。
+- **升级清理**：从 `<= 0.4.1` 升级后自动清理 `plugin_configs` 中遗留的 `lib_cache_*` 键（启动同步删前 10 个立释配额，其余后台分步删，避开 10s 入口超时）并写入 `cache_gen="3"`。
 
 ## 0.4.1：查重与缓存保存分离
 
