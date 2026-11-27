@@ -37,7 +37,7 @@
   .frame-wrap{background:#1a1d27;border:1px solid #232733;border-radius:8px;width:min(720px,100%);display:flex;flex-direction:column;overflow:hidden;box-shadow:0 4px 20px rgba(0,0,0,.4);flex:none}
   .frame-wrap .frame-bar{padding:6px 12px;font-size:11px;color:#8a93a6;border-bottom:1px solid #232733;display:flex;justify-content:space-between;align-items:center;gap:10px}
   /* 高度由 host.resize 决定（同生产 PluginIframeHost：初始 400，clamp 200–1500） */
-  .frame-wrap iframe{flex:none;border:0;width:100%;height:400px;display:block;background:#fff}
+  .frame-wrap iframe{flex:none;border:0;width:100%;height:400px;display:block;background:transparent}
   .no-ui{color:#8a93a6;text-align:center;padding:30px;font-size:13px}
 
   footer{background:#13161e;border-top:1px solid #232733;display:flex;flex-direction:column}
@@ -67,6 +67,7 @@
   <span class="pill" id="http-mode">—</span>
   <span class="pill" id="status">loading</span>
   <span class="grow"></span>
+  <button id="theme-toggle" onclick="toggleTheme()">主题：深色</button>
   <button onclick="reloadFrame()">Reload UI</button>
 </header>
 
@@ -356,6 +357,24 @@ async function removeConfig(k) {
 var PLUGIN_SLOT = 'plugin.settings';   // manifest ui.slots 目前只支持这一个
 var SANDBOX_TIMEOUT_MS = 15000;        // 生产 sandboxRequest = axios.create({ timeout: 15000 })
 var iframeHeight = 400;                // 生产 iframeHeight 初值
+var currentTheme = 'dark';             // 同 FollowCat 默认主题（dark | light）
+
+function updateThemeButton() {
+  var btn = $('theme-toggle');
+  if (btn) btn.textContent = currentTheme === 'dark' ? '主题：深色' : '主题：浅色';
+}
+
+function toggleTheme() {
+  currentTheme = currentTheme === 'dark' ? 'light' : 'dark';
+  updateThemeButton();
+  var iframe = $('plugin-iframe');
+  if (iframe) {
+    iframe.style.colorScheme = currentTheme;
+    if (iframe.contentWindow) {
+      iframe.contentWindow.postMessage({ type: 'host.theme', payload: { theme: currentTheme } }, '*');
+    }
+  }
+}
 
 function setIframeHeight(h) {
   iframeHeight = h;
@@ -371,10 +390,11 @@ function initFrame() {
   }
   var iframe = $('plugin-iframe');
   setIframeHeight(400);
-  // 同生产：manifest.entry 形如 "ui/index.html"，剥掉前导 "/" 与 "ui/"；src 带 ?fcSlot=<slot>
+  iframe.style.colorScheme = currentTheme;
+  // 同生产：manifest.entry 形如 "ui/index.html"，剥掉前导 "/" 与 "ui/"；src 带 ?fcSlot=<slot>&fcTheme=<theme>
   var entry = (state.manifest && state.manifest.ui && state.manifest.ui.entry) || 'ui/index.html';
   var file = entry.replace(/^\/+/, '').replace(/^ui\//i, '');
-  var src = '/plugin-ui/' + file + '?fcSlot=' + encodeURIComponent(PLUGIN_SLOT);
+  var src = '/plugin-ui/' + file + '?fcSlot=' + encodeURIComponent(PLUGIN_SLOT) + '&fcTheme=' + encodeURIComponent(currentTheme);
   iframe.src = src;
   $('frame-url').textContent = src;
 }
@@ -496,7 +516,7 @@ window.addEventListener('message', async function (e) {
   try {
     switch (msg.type) {
       case 'fc.init':
-        reply({ pluginId: state.plugin_id, slot: PLUGIN_SLOT });
+        reply({ pluginId: state.plugin_id, slot: PLUGIN_SLOT, theme: currentTheme });
         break;
       case 'api.call':
         reply(await sandboxApiCall(msg.payload.path, msg.payload.body));

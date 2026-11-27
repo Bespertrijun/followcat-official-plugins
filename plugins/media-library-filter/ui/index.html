@@ -6,50 +6,131 @@
 <title>媒体库同类去重器设置</title>
 <script src="/plugin-sdk.js"></script>
 <style>
+  :root,
+  :root[data-theme="light"] {
+    color-scheme: light;
+    --bg: #f5f5f7;
+    --bg-card: #ffffff;
+    --bg-subcard: #f9f9fb;
+    --bg-input: #ffffff;
+    --text: #1d1d1f;
+    --text-heading: #111111;
+    --text-section: #3c3c43;
+    --text-label: #333336;
+    --text-muted: #6e6e73;
+    --text-subtle: #8e8e93;
+    --border: rgba(0, 0, 0, 0.09);
+    --border-input: rgba(0, 0, 0, 0.16);
+    --accent: #007aff;
+    --accent-hover: #0062cc;
+    --accent-ring: rgba(0, 122, 255, 0.18);
+    --btn-sec-bg: #f2f2f7;
+    --btn-sec-hover: #e5e5ea;
+    --btn-sec-text: #1d1d1f;
+    --btn-sec-border: rgba(0, 0, 0, 0.14);
+    --info-bg: #f0f7ff;
+    --info-border: #bae0ff;
+    --info-text: #0b4a8b;
+    --ok-bg: #ecfdf5;
+    --ok-border: #bbf7d0;
+    --ok-text: #047857;
+    --warn-bg: #fffbeb;
+    --warn-border: #fde68a;
+    --warn-text: #92400e;
+    --err-bg: #fef2f2;
+    --err-border: #fecaca;
+    --err-text: #b91c1c;
+  }
+
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --bg: #141416;
+    --bg-card: #1c1c1e;
+    --bg-subcard: #242426;
+    --bg-input: #2c2c2e;
+    --text: #f5f5f7;
+    --text-heading: #ffffff;
+    --text-section: #ebebf5;
+    --text-label: #e5e5ea;
+    --text-muted: #98989d;
+    --text-subtle: #8e8e93;
+    --border: rgba(255, 255, 255, 0.12);
+    --border-input: rgba(255, 255, 255, 0.18);
+    --accent: #0a84ff;
+    --accent-hover: #409cff;
+    --accent-ring: rgba(10, 132, 255, 0.28);
+    --btn-sec-bg: #2c2c2e;
+    --btn-sec-hover: #3a3a3c;
+    --btn-sec-text: #f5f5f7;
+    --btn-sec-border: rgba(255, 255, 255, 0.16);
+    --info-bg: rgba(10, 132, 255, 0.14);
+    --info-border: rgba(10, 132, 255, 0.35);
+    --info-text: #8cc8ff;
+    --ok-bg: rgba(50, 215, 75, 0.14);
+    --ok-border: rgba(50, 215, 75, 0.35);
+    --ok-text: #6ee787;
+    --warn-bg: rgba(255, 159, 10, 0.14);
+    --warn-border: rgba(255, 159, 10, 0.35);
+    --warn-text: #ffd070;
+    --err-bg: rgba(255, 69, 58, 0.14);
+    --err-border: rgba(255, 69, 58, 0.35);
+    --err-text: #ff8a80;
+  }
+
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
   body {
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     font-size: 14px;
-    color: #1a1a1a;
-    background: #f8f9fa;
+    color: var(--text);
+    background: var(--bg);
     padding: 20px;
     line-height: 1.5;
   }
 
-  h2 { font-size: 16px; font-weight: 600; margin-bottom: 16px; color: #111; }
-  h3 { font-size: 13px; font-weight: 600; margin-bottom: 12px; color: #444; text-transform: uppercase; letter-spacing: 0.4px; }
+  h2 { font-size: 16px; font-weight: 600; margin-bottom: 16px; color: var(--text-heading); }
+  h3 { font-size: 13px; font-weight: 600; margin-bottom: 12px; color: var(--text-section); text-transform: uppercase; letter-spacing: 0.4px; }
 
   .card {
-    background: #fff;
-    border: 1px solid #e5e7eb;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
     border-radius: 8px;
     padding: 16px;
     margin-bottom: 16px;
   }
 
+  .divider {
+    border: none;
+    border-top: 1px solid var(--border);
+    margin: 14px 0;
+  }
+
   .field { margin-bottom: 12px; }
-  .field label { display: block; font-weight: 500; margin-bottom: 4px; color: #333; }
+  .field label { display: block; font-weight: 500; margin-bottom: 4px; color: var(--text-label); }
+  .field .secret-note { color: var(--text-muted); font-weight: 400; }
   .field input[type="text"],
   .field input[type="password"],
   .field select {
     width: 100%;
     padding: 7px 10px;
-    border: 1px solid #d1d5db;
+    border: 1px solid var(--border-input);
     border-radius: 6px;
     font-size: 13px;
     outline: none;
     transition: border-color 0.15s;
     font-family: inherit;
-    background: #fff;
+    background: var(--bg-input);
+    color: var(--text);
   }
+  .field input::placeholder { color: var(--text-muted); }
+  .field select option { background: var(--bg-card); color: var(--text); }
   .field input:focus,
-  .field select:focus { border-color: #6366f1; box-shadow: 0 0 0 2px rgba(99,102,241,0.15); }
-  .field .hint { font-size: 12px; color: #6b7280; margin-top: 3px; }
+  .field select:focus { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-ring); }
+  .field .hint { font-size: 12px; color: var(--text-muted); margin-top: 3px; }
 
   .toggle-row { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
-  .toggle-row input[type="checkbox"] { width: 16px; height: 16px; cursor: pointer; flex-shrink: 0; }
-  .toggle-row label { font-weight: 500; color: #333; cursor: pointer; }
+  .toggle-row input[type="checkbox"] { width: 16px; height: 16px; cursor: pointer; flex-shrink: 0; accent-color: var(--accent); }
+  .toggle-row label { font-weight: 500; color: var(--text-label); cursor: pointer; }
 
   .btn {
     display: inline-flex;
@@ -61,13 +142,14 @@
     font-weight: 500;
     cursor: pointer;
     border: none;
+    font-family: inherit;
     transition: opacity 0.15s, background 0.15s;
   }
   .btn:disabled { opacity: 0.5; cursor: not-allowed; }
-  .btn-primary { background: #6366f1; color: #fff; }
-  .btn-primary:hover:not(:disabled) { background: #4f46e5; }
-  .btn-secondary { background: #f3f4f6; color: #374151; border: 1px solid #d1d5db; }
-  .btn-secondary:hover:not(:disabled) { background: #e5e7eb; }
+  .btn-primary { background: var(--accent); color: #fff; }
+  .btn-primary:hover:not(:disabled) { background: var(--accent-hover); }
+  .btn-secondary { background: var(--btn-sec-bg); color: var(--btn-sec-text); border: 1px solid var(--btn-sec-border); }
+  .btn-secondary:hover:not(:disabled) { background: var(--btn-sec-hover); }
 
   .actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 4px; }
 
@@ -82,16 +164,16 @@
     min-height: 40px;
   }
   .status-bar.idle { display: none; }
-  .status-bar.info { background: #eff6ff; color: #1d4ed8; border: 1px solid #bfdbfe; }
-  .status-bar.success { background: #f0fdf4; color: #15803d; border: 1px solid #bbf7d0; }
-  .status-bar.error { background: #fef2f2; color: #b91c1c; border: 1px solid #fecaca; }
+  .status-bar.info { background: var(--info-bg); color: var(--info-text); border: 1px solid var(--info-border); }
+  .status-bar.success { background: var(--ok-bg); color: var(--ok-text); border: 1px solid var(--ok-border); }
+  .status-bar.error { background: var(--err-bg); color: var(--err-text); border: 1px solid var(--err-border); }
 
   .flow-item {
-    border: 1px solid #e5e7eb;
+    border: 1px solid var(--border);
     border-radius: 6px;
     padding: 12px;
     margin-bottom: 12px;
-    background: #f9fafb;
+    background: var(--bg-subcard);
   }
   .flow-head {
     display: flex;
@@ -100,40 +182,40 @@
     gap: 10px;
     margin-bottom: 10px;
   }
-  .flow-name { font-weight: 600; color: #111; word-break: break-all; }
-  .flow-id { font-size: 11px; color: #9ca3af; font-family: "SFMono-Regular", Consolas, monospace; }
+  .flow-name { font-weight: 600; color: var(--text-heading); word-break: break-all; }
+  .flow-id { font-size: 11px; color: var(--text-subtle); font-family: "SFMono-Regular", Consolas, monospace; }
 
   .warning-box {
-    background: #fffbeb;
-    border: 1px solid #fde68a;
-    color: #92400e;
+    background: var(--warn-bg);
+    border: 1px solid var(--warn-border);
+    color: var(--warn-text);
     border-radius: 6px;
     padding: 8px 12px;
     font-size: 12px;
     margin-bottom: 14px;
   }
   .info-box {
-    background: #f0f9ff;
-    border: 1px solid #bae6fd;
-    color: #0c4a6e;
+    background: var(--info-bg);
+    border: 1px solid var(--info-border);
+    color: var(--info-text);
     border-radius: 6px;
     padding: 8px 12px;
     font-size: 12px;
     margin-bottom: 10px;
   }
-  .empty-box { font-size: 13px; color: #6b7280; padding: 8px 0; }
+  .empty-box { font-size: 13px; color: var(--text-muted); padding: 8px 0; }
 
   /* 维度编辑器 */
   .dims-section { margin-top: 12px; }
   .dims-section-label {
     font-size: 11px;
     font-weight: 600;
-    color: #6b7280;
+    color: var(--text-muted);
     text-transform: uppercase;
     letter-spacing: 0.5px;
     margin: 10px 0 6px 0;
     padding-bottom: 4px;
-    border-bottom: 1px solid #e5e7eb;
+    border-bottom: 1px solid var(--border);
   }
 
   .dim-row {
@@ -149,10 +231,11 @@
     height: 15px;
     flex-shrink: 0;
     cursor: pointer;
+    accent-color: var(--accent);
   }
   .dim-row .dim-label {
     font-size: 13px;
-    color: #374151;
+    color: var(--text-label);
     min-width: 80px;
     cursor: pointer;
     user-select: none;
@@ -166,30 +249,34 @@
   }
   .dim-row .dim-controls select {
     padding: 4px 8px;
-    border: 1px solid #d1d5db;
+    border: 1px solid var(--border-input);
     border-radius: 5px;
     font-size: 12px;
     font-family: inherit;
-    background: #fff;
+    background: var(--bg-input);
+    color: var(--text);
     outline: none;
     min-width: 90px;
   }
-  .dim-row .dim-controls select:focus { border-color: #6366f1; }
+  .dim-row .dim-controls select option { background: var(--bg-card); color: var(--text); }
+  .dim-row .dim-controls select:focus { border-color: var(--accent); }
   .dim-row .dim-controls input[type="text"] {
     flex: 1;
     padding: 4px 8px;
-    border: 1px solid #d1d5db;
+    border: 1px solid var(--border-input);
     border-radius: 5px;
     font-size: 12px;
     font-family: "SFMono-Regular", Consolas, monospace;
-    background: #fff;
+    background: var(--bg-input);
+    color: var(--text);
     outline: none;
     min-width: 120px;
   }
-  .dim-row .dim-controls input[type="text"]:focus { border-color: #6366f1; }
+  .dim-row .dim-controls input[type="text"]::placeholder { color: var(--text-muted); }
+  .dim-row .dim-controls input[type="text"]:focus { border-color: var(--accent); }
   .dim-regex-hint {
     font-size: 11px;
-    color: #9ca3af;
+    color: var(--text-subtle);
     margin: -4px 0 6px 23px;
     padding-left: 80px;
   }
@@ -228,12 +315,12 @@
     <div class="hint">末尾不加斜杠</div>
   </div>
   <div class="field">
-    <label for="emby-key">Emby API Key <small style="color:#6b7280;font-weight:400">（加密存储）</small></label>
+    <label for="emby-key">Emby API Key <small class="secret-note">（加密存储）</small></label>
     <input type="password" id="emby-key" autocomplete="off">
     <div class="hint">管理后台 → 高级 → API Keys 申请</div>
   </div>
 
-  <hr style="border:none;border-top:1px solid #e5e7eb;margin:14px 0">
+  <hr class="divider">
 
   <div class="toggle-row">
     <input type="checkbox" id="plex-enabled">
@@ -245,12 +332,12 @@
     <div class="hint">末尾不加斜杠</div>
   </div>
   <div class="field">
-    <label for="plex-token">X-Plex-Token <small style="color:#6b7280;font-weight:400">（加密存储）</small></label>
+    <label for="plex-token">X-Plex-Token <small class="secret-note">（加密存储）</small></label>
     <input type="password" id="plex-token" autocomplete="off">
     <div class="hint">Plex Web → 任一项目 → ⋯ → Get Info → View XML，URL 里的 token 参数</div>
   </div>
 
-  <hr style="border:none;border-top:1px solid #e5e7eb;margin:14px 0">
+  <hr class="divider">
 
   <div class="field">
     <label for="cache-ttl">缓存 TTL（秒）</label>

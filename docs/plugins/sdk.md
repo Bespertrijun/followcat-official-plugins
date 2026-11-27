@@ -1021,9 +1021,10 @@ async function notifyDone(n) {
 <script src="/plugin-sdk.js"></script>
 <script>
   FC.ready().then(function (ctx) {
-    // ctx 仅含 { pluginId, slot }：
+    // ctx 含 { pluginId, slot, theme }：
     //   pluginId —— 当前插件 id（驼峰，注意不是 plugin_id）
     //   slot     —— 当前槽位，目前恒为 "plugin.settings"
+    //   theme    —— 当前宿主主题，"dark" | "light"
     console.log('init', ctx);
   });
 </script>
@@ -1033,7 +1034,8 @@ async function notifyDone(n) {
 
 | 方法 | 返回 | 说明 |
 |------|------|------|
-| `FC.ready()` | `Promise<ctx>` | 等待宿主初始化；`ctx = { pluginId, slot }`（当前**不提供** theme / permissions） |
+| `FC.ready()` | `Promise<ctx>` | 等待宿主初始化；`ctx = { pluginId, slot, theme }`（`theme` 为 `"dark" \| "light"`；当前**不提供** permissions） |
+| `FC.onThemeChange(cb)` | `() => void` | 订阅宿主主题变更（返回取消订阅函数）。宿主切换黑夜/白天模式时实时推送、**不重载 iframe**；同时 SDK 会自动维护 `<html data-theme="dark\|light">`（加载时先同步读 URL 的 `?fcTheme=` 防首帧白闪，再用 `fc.init` 校准），纯 CSS 插件只需按 `:root[data-theme="dark"]` / `:root[data-theme="light"]` 写样式并设 `color-scheme` 即可。建议在 `:root` 下默认定义浅色样式、用 `:root[data-theme="dark"]` 覆写暗色，确保在旧宿主或浏览器命中旧 `/plugin-sdk.js` 缓存（最长 5 分钟）而未设置 `data-theme` 时仍能正常以浅色展示 |
 | `FC.api(path, body)` | `Promise<any>` | 调用插件自身注册的 API（`plugin.registerAPI`），宿主用 pluginToken 代理鉴权；resolve 为回调的返回值。请求形态见下方「`FC.api` 请求规则」 |
 | `FC.config.get(key)` | `Promise<string\|null>` | 读取插件配置：设置过的 key 返回字符串——**secret 项回读 `""`**（脱敏，拿不到明文），普通项原样返回（存的是空串就是 `""`）；**没设置过返回 `null`**。判断「是否已设置」请用 `!== null`，别用 `!== ''`。不传 key 返回整个列表 `[{key, value?, is_secret, updated_at}]`（secret 项和值为空串的项没有 `value` 字段） |
 | `FC.config.put(key, value, isSecret)` | `Promise<{updated: 1}>` | 写入插件配置；每次写都按 `isSecret` 覆盖 secret 标记，`isSecret=true` 仅控制回读脱敏（加密一直开）。key 须匹配 `^[a-zA-Z0-9_.\-]{1,128}$`（且不能是 `__proto__` / `constructor` / `prototype`），value 须是字符串（不传 / `null` 按 `""` 存）、≤ 64 KiB，否则 reject |
@@ -1052,7 +1054,7 @@ async function notifyDone(n) {
 - `path` 可以带 query：`FC.api("/check?tmdb_id=1&season=2")` 的 `?` 前面部分是端点，query 进 `req.query`（`Record<string, string>`，同名 key 取第一个值）。
 - **失败**时 Promise reject 的 `Error.message` 是宿主回的真实原因：回调 `throw` / reject 的内容（如 `Error: boom`；同步 throw 时 goja 会在后面附上出错位置）、`plugin <id> api "/x" not registered`、超时（HTTP 504，`plugin runtime: execution timeout`）、参数校验等，而不是笼统的 `Request failed with status code 500`。例外是**宿主自己的内部错误**（数据库 / 存储出错、宿主 Go panic 等）：插件页只收到一句「宿主内部错误」，详情只记在服务端日志里（`FC.api`、`FC.config.*` 都一样）。
 
-> **iframe 桥就这 7 类消息**（`fc.init` / `api.call` / `config.get` / `config.put` / `config.delete` / `host.notify` / `host.resize`）。`data.*` 加密 blob、`config.list`、`http.*`、`crypto.*`、`anime`/`task`/`ruleflow`/`ptsite`/`douban` 等**都不在 iframe 桥里**——它们只活在 `index.js` 的 goja 运行时。
+> **iframe 桥就这 7 类 RPC 消息**（`fc.init` / `api.call` / `config.get` / `config.put` / `config.delete` / `host.notify` / `host.resize`）和 **1 类宿主主动推送事件**（`host.theme`，无 `id`，宿主切换主题时推送 `{type: "host.theme", payload: {theme}}`）。`data.*` 加密 blob、`config.list`、`http.*`、`crypto.*`、`anime`/`task`/`ruleflow`/`ptsite`/`douban` 等**都不在 iframe 桥里**——它们只活在 `index.js` 的 goja 运行时。
 >
 > 而且 iframe 的 CSP 是 `connect-src 'none'`，连 `fetch`/`XHR` 都被禁，UI **不能**直接打 sandbox REST（`/api/plugins/<id>/sandbox/*`）。要在 UI 里读写 blob 或调上述能力，正确做法是在 `index.js` 里用 `plugin.registerAPI` 包一个端点，内部用 `data.*` / `http.*` 完成，UI 再通过 `FC.api` 调它：
 >

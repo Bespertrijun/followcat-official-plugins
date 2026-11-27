@@ -46,11 +46,11 @@ DEVRT_NOTIFY_CHANNELS=0 python devrt/server.py cookiecloud
 
 | 区域 | 说明 |
 |------|------|
-| Header | 插件名 / 版本 / http 模式 / 加载状态 |
+| Header | 插件名 / 版本 / http 模式 / 加载状态 / 深浅色主题切换（实时向 iframe 推送 `host.theme`）/ Reload UI |
 | Hooks | 每个已注册 hook 一个按钮，点击直接用示例 payload 触发；也可以展开 "编辑 payload" 用自定义 JSON。示例 payload 按宿主真实形态（`anime_id` / `task_id` 是数字、`media_id` 是字符串、`aka` 是数组、`tags.hdr` / `tags.dv` 是字符串，没识别到是 `"无"`；sdk.md 里标 `?` 的字段也恒在，没值时是零值）。`should_download` 触发后回显宿主会得出的裁决（按**导出后的值**算，同生产）：`allow` / `veto` / `have_bitmap`，超时、抛错或返回值导不出来时标 `fail_open`。`on_notify_action` / `on_bot_command` 见下文「模拟点击与命令」 |
 | Plugin APIs | 列出所有 `plugin.registerAPI` 的端点，点击立即调用 |
 | Config | 当前 mock 配置（明文，secret 项标 `secret`）；「保存配置」只提交改过的键和新增项（没动的键不回写，不会把插件后端同时 `config.set` 的值冲回旧值）；`×` 走显式删除接口，立即生效；新增项可勾选标记为 secret |
-| Stage | iframe 加载 manifest `ui.entry`（缺省 `ui/index.html`），`sandbox="allow-scripts"`、src 带 `?fcSlot=plugin.settings`；高度由 `FC.resize` 决定（初始 400，clamp 200–1500） |
+| Stage | iframe 加载 manifest `ui.entry`（缺省 `ui/index.html`），`sandbox="allow-scripts"`、src 带 `?fcSlot=plugin.settings&fcTheme=<dark\|light>`；高度由 `FC.resize` 决定（初始 400，clamp 200–1500） |
 | Logs | SSE 实时流，`log.info / warn / error` 均会在此显示 |
 
 ## 模拟点击与命令（`on_notify_action` / `on_bot_command`）
@@ -114,7 +114,7 @@ devrt 没有 Telegram：触发这两个 hook 就是「假装用户点了按钮 /
   - 消息 `{id, type, payload}`，类型 `fc.init` / `api.call` / `config.get` / `config.put` / `config.delete` /
     `host.notify` / `host.resize`；回复 `{id, result}` 或 `{id, error: {message}}`；按 `event.source === iframe.contentWindow`
     校验身份；未知类型回 `unknown message type: <type>`。
-  - `fc.init` → `{pluginId, slot}`，slot 恒为 `"plugin.settings"`；没有宿主主动推送的消息。
+  - `fc.init` → `{pluginId, slot, theme}`，slot 恒为 `"plugin.settings"`，`theme` 为 `"dark"` 或 `"light"`；宿主切换主题时主动推送 `{type: "host.theme", payload: {theme}}`（无 `id`，不重载 iframe）。
   - `api.call`：`body` 为 `undefined` → GET、`req.body` 为 `""`；否则 POST：对象/数组 JSON 序列化，字符串原样，
     `null` / `""` / `0` / `false` 不发请求体（`req.body` 为 `""`），其它原始值转字符串。path 里的 `?a=1`
     进 `req.query`（每个 key 取第一个值），`?` 前面的部分是 action。失败时回后端信封里的 message

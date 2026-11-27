@@ -270,6 +270,11 @@ dry_run=1：以上 false / bitmap 路径一律改成 return true（仅 log）
 - **`ruleflow.list()` API**：需 `api.ruleflow.read` 权限，用于 UI 列出所有 flow 以便逐条配置。
 - **通知功能**：自 v3.5 起请走主仓 `internal/notify`（钉钉 / 飞书等），本插件不再涉及通知。
 
+## 0.4.3：设置页跟随宿主深色/浅色主题
+
+- 设置页样式改为主题变量，自动跟随 FollowCat 宿主的深色/浅色模式实时切换（切换不刷新 iframe，保留未保存的表单输入）。
+- 在尚未支持主题推送的旧宿主上，默认按浅色显示。
+
 ## 0.4.2：纯内存按季 LRU 缓存、零 DB 热路径与并行查询复用
 
 - **纯内存按后端按季缓存 + `cache_max_mb` 容量上限**：查库缓存改为纯内存、Emby/Plex 各自独立按季存储逐集明细（电影按条存），新增配置项 `cache_max_mb`（默认 `10` MB，上限 `256` MB，支持设置页配置与「清空内存缓存」按钮 `POST /clear-cache`），超限时先清过期再按 LRU 淘汰；彻底移除逐集同步读库和 `flushCache` / `activeChecks`（修复高集数合集被宿主 3s 看门狗打断导致 `activeChecks` 永久泄漏的问题）。

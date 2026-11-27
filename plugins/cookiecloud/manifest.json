@@ -1,6 +1,6 @@
 {
   "name": "cookiecloud",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "author": "FollowCat",
   "description": "从自建 CookieCloud 同步浏览器 cookie 到 PT 站凭据与豆瓣 Cookie：按 RSS 域名匹配，只写变了的，可定时自动同步",
   "source_url": "https://plugins.followcat.io/cookiecloud",
